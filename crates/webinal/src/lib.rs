@@ -1,9 +1,9 @@
 //! Wiring: browser, page, frame.
 
 use anyhow::{Context, Result};
-use wm_cdp::{Chromium, Client};
-use wm_frame::{Frame, Viewport};
-use wm_page::Page;
+use wb_cdp::{Chromium, Client};
+use wb_frame::{Frame, Viewport};
+use wb_page::Page;
 
 /// Launch a browser, render one URL, and return the resulting frame.
 ///

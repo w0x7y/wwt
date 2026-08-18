@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::{Duration, Instant, sleep};
-use wm_cdp::Client;
-use wm_frame::{CssRect, Style, TextRun, Viewport};
+use wb_cdp::Client;
+use wb_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 

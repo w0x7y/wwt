@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use wm_frame::{CellPos, Frame, Style};
+use wb_frame::{CellPos, Frame, Style};
 
 /// Write the whole frame, leaving the terminal with default attributes.
 pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
@@ -54,7 +54,7 @@ fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wm_frame::{CellSize, CssRect, Frame, GridSize, Rgb, Style, TextRun, Viewport};
+    use wb_frame::{CellSize, CssRect, Frame, GridSize, Rgb, Style, TextRun, Viewport};
 
     fn vp() -> Viewport {
         Viewport::new(GridSize { cols: 10, rows: 2 }, CellSize { w: 10, h: 20 })

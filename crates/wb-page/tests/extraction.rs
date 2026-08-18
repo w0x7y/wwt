@@ -1,6 +1,6 @@
-use wm_cdp::{Chromium, Client};
-use wm_frame::{CellSize, GridSize, Viewport};
-use wm_page::Page;
+use wb_cdp::{Chromium, Client};
+use wb_frame::{CellSize, GridSize, Viewport};
+use wb_page::Page;
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -64,14 +64,14 @@ async fn carries_color_and_weight_through() {
     let runs = open(&h, "simple.html").await.extract().await.expect("extract");
 
     let heading = runs.iter().find(|r| r.text == "Heading").expect("heading run");
-    assert_eq!(heading.style.fg, wm_frame::Rgb { r: 255, g: 0, b: 0 });
+    assert_eq!(heading.style.fg, wb_frame::Rgb { r: 255, g: 0, b: 0 });
     assert!(heading.style.bold, "font-weight 700 is bold");
 
     let para = runs
         .iter()
         .find(|r| r.text == "First paragraph.")
         .expect("paragraph run");
-    assert_eq!(para.style.fg, wm_frame::Rgb { r: 0, g: 0, b: 255 });
+    assert_eq!(para.style.fg, wb_frame::Rgb { r: 0, g: 0, b: 255 });
     assert!(!para.style.bold);
 }
 

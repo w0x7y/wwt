@@ -11,15 +11,15 @@ use tokio::time::{Duration, timeout};
 const CANDIDATES: &[&str] = &["chromium", "chromium-browser", "google-chrome-stable"];
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Locate a Chromium binary. `WEBMINAL_CHROMIUM` wins if set.
+/// Locate a Chromium binary. `WEBINAL_CHROMIUM` wins if set.
 ///
 /// We never download a browser; an absent one is a clear error with an
 /// actionable message, per spec section 8.
 pub fn find_chromium() -> Result<PathBuf> {
-    if let Ok(explicit) = std::env::var("WEBMINAL_CHROMIUM") {
+    if let Ok(explicit) = std::env::var("WEBINAL_CHROMIUM") {
         let path = PathBuf::from(&explicit);
         if !path.is_file() {
-            bail!("WEBMINAL_CHROMIUM is set to {explicit}, which is not a file");
+            bail!("WEBINAL_CHROMIUM is set to {explicit}, which is not a file");
         }
         return Ok(path);
     }
@@ -36,7 +36,7 @@ pub fn find_chromium() -> Result<PathBuf> {
 
     Err(anyhow!(
         "no Chromium found. Install one (`sudo pacman -S chromium`) or set \
-         WEBMINAL_CHROMIUM to the absolute path of a Chromium binary."
+         WEBINAL_CHROMIUM to the absolute path of a Chromium binary."
     ))
 }
 

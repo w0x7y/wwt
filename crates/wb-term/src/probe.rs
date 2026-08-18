@@ -1,7 +1,7 @@
 //! Measuring the terminal, which decides the CSS viewport we hand Chromium.
 
 use anyhow::{Context, Result};
-use wm_frame::{CellSize, GridSize};
+use wb_frame::{CellSize, GridSize};
 
 /// Used when the terminal will not tell us its pixel dimensions. Roughly a
 /// 10pt monospace cell; wrong but usable, and the user can override it.

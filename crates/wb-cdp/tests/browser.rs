@@ -2,7 +2,7 @@
 //! workspace that need one.
 
 use serde_json::json;
-use wm_cdp::{Chromium, Client};
+use wb_cdp::{Chromium, Client};
 
 #[tokio::test]
 async fn launches_chromium_and_reports_its_version() {

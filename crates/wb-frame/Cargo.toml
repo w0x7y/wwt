@@ -1,5 +1,5 @@
 [package]
-name = "wm-frame"
+name = "wb-frame"
 edition.workspace = true
 version.workspace = true
 

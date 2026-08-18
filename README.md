@@ -1,4 +1,4 @@
-# Webminal
+# Webinal
 
 A terminal web browser in Rust. It drives a real headless Chromium over the
 Chrome DevTools Protocol and renders pages into the terminal grid: crisp text
@@ -10,14 +10,14 @@ Navigation, input, tabs, and pixel mode are M2 through M5.
 ## Requirements
 
 - Rust 1.97+
-- Chromium (`sudo pacman -S chromium`), or `WEBMINAL_CHROMIUM` set to a
+- Chromium (`sudo pacman -S chromium`), or `WEBINAL_CHROMIUM` set to a
   Chromium binary
 - A terminal that reports its pixel dimensions; Kitty is the development
   target
 
 ## Usage
 
-    cargo run -p webminal -- https://example.com
+    cargo run -p webinal -- https://example.com
 
 Press `q` to quit.
 
@@ -25,13 +25,13 @@ Press `q` to quit.
 
 | Crate | Responsibility |
 |---|---|
-| `wm-frame` | Coordinate model and the cell grid. No I/O. |
-| `wm-cdp` | Chromium launcher and CDP client. |
-| `wm-page` | Text-run extraction from a live page. |
-| `wm-term` | Terminal probing and rendering. |
-| `webminal` | The binary. |
+| `wb-frame` | Coordinate model and the cell grid. No I/O. |
+| `wb-cdp` | Chromium launcher and CDP client. |
+| `wb-page` | Text-run extraction from a live page. |
+| `wb-term` | Terminal probing and rendering. |
+| `webinal` | The binary. |
 
 ## Documentation
 
-- Design: `docs/superpowers/specs/2026-08-19-webminal-design.md`
-- M1 plan: `docs/superpowers/plans/2026-08-19-webminal-m1-walking-skeleton.md`
+- Design: `docs/superpowers/specs/2026-08-19-webinal-design.md`
+- M1 plan: `docs/superpowers/plans/2026-08-19-webinal-m1-walking-skeleton.md`

@@ -1,10 +1,10 @@
 [package]
-name = "wm-term"
+name = "wb-term"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wm-frame = { path = "../wm-frame" }
+wb-frame = { path = "../wb-frame" }
 anyhow.workspace = true
 crossterm.workspace = true
 rustix.workspace = true

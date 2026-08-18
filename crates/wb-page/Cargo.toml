@@ -1,11 +1,11 @@
 [package]
-name = "wm-page"
+name = "wb-page"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wm-cdp = { path = "../wm-cdp" }
-wm-frame = { path = "../wm-frame" }
+wb-cdp = { path = "../wb-cdp" }
+wb-frame = { path = "../wb-frame" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

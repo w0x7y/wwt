@@ -1,5 +1,5 @@
 [package]
-name = "wm-cdp"
+name = "wb-cdp"
 edition.workspace = true
 version.workspace = true
 

@@ -1,4 +1,4 @@
-# Webminal — Design
+# Webinal — Design
 
 **Date:** 2026-08-19
 **Status:** Approved, pre-implementation
@@ -122,14 +122,14 @@ A Cargo workspace, split so the difficult logic is pure and testable.
 
 | Crate | Purpose | Depends on |
 |---|---|---|
-| `wm-frame` | The `Frame` type and all coordinate math: cell grid, styled cells, interactive-box list, compositing, elision, hit-testing. **Zero I/O.** | none |
-| `wm-cdp` | CDP transport: websocket, request/response correlation, typed commands, event subscription, target lifecycle | tokio, tungstenite |
-| `wm-page` | One tab: owns the injected script, extracts into a `Frame`, dispatches input to the page | `wm-cdp`, `wm-frame` |
-| `wm-term` | Terminal I/O: cell-size probe, grid diffing and flush, Kitty graphics protocol, key/mouse decoding | crossterm |
-| `wm-ui` | Chrome: tab bar, statusline, command palette, hint overlay, modal state machine | `wm-frame`, `wm-term` |
-| `webminal` | Binary: session and tab management, config, keymap, wiring | all |
+| `wb-frame` | The `Frame` type and all coordinate math: cell grid, styled cells, interactive-box list, compositing, elision, hit-testing. **Zero I/O.** | none |
+| `wb-cdp` | CDP transport: websocket, request/response correlation, typed commands, event subscription, target lifecycle | tokio, tungstenite |
+| `wb-page` | One tab: owns the injected script, extracts into a `Frame`, dispatches input to the page | `wb-cdp`, `wb-frame` |
+| `wb-term` | Terminal I/O: cell-size probe, grid diffing and flush, Kitty graphics protocol, key/mouse decoding | crossterm |
+| `wm-ui` | Chrome: tab bar, statusline, command palette, hint overlay, modal state machine | `wb-frame`, `wb-term` |
+| `webinal` | Binary: session and tab management, config, keymap, wiring | all |
 
-`wm-frame` having no I/O is deliberate: snapping, occlusion, elision, and hit-testing
+`wb-frame` having no I/O is deliberate: snapping, occlusion, elision, and hit-testing
 are testable with plain unit tests and no browser in the loop.
 
 ### The Frame
@@ -144,7 +144,7 @@ The central type. Every rendering mode produces one, and the renderer consumes i
 
 ### CDP client: hand-rolled
 
-We write `wm-cdp` rather than adopting `chromiumoxide`. The slice of CDP we need is
+We write `wb-cdp` rather than adopting `chromiumoxide`. The slice of CDP we need is
 narrow and unusual — `Runtime.addBinding`, `Page.startScreencast`, and raw
 `Input.dispatchKeyEvent` with exact `windowsVirtualKeyCode` values — and a
 page-level abstraction fights us on precisely those, while its generated surface is
@@ -191,7 +191,7 @@ events arrive as messages on one `select!`. There are no locks around the frame,
 a hung page cannot freeze the UI — the statusline marks that tab stalled while other
 tabs stay usable.
 
-**Rendering is diffed.** `wm-page` produces a new `Frame`; the renderer diffs it
+**Rendering is diffed.** `wb-page` produces a new `Frame`; the renderer diffs it
 against the last presented frame and emits escape sequences only for changed cells.
 A page where one counter ticks costs a handful of bytes per update.
 
@@ -241,7 +241,7 @@ automatically, and clicking away drops out of it.
 ## 7. Sessions and tabs
 
 One Chromium process with a persistent `--user-data-dir` at
-`~/.local/share/webminal/profile`. This is what provides durable logins, and OAuth
+`~/.local/share/webinal/profile`. This is what provides durable logins, and OAuth
 redirects work because it is a real browser with a real cookie jar.
 
 Each tab is a CDP target. Only the foreground tab holds an active extraction
@@ -270,21 +270,21 @@ degrades to stale-but-labeled, never to empty.
   the default.
 - **No Chromium installed.** Detected at startup with a clear prompt to either point
   at a system binary via config or fetch a pinned Chrome-for-Testing build into
-  `~/.local/share/webminal/`. Never a silent download.
+  `~/.local/share/webinal/`. Never a silent download.
 - **Too many tabs.** Background targets beyond a configurable limit are closed while
   their URL and scroll offset remain in the session, and are transparently restored
   on switch.
 
 ## 9. Testing
 
-- **`wm-frame`: unit and property tests.** All subtle logic lives here and needs no
+- **`wb-frame`: unit and property tests.** All subtle logic lives here and needs no
   browser. The property worth asserting: `cell -> css -> cell` is the identity for
   every cell in the grid at every zoom level. Most coordinate bugs die there.
 - **Extraction: golden tests.** Fixture HTML served by a local server, driven through
   real headless Chromium, with the resulting cell grid asserted against a checked-in
   text snapshot. These snapshots are ASCII art of the rendered page; they diff well in
   review and are the tests that catch pages rendering wrong.
-- **Input: fake transport.** `wm-cdp` sits behind a trait; a recording fake asserts
+- **Input: fake transport.** `wb-cdp` sits behind a trait; a recording fake asserts
   that a hint label produces the right `dispatchMouseEvent` coordinates and that the
   keymap emits a coherent quad across a table of keys.
 - **End-to-end: a handful, over a PTY.** Spawn the real binary against fixtures, send

@@ -668,16 +668,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
-name = "webminal"
+name = "wb-cdp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "wb-frame"
+version = "0.1.0"
+
+[[package]]
+name = "wb-page"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wb-cdp",
+ "wb-frame",
+]
+
+[[package]]
+name = "wb-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "rustix",
+ "wb-frame",
+]
+
+[[package]]
+name = "webinal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
  "tokio",
- "wm-cdp",
- "wm-frame",
- "wm-page",
- "wm-term",
+ "wb-cdp",
+ "wb-frame",
+ "wb-page",
+ "wb-term",
 ]
 
 [[package]]
@@ -715,45 +754,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "wm-cdp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures-util",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "wm-frame"
-version = "0.1.0"
-
-[[package]]
-name = "wm-page"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "wm-cdp",
- "wm-frame",
-]
-
-[[package]]
-name = "wm-term"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "rustix",
- "wm-frame",
 ]
 
 [[package]]

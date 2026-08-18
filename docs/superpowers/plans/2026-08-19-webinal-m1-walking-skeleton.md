@@ -1,14 +1,14 @@
-# Webminal M1 — Walking Skeleton Implementation Plan
+# Webinal M1 — Walking Skeleton Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `webminal <url>` launches headless Chromium, sizes its viewport to the terminal grid, extracts every text run's layout box, paints them into the cell grid, and quits on `q`.
+**Goal:** `webinal <url>` launches headless Chromium, sizes its viewport to the terminal grid, extracts every text run's layout box, paints them into the cell grid, and quits on `q`.
 
-**Architecture:** A Cargo workspace. `wm-frame` owns all coordinate math and the cell grid with zero I/O, so the subtle logic is unit-testable without a browser. `wm-cdp` is a hand-rolled CDP client over a websocket. `wm-page` injects an extraction script and parses its output into `TextRun`s. `wm-term` probes cell size and writes a `Frame` to a sink. The `webminal` binary wires them together behind one testable `render_url` function.
+**Architecture:** A Cargo workspace. `wb-frame` owns all coordinate math and the cell grid with zero I/O, so the subtle logic is unit-testable without a browser. `wb-cdp` is a hand-rolled CDP client over a websocket. `wb-page` injects an extraction script and parses its output into `TextRun`s. `wb-term` probes cell size and writes a `Frame` to a sink. The `webinal` binary wires them together behind one testable `render_url` function.
 
 **Tech Stack:** Rust 2024 edition, tokio, tokio-tungstenite, serde/serde_json, crossterm, rustix, anyhow. Chromium 151 as an external process.
 
-**Spec:** `docs/superpowers/specs/2026-08-19-webminal-design.md` — read spec sections 3, 4, and 5 before starting. This plan implements milestone M1 only.
+**Spec:** `docs/superpowers/specs/2026-08-19-webinal-design.md` — read spec sections 3, 4, and 5 before starting. This plan implements milestone M1 only.
 
 ## Global Constraints
 
@@ -18,8 +18,8 @@
   `serde = "1.0"` (feature `derive`), `serde_json = "1.0"`, `crossterm = "0.29"`,
   `rustix = "1.1"` (feature `termios`), `anyhow = "1.0"`, `thiserror = "2.0"`,
   `tempfile = "3"` (dev-dependency).
-- `wm-frame` has **no I/O and no dependencies**. If a task tempts you to add one, the design is wrong — stop and ask.
-- Chromium is located via the `WEBMINAL_CHROMIUM` environment variable, falling back to the first of `chromium`, `chromium-browser`, `google-chrome-stable` found on `PATH`. Never download anything.
+- `wb-frame` has **no I/O and no dependencies**. If a task tempts you to add one, the design is wrong — stop and ask.
+- Chromium is located via the `WEBINAL_CHROMIUM` environment variable, falling back to the first of `chromium`, `chromium-browser`, `google-chrome-stable` found on `PATH`. Never download anything.
 - All coordinate conversions go through `Viewport`. No task may open-code a division by cell width or height.
 - Every task ends with a passing `cargo test --workspace` and a commit.
 
@@ -39,14 +39,14 @@ These are scoped to later milestones. Recording them so an implementer does not 
 
 **Files:**
 - Create: `Cargo.toml` (workspace root)
-- Create: `crates/wm-frame/Cargo.toml`
-- Create: `crates/wm-frame/src/lib.rs`
-- Create: `crates/wm-frame/src/geom.rs`
-- Test: `crates/wm-frame/src/geom.rs` (inline `#[cfg(test)]` module)
+- Create: `crates/wb-frame/Cargo.toml`
+- Create: `crates/wb-frame/src/lib.rs`
+- Create: `crates/wb-frame/src/geom.rs`
+- Test: `crates/wb-frame/src/geom.rs` (inline `#[cfg(test)]` module)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `wm_frame::geom::{CellSize, GridSize, CellPos, CssPoint, CssRect, Viewport}`.
+- Produces: `wb_frame::geom::{CellSize, GridSize, CellPos, CssPoint, CssRect, Viewport}`.
   `Viewport::new(grid: GridSize, cell: CellSize) -> Viewport`,
   `Viewport::css_width(&self) -> u32`, `Viewport::css_height(&self) -> u32`,
   `Viewport::to_cell(&self, p: CssPoint) -> Option<CellPos>`,
@@ -59,7 +59,7 @@ Create `Cargo.toml`:
 ```toml
 [workspace]
 resolver = "3"
-members = ["crates/wm-frame"]
+members = ["crates/wb-frame"]
 
 [workspace.package]
 edition = "2024"
@@ -78,18 +78,18 @@ thiserror = "2.0"
 tempfile = "3"
 ```
 
-Create `crates/wm-frame/Cargo.toml`:
+Create `crates/wb-frame/Cargo.toml`:
 
 ```toml
 [package]
-name = "wm-frame"
+name = "wb-frame"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
 ```
 
-Create `crates/wm-frame/src/lib.rs`:
+Create `crates/wb-frame/src/lib.rs`:
 
 ```rust
 pub mod geom;
@@ -97,7 +97,7 @@ pub mod geom;
 
 - [ ] **Step 2: Write the failing tests**
 
-Create `crates/wm-frame/src/geom.rs` containing only this test module for now:
+Create `crates/wb-frame/src/geom.rs` containing only this test module for now:
 
 ```rust
 #[cfg(test)]
@@ -176,12 +176,12 @@ mod tests {
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: FAIL to compile — `cannot find type Viewport in this scope` and similar.
 
 - [ ] **Step 4: Write the implementation**
 
-Prepend to `crates/wm-frame/src/geom.rs`, above the test module:
+Prepend to `crates/wb-frame/src/geom.rs`, above the test module:
 
 ```rust
 //! The coordinate model. See spec section 3.
@@ -313,13 +313,13 @@ impl Viewport {
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: PASS, 5 tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/wm-frame
+git add Cargo.toml Cargo.lock crates/wb-frame
 git commit -m "feat(frame): add the cell/CSS coordinate model"
 ```
 
@@ -328,23 +328,23 @@ git commit -m "feat(frame): add the cell/CSS coordinate model"
 ### Task 2: Cells, the frame grid, and painting a text run
 
 **Files:**
-- Create: `crates/wm-frame/src/cell.rs`
-- Create: `crates/wm-frame/src/run.rs`
-- Create: `crates/wm-frame/src/frame.rs`
-- Modify: `crates/wm-frame/src/lib.rs`
-- Test: inline `#[cfg(test)]` module in `crates/wm-frame/src/frame.rs`
+- Create: `crates/wb-frame/src/cell.rs`
+- Create: `crates/wb-frame/src/run.rs`
+- Create: `crates/wb-frame/src/frame.rs`
+- Modify: `crates/wb-frame/src/lib.rs`
+- Test: inline `#[cfg(test)]` module in `crates/wb-frame/src/frame.rs`
 
 **Interfaces:**
 - Consumes: `Viewport`, `GridSize`, `CellPos`, `CssRect` from Task 1.
-- Produces: `wm_frame::cell::{Rgb, Style, Cell}`, `wm_frame::run::TextRun`,
-  `wm_frame::frame::Frame` with `Frame::new(GridSize) -> Frame`,
+- Produces: `wb_frame::cell::{Rgb, Style, Cell}`, `wb_frame::run::TextRun`,
+  `wb_frame::frame::Frame` with `Frame::new(GridSize) -> Frame`,
   `Frame::grid(&self) -> GridSize`, `Frame::cell(&self, CellPos) -> Option<&Cell>`,
   `Frame::paint_run(&mut self, &Viewport, &TextRun)`,
   `Frame::row_text(&self, u16) -> String`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `crates/wm-frame/src/frame.rs` containing only this test module for now:
+Create `crates/wb-frame/src/frame.rs` containing only this test module for now:
 
 ```rust
 #[cfg(test)]
@@ -447,12 +447,12 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: FAIL to compile — `Frame`, `TextRun`, `Style` not found.
 
 - [ ] **Step 3: Write the cell and run types**
 
-Create `crates/wm-frame/src/cell.rs`:
+Create `crates/wb-frame/src/cell.rs`:
 
 ```rust
 /// A 24-bit color. Terminals that cannot do truecolor are M5's problem.
@@ -500,7 +500,7 @@ impl Default for Cell {
 }
 ```
 
-Create `crates/wm-frame/src/run.rs`:
+Create `crates/wb-frame/src/run.rs`:
 
 ```rust
 use crate::cell::Style;
@@ -525,7 +525,7 @@ pub struct TextRun {
 }
 ```
 
-Update `crates/wm-frame/src/lib.rs`:
+Update `crates/wb-frame/src/lib.rs`:
 
 ```rust
 pub mod cell;
@@ -541,7 +541,7 @@ pub use run::TextRun;
 
 - [ ] **Step 4: Write the frame implementation**
 
-Prepend to `crates/wm-frame/src/frame.rs`, above the test module:
+Prepend to `crates/wb-frame/src/frame.rs`, above the test module:
 
 ```rust
 use crate::cell::Cell;
@@ -675,13 +675,13 @@ impl Frame {
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: PASS, 13 tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/wm-frame
+git add crates/wb-frame
 git commit -m "feat(frame): add cells, text runs, and baseline-snapped painting"
 ```
 
@@ -690,8 +690,8 @@ git commit -m "feat(frame): add cells, text runs, and baseline-snapped painting"
 ### Task 3: Painter's algorithm for contested cells
 
 **Files:**
-- Modify: `crates/wm-frame/src/frame.rs` (the `paint_run` write loop)
-- Test: inline `#[cfg(test)]` module in `crates/wm-frame/src/frame.rs`
+- Modify: `crates/wb-frame/src/frame.rs` (the `paint_run` write loop)
+- Test: inline `#[cfg(test)]` module in `crates/wb-frame/src/frame.rs`
 
 **Interfaces:**
 - Consumes: `Frame::paint_run` from Task 2.
@@ -701,7 +701,7 @@ git commit -m "feat(frame): add cells, text runs, and baseline-snapped painting"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append these tests inside the existing `mod tests` in `crates/wm-frame/src/frame.rs`:
+Append these tests inside the existing `mod tests` in `crates/wb-frame/src/frame.rs`:
 
 ```rust
     #[test]
@@ -757,7 +757,7 @@ Append these tests inside the existing `mod tests` in `crates/wm-frame/src/frame
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: FAIL — `a_lower_stack_does_not_overwrite` and
 `a_blocked_run_still_paints_its_uncontested_cells` fail, because painting is
 currently unconditional. `assertion failed: left: "aaBB"` or similar.
@@ -806,13 +806,13 @@ with:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-frame`
+Run: `cargo test -p wb-frame`
 Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/wm-frame
+git add crates/wb-frame
 git commit -m "feat(frame): resolve contested cells with painter's algorithm"
 ```
 
@@ -821,15 +821,15 @@ git commit -m "feat(frame): resolve contested cells with painter's algorithm"
 ### Task 4: Probing the terminal's cell size
 
 **Files:**
-- Create: `crates/wm-term/Cargo.toml`
-- Create: `crates/wm-term/src/lib.rs`
-- Create: `crates/wm-term/src/probe.rs`
+- Create: `crates/wb-term/Cargo.toml`
+- Create: `crates/wb-term/src/lib.rs`
+- Create: `crates/wb-term/src/probe.rs`
 - Modify: `Cargo.toml` (workspace members)
-- Test: inline `#[cfg(test)]` module in `crates/wm-term/src/probe.rs`
+- Test: inline `#[cfg(test)]` module in `crates/wb-term/src/probe.rs`
 
 **Interfaces:**
-- Consumes: `wm_frame::{CellSize, GridSize}`.
-- Produces: `wm_term::probe::{WinSize, DEFAULT_CELL, cell_size_from, probe}`.
+- Consumes: `wb_frame::{CellSize, GridSize}`.
+- Produces: `wb_term::probe::{WinSize, DEFAULT_CELL, cell_size_from, probe}`.
   `WinSize { cols: u16, rows: u16, xpixel: u16, ypixel: u16 }`,
   `cell_size_from(ws: WinSize) -> Option<CellSize>`,
   `probe() -> anyhow::Result<(GridSize, CellSize)>`.
@@ -838,32 +838,32 @@ The syscall is separated from the arithmetic so the arithmetic is testable witho
 
 - [ ] **Step 1: Create the crate**
 
-Create `crates/wm-term/Cargo.toml`:
+Create `crates/wb-term/Cargo.toml`:
 
 ```toml
 [package]
-name = "wm-term"
+name = "wb-term"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wm-frame = { path = "../wm-frame" }
+wb-frame = { path = "../wb-frame" }
 anyhow.workspace = true
 crossterm.workspace = true
 rustix.workspace = true
 ```
 
-Create `crates/wm-term/src/lib.rs`:
+Create `crates/wb-term/src/lib.rs`:
 
 ```rust
 pub mod probe;
 ```
 
-Add `"crates/wm-term"` to `members` in the workspace `Cargo.toml`.
+Add `"crates/wb-term"` to `members` in the workspace `Cargo.toml`.
 
 - [ ] **Step 2: Write the failing tests**
 
-Create `crates/wm-term/src/probe.rs` with only this test module for now:
+Create `crates/wb-term/src/probe.rs` with only this test module for now:
 
 ```rust
 #[cfg(test)]
@@ -919,18 +919,18 @@ mod tests {
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-term`
+Run: `cargo test -p wb-term`
 Expected: FAIL to compile — `WinSize`, `cell_size_from`, `DEFAULT_CELL` not found.
 
 - [ ] **Step 4: Write the implementation**
 
-Prepend to `crates/wm-term/src/probe.rs`:
+Prepend to `crates/wb-term/src/probe.rs`:
 
 ```rust
 //! Measuring the terminal, which decides the CSS viewport we hand Chromium.
 
 use anyhow::{Context, Result};
-use wm_frame::{CellSize, GridSize};
+use wb_frame::{CellSize, GridSize};
 
 /// Used when the terminal will not tell us its pixel dimensions. Roughly a
 /// 10pt monospace cell; wrong but usable, and the user can override it.
@@ -989,13 +989,13 @@ fn read_winsize() -> Result<WinSize> {
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-term`
+Run: `cargo test -p wb-term`
 Expected: PASS, 6 tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/wm-term
+git add Cargo.toml Cargo.lock crates/wb-term
 git commit -m "feat(term): probe terminal grid and cell size"
 ```
 
@@ -1004,25 +1004,25 @@ git commit -m "feat(term): probe terminal grid and cell size"
 ### Task 5: Rendering a frame to the terminal
 
 **Files:**
-- Create: `crates/wm-term/src/render.rs`
-- Modify: `crates/wm-term/src/lib.rs`
-- Test: inline `#[cfg(test)]` module in `crates/wm-term/src/render.rs`
+- Create: `crates/wb-term/src/render.rs`
+- Modify: `crates/wb-term/src/lib.rs`
+- Test: inline `#[cfg(test)]` module in `crates/wb-term/src/render.rs`
 
 **Interfaces:**
-- Consumes: `wm_frame::{Frame, GridSize, CellPos, Style, Rgb}`.
-- Produces: `wm_term::render::render(frame: &Frame, out: &mut impl std::io::Write) -> std::io::Result<()>`.
+- Consumes: `wb_frame::{Frame, GridSize, CellPos, Style, Rgb}`.
+- Produces: `wb_term::render::render(frame: &Frame, out: &mut impl std::io::Write) -> std::io::Result<()>`.
 
 Writing to any `Write` rather than to stdout is what makes this testable against a byte buffer.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `crates/wm-term/src/render.rs` with only this test module for now:
+Create `crates/wb-term/src/render.rs` with only this test module for now:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wm_frame::{CellSize, CssRect, Frame, GridSize, Rgb, Style, TextRun, Viewport};
+    use wb_frame::{CellSize, CssRect, Frame, GridSize, Rgb, Style, TextRun, Viewport};
 
     fn vp() -> Viewport {
         Viewport::new(GridSize { cols: 10, rows: 2 }, CellSize { w: 10, h: 20 })
@@ -1103,12 +1103,12 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-term`
+Run: `cargo test -p wb-term`
 Expected: FAIL to compile — `render` not found.
 
 - [ ] **Step 3: Write the implementation**
 
-Prepend to `crates/wm-term/src/render.rs`:
+Prepend to `crates/wb-term/src/render.rs`:
 
 ```rust
 //! Writing a `Frame` to a terminal.
@@ -1119,7 +1119,7 @@ Prepend to `crates/wm-term/src/render.rs`:
 
 use std::io::Write;
 
-use wm_frame::{CellPos, Frame, Style};
+use wb_frame::{CellPos, Frame, Style};
 
 /// Write the whole frame, leaving the terminal with default attributes.
 pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
@@ -1165,7 +1165,7 @@ fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
 }
 ```
 
-Update `crates/wm-term/src/lib.rs`:
+Update `crates/wb-term/src/lib.rs`:
 
 ```rust
 pub mod probe;
@@ -1177,7 +1177,7 @@ pub use render::render;
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-term`
+Run: `cargo test -p wb-term`
 Expected: PASS, 13 tests.
 
 Note: `render_clears_to_end_of_each_line` counts `\x1b[K` and `render_sets_and_clears_bold` asserts the trailing reset; if `write_style` emitted `\x1b[0m` at a different point these counts would shift. Verify the counts rather than adjusting the tests to fit.
@@ -1185,7 +1185,7 @@ Note: `render_clears_to_end_of_each_line` counts `\x1b[K` and `render_sets_and_c
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/wm-term
+git add crates/wb-term
 git commit -m "feat(term): render a frame to an ANSI sink"
 ```
 
@@ -1194,20 +1194,20 @@ git commit -m "feat(term): render a frame to an ANSI sink"
 ### Task 6: The CDP client
 
 **Files:**
-- Create: `crates/wm-cdp/Cargo.toml`
-- Create: `crates/wm-cdp/src/lib.rs`
-- Create: `crates/wm-cdp/src/launch.rs`
-- Create: `crates/wm-cdp/src/client.rs`
-- Create: `crates/wm-cdp/tests/browser.rs`
+- Create: `crates/wb-cdp/Cargo.toml`
+- Create: `crates/wb-cdp/src/lib.rs`
+- Create: `crates/wb-cdp/src/launch.rs`
+- Create: `crates/wb-cdp/src/client.rs`
+- Create: `crates/wb-cdp/tests/browser.rs`
 - Modify: `Cargo.toml` (workspace members)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces:
-  `wm_cdp::launch::{find_chromium, Chromium}` with
+  `wb_cdp::launch::{find_chromium, Chromium}` with
   `find_chromium() -> anyhow::Result<PathBuf>` and
   `Chromium::launch() -> anyhow::Result<Chromium>`, `Chromium::ws_url(&self) -> &str`;
-  `wm_cdp::client::Client` with
+  `wb_cdp::client::Client` with
   `Client::connect(ws_url: &str) -> anyhow::Result<Client>`,
   `Client::call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>`,
   `Client::call_on(&self, session_id: &str, method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value>`.
@@ -1224,15 +1224,15 @@ chromium --version
 ```
 
 Expected: a version string, `Chromium 151.` or newer. If you prefer a different
-build, set `WEBMINAL_CHROMIUM` to its absolute path instead; the code honors it.
+build, set `WEBINAL_CHROMIUM` to its absolute path instead; the code honors it.
 
 - [ ] **Step 2: Create the crate**
 
-Create `crates/wm-cdp/Cargo.toml`:
+Create `crates/wb-cdp/Cargo.toml`:
 
 ```toml
 [package]
-name = "wm-cdp"
+name = "wb-cdp"
 edition.workspace = true
 version.workspace = true
 
@@ -1249,7 +1249,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ```
 
-Create `crates/wm-cdp/src/lib.rs`:
+Create `crates/wb-cdp/src/lib.rs`:
 
 ```rust
 pub mod client;
@@ -1259,18 +1259,18 @@ pub use client::Client;
 pub use launch::{Chromium, find_chromium};
 ```
 
-Add `"crates/wm-cdp"` to `members` in the workspace `Cargo.toml`.
+Add `"crates/wb-cdp"` to `members` in the workspace `Cargo.toml`.
 
 - [ ] **Step 3: Write the failing integration test**
 
-Create `crates/wm-cdp/tests/browser.rs`:
+Create `crates/wb-cdp/tests/browser.rs`:
 
 ```rust
 //! These tests launch a real Chromium. They are the only tests in the
 //! workspace that need one.
 
 use serde_json::json;
-use wm_cdp::{Chromium, Client};
+use wb_cdp::{Chromium, Client};
 
 #[tokio::test]
 async fn launches_chromium_and_reports_its_version() {
@@ -1340,12 +1340,12 @@ async fn a_failing_command_returns_an_error_rather_than_hanging() {
 
 - [ ] **Step 4: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-cdp`
+Run: `cargo test -p wb-cdp`
 Expected: FAIL to compile — `Chromium` and `Client` not found.
 
 - [ ] **Step 5: Write the launcher**
 
-Create `crates/wm-cdp/src/launch.rs`:
+Create `crates/wb-cdp/src/launch.rs`:
 
 ```rust
 //! Starting a Chromium and finding its websocket endpoint.
@@ -1361,15 +1361,15 @@ use tokio::time::{Duration, timeout};
 const CANDIDATES: &[&str] = &["chromium", "chromium-browser", "google-chrome-stable"];
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Locate a Chromium binary. `WEBMINAL_CHROMIUM` wins if set.
+/// Locate a Chromium binary. `WEBINAL_CHROMIUM` wins if set.
 ///
 /// We never download a browser; an absent one is a clear error with an
 /// actionable message, per spec section 8.
 pub fn find_chromium() -> Result<PathBuf> {
-    if let Ok(explicit) = std::env::var("WEBMINAL_CHROMIUM") {
+    if let Ok(explicit) = std::env::var("WEBINAL_CHROMIUM") {
         let path = PathBuf::from(&explicit);
         if !path.is_file() {
-            bail!("WEBMINAL_CHROMIUM is set to {explicit}, which is not a file");
+            bail!("WEBINAL_CHROMIUM is set to {explicit}, which is not a file");
         }
         return Ok(path);
     }
@@ -1386,7 +1386,7 @@ pub fn find_chromium() -> Result<PathBuf> {
 
     Err(anyhow!(
         "no Chromium found. Install one (`sudo pacman -S chromium`) or set \
-         WEBMINAL_CHROMIUM to the absolute path of a Chromium binary."
+         WEBINAL_CHROMIUM to the absolute path of a Chromium binary."
     ))
 }
 
@@ -1462,7 +1462,7 @@ async fn read_ws_url(stderr: tokio::process::ChildStderr) -> Result<String> {
 
 - [ ] **Step 6: Write the client**
 
-Create `crates/wm-cdp/src/client.rs`:
+Create `crates/wb-cdp/src/client.rs`:
 
 ```rust
 //! A minimal CDP client: request/response correlation over one websocket.
@@ -1593,7 +1593,7 @@ where
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-cdp`
+Run: `cargo test -p wb-cdp`
 Expected: PASS, 3 tests. They take a few seconds each because they each start a browser.
 
 If `a_failing_command_returns_an_error_rather_than_hanging` fails on the assertion
@@ -1604,7 +1604,7 @@ promptly.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/wm-cdp
+git add Cargo.toml Cargo.lock crates/wb-cdp
 git commit -m "feat(cdp): add chromium launcher and CDP client"
 ```
 
@@ -1613,37 +1613,37 @@ git commit -m "feat(cdp): add chromium launcher and CDP client"
 ### Task 7: Extracting text runs from a page
 
 **Files:**
-- Create: `crates/wm-page/Cargo.toml`
-- Create: `crates/wm-page/src/lib.rs`
-- Create: `crates/wm-page/src/color.rs`
-- Create: `crates/wm-page/src/extract.rs`
-- Create: `crates/wm-page/assets/extract.js`
-- Create: `crates/wm-page/tests/fixtures/simple.html`
-- Create: `crates/wm-page/tests/extraction.rs`
+- Create: `crates/wb-page/Cargo.toml`
+- Create: `crates/wb-page/src/lib.rs`
+- Create: `crates/wb-page/src/color.rs`
+- Create: `crates/wb-page/src/extract.rs`
+- Create: `crates/wb-page/assets/extract.js`
+- Create: `crates/wb-page/tests/fixtures/simple.html`
+- Create: `crates/wb-page/tests/extraction.rs`
 - Modify: `Cargo.toml` (workspace members)
 
 **Interfaces:**
-- Consumes: `wm_cdp::{Chromium, Client}`, `wm_frame::{Viewport, TextRun, Style, Rgb, CssRect}`.
+- Consumes: `wb_cdp::{Chromium, Client}`, `wb_frame::{Viewport, TextRun, Style, Rgb, CssRect}`.
 - Produces:
-  `wm_page::color::parse_css_color(s: &str) -> Rgb`;
-  `wm_page::extract::Page` with
+  `wb_page::color::parse_css_color(s: &str) -> Rgb`;
+  `wb_page::extract::Page` with
   `Page::open(client: &Client, url: &str, vp: Viewport) -> anyhow::Result<Page>`,
   `Page::extract(&self) -> anyhow::Result<Vec<TextRun>>`,
   `Page::title(&self) -> anyhow::Result<String>`.
 
 - [ ] **Step 1: Create the crate and write the failing color tests**
 
-Create `crates/wm-page/Cargo.toml`:
+Create `crates/wb-page/Cargo.toml`:
 
 ```toml
 [package]
-name = "wm-page"
+name = "wb-page"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wm-cdp = { path = "../wm-cdp" }
-wm-frame = { path = "../wm-frame" }
+wb-cdp = { path = "../wb-cdp" }
+wb-frame = { path = "../wb-frame" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -1653,7 +1653,7 @@ tokio.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ```
 
-Create `crates/wm-page/src/lib.rs`:
+Create `crates/wb-page/src/lib.rs`:
 
 ```rust
 pub mod color;
@@ -1662,9 +1662,9 @@ pub mod extract;
 pub use extract::Page;
 ```
 
-Add `"crates/wm-page"` to `members` in the workspace `Cargo.toml`.
+Add `"crates/wb-page"` to `members` in the workspace `Cargo.toml`.
 
-Create `crates/wm-page/src/color.rs` with only this test module for now:
+Create `crates/wb-page/src/color.rs` with only this test module for now:
 
 ```rust
 #[cfg(test)]
@@ -1717,17 +1717,17 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-page`
+Run: `cargo test -p wb-page`
 Expected: FAIL to compile — `parse_css_color` not found.
 
 - [ ] **Step 3: Write the color parser**
 
-Prepend to `crates/wm-page/src/color.rs`:
+Prepend to `crates/wb-page/src/color.rs`:
 
 ```rust
 //! Parsing the colors `getComputedStyle` hands back.
 
-use wm_frame::{Rgb, Style};
+use wb_frame::{Rgb, Style};
 
 /// Parse an `rgb()` or `rgba()` string. Anything unrecognized falls back to
 /// the default foreground rather than failing the whole extraction.
@@ -1759,12 +1759,12 @@ pub fn parse_css_color(s: &str) -> Rgb {
 
 - [ ] **Step 4: Run the color tests to verify they pass**
 
-Run: `cargo test -p wm-page`
+Run: `cargo test -p wb-page`
 Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Write the extraction script**
 
-Create `crates/wm-page/assets/extract.js`:
+Create `crates/wb-page/assets/extract.js`:
 
 ```javascript
 // Extract every visible text run, one per line of text, with its layout box.
@@ -1854,7 +1854,7 @@ Create `crates/wm-page/assets/extract.js`:
 
 - [ ] **Step 6: Write the failing extraction test**
 
-Create `crates/wm-page/tests/fixtures/simple.html`:
+Create `crates/wb-page/tests/fixtures/simple.html`:
 
 ```html
 <!doctype html>
@@ -1876,12 +1876,12 @@ Create `crates/wm-page/tests/fixtures/simple.html`:
 </html>
 ```
 
-Create `crates/wm-page/tests/extraction.rs`:
+Create `crates/wb-page/tests/extraction.rs`:
 
 ```rust
-use wm_cdp::{Chromium, Client};
-use wm_frame::{CellSize, GridSize, Viewport};
-use wm_page::Page;
+use wb_cdp::{Chromium, Client};
+use wb_frame::{CellSize, GridSize, Viewport};
+use wb_page::Page;
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1934,14 +1934,14 @@ async fn carries_color_and_weight_through() {
     let runs = page.extract().await.expect("extract");
 
     let heading = runs.iter().find(|r| r.text == "Heading").expect("heading run");
-    assert_eq!(heading.style.fg, wm_frame::Rgb { r: 255, g: 0, b: 0 });
+    assert_eq!(heading.style.fg, wb_frame::Rgb { r: 255, g: 0, b: 0 });
     assert!(heading.style.bold, "font-weight 700 is bold");
 
     let para = runs
         .iter()
         .find(|r| r.text == "First paragraph.")
         .expect("paragraph run");
-    assert_eq!(para.style.fg, wm_frame::Rgb { r: 0, g: 0, b: 255 });
+    assert_eq!(para.style.fg, wb_frame::Rgb { r: 0, g: 0, b: 255 });
     assert!(!para.style.bold);
 }
 
@@ -1986,12 +1986,12 @@ async fn lays_the_page_out_at_the_viewport_we_asked_for() {
 
 - [ ] **Step 7: Run the tests to verify they fail**
 
-Run: `cargo test -p wm-page`
+Run: `cargo test -p wb-page`
 Expected: FAIL to compile — `Page` not found.
 
 - [ ] **Step 8: Write the page implementation**
 
-Create `crates/wm-page/src/extract.rs`:
+Create `crates/wb-page/src/extract.rs`:
 
 ```rust
 //! One page: navigate, size it to the terminal, pull its text runs out.
@@ -2000,8 +2000,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::time::{Duration, Instant, sleep};
-use wm_cdp::Client;
-use wm_frame::{CssRect, Style, TextRun, Viewport};
+use wb_cdp::Client;
+use wb_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 
@@ -2181,13 +2181,13 @@ impl<'a> Page<'a> {
 
 - [ ] **Step 9: Run the tests to verify they pass**
 
-Run: `cargo test -p wm-page`
+Run: `cargo test -p wb-page`
 Expected: PASS, 12 tests (6 color, 6 extraction).
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/wm-page
+git add Cargo.toml Cargo.lock crates/wb-page
 git commit -m "feat(page): extract positioned text runs from a live page"
 ```
 
@@ -2196,35 +2196,35 @@ git commit -m "feat(page): extract positioned text runs from a live page"
 ### Task 8: The binary, end to end
 
 **Files:**
-- Create: `crates/webminal/Cargo.toml`
-- Create: `crates/webminal/src/lib.rs`
-- Create: `crates/webminal/src/main.rs`
-- Create: `crates/webminal/tests/fixtures/skeleton.html`
-- Create: `crates/webminal/tests/smoke.rs`
+- Create: `crates/webinal/Cargo.toml`
+- Create: `crates/webinal/src/lib.rs`
+- Create: `crates/webinal/src/main.rs`
+- Create: `crates/webinal/tests/fixtures/skeleton.html`
+- Create: `crates/webinal/tests/smoke.rs`
 - Modify: `Cargo.toml` (workspace members)
 - Create: `README.md`
 
 **Interfaces:**
 - Consumes: everything from Tasks 1 through 7.
-- Produces: `webminal::render_url(url: &str, vp: Viewport) -> anyhow::Result<Frame>`.
+- Produces: `webinal::render_url(url: &str, vp: Viewport) -> anyhow::Result<Frame>`.
 
 The pipeline lives in `lib.rs` so the smoke test can drive it without a terminal; `main.rs` only handles the terminal and the key loop.
 
 - [ ] **Step 1: Create the crate**
 
-Create `crates/webminal/Cargo.toml`:
+Create `crates/webinal/Cargo.toml`:
 
 ```toml
 [package]
-name = "webminal"
+name = "webinal"
 edition.workspace = true
 version.workspace = true
 
 [dependencies]
-wm-cdp = { path = "../wm-cdp" }
-wm-frame = { path = "../wm-frame" }
-wm-page = { path = "../wm-page" }
-wm-term = { path = "../wm-term" }
+wb-cdp = { path = "../wb-cdp" }
+wb-frame = { path = "../wb-frame" }
+wb-page = { path = "../wb-page" }
+wb-term = { path = "../wb-term" }
 anyhow.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
@@ -2233,11 +2233,11 @@ tokio.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 ```
 
-Add `"crates/webminal"` to `members` in the workspace `Cargo.toml`.
+Add `"crates/webinal"` to `members` in the workspace `Cargo.toml`.
 
 - [ ] **Step 2: Write the failing smoke test**
 
-Create `crates/webminal/tests/fixtures/skeleton.html`:
+Create `crates/webinal/tests/fixtures/skeleton.html`:
 
 ```html
 <!doctype html>
@@ -2250,15 +2250,15 @@ Create `crates/webminal/tests/fixtures/skeleton.html`:
     </style>
   </head>
   <body>
-    <p>WEBMINAL WALKS</p>
+    <p>WEBINAL WALKS</p>
   </body>
 </html>
 ```
 
-Create `crates/webminal/tests/smoke.rs`:
+Create `crates/webinal/tests/smoke.rs`:
 
 ```rust
-use wm_frame::{CellSize, GridSize, Viewport};
+use wb_frame::{CellSize, GridSize, Viewport};
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2270,7 +2270,7 @@ fn fixture_url(name: &str) -> String {
 #[tokio::test]
 async fn renders_a_page_into_the_cell_grid() {
     let vp = Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
-    let frame = webminal::render_url(&fixture_url("skeleton.html"), vp)
+    let frame = webinal::render_url(&fixture_url("skeleton.html"), vp)
         .await
         .expect("render the fixture");
 
@@ -2278,7 +2278,7 @@ async fn renders_a_page_into_the_cell_grid() {
 
     let rendered: Vec<String> = (0..vp.grid().rows).map(|r| frame.row_text(r)).collect();
     assert!(
-        rendered.iter().any(|line| line.contains("WEBMINAL WALKS")),
+        rendered.iter().any(|line| line.contains("WEBINAL WALKS")),
         "the page text is missing from the frame:\n{}",
         rendered.join("\n")
     );
@@ -2287,7 +2287,7 @@ async fn renders_a_page_into_the_cell_grid() {
 #[tokio::test]
 async fn text_lands_in_the_top_left_of_an_unstyled_page() {
     let vp = Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
-    let frame = webminal::render_url(&fixture_url("skeleton.html"), vp)
+    let frame = webinal::render_url(&fixture_url("skeleton.html"), vp)
         .await
         .expect("render the fixture");
 
@@ -2295,7 +2295,7 @@ async fn text_lands_in_the_top_left_of_an_unstyled_page() {
     // it must land in row 0 starting at column 0. This is the assertion that
     // proves the coordinate model is wired correctly end to end.
     assert!(
-        frame.row_text(0).starts_with("WEBMINAL"),
+        frame.row_text(0).starts_with("WEBINAL"),
         "row 0 was {:?}",
         frame.row_text(0)
     );
@@ -2304,20 +2304,20 @@ async fn text_lands_in_the_top_left_of_an_unstyled_page() {
 
 - [ ] **Step 3: Run the test to verify it fails**
 
-Run: `cargo test -p webminal`
-Expected: FAIL to compile — `webminal::render_url` not found.
+Run: `cargo test -p webinal`
+Expected: FAIL to compile — `webinal::render_url` not found.
 
 - [ ] **Step 4: Write the pipeline**
 
-Create `crates/webminal/src/lib.rs`:
+Create `crates/webinal/src/lib.rs`:
 
 ```rust
 //! Wiring: browser, page, frame.
 
 use anyhow::{Context, Result};
-use wm_cdp::{Chromium, Client};
-use wm_frame::{Frame, Viewport};
-use wm_page::Page;
+use wb_cdp::{Chromium, Client};
+use wb_frame::{Frame, Viewport};
+use wb_page::Page;
 
 /// Launch a browser, render one URL, and return the resulting frame.
 ///
@@ -2341,7 +2341,7 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `cargo test -p webminal`
+Run: `cargo test -p webinal`
 Expected: PASS, 2 tests.
 
 If `text_lands_in_the_top_left_of_an_unstyled_page` fails by one row, the
@@ -2351,7 +2351,7 @@ height before changing the constant.
 
 - [ ] **Step 6: Write the binary**
 
-Create `crates/webminal/src/main.rs`:
+Create `crates/webinal/src/main.rs`:
 
 ```rust
 use std::io::{Write, stdout};
@@ -2362,20 +2362,20 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, cursor};
-use wm_frame::Viewport;
+use wb_frame::Viewport;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let Some(url) = std::env::args().nth(1) else {
-        bail!("usage: webminal <url>");
+        bail!("usage: webinal <url>");
     };
 
-    let (grid, cell) = wm_term::probe().context("measure the terminal")?;
+    let (grid, cell) = wb_term::probe().context("measure the terminal")?;
     let vp = Viewport::new(grid, cell);
 
     // Render before touching the terminal, so a failure leaves the user's
     // screen exactly as it was.
-    let frame = webminal::render_url(&url, vp).await?;
+    let frame = webinal::render_url(&url, vp).await?;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
@@ -2387,9 +2387,9 @@ async fn main() -> Result<()> {
     result
 }
 
-fn run(frame: &wm_frame::Frame) -> Result<()> {
+fn run(frame: &wb_frame::Frame) -> Result<()> {
     let mut out = stdout();
-    wm_term::render(frame, &mut out)?;
+    wb_term::render(frame, &mut out)?;
     out.flush()?;
 
     loop {
@@ -2416,7 +2416,7 @@ Expected: no warnings. Fix any that appear.
 Run, in Kitty, not through a pipe:
 
 ```bash
-cargo run -p webminal -- https://example.com
+cargo run -p webinal -- https://example.com
 ```
 
 Expected: the terminal switches to an alternate screen showing the text of
@@ -2433,7 +2433,7 @@ criterion.** If any of the three fails, stop and debug rather than proceeding.
 Create `README.md`:
 
 ```markdown
-# Webminal
+# Webinal
 
 A terminal web browser in Rust. It drives a real headless Chromium over the
 Chrome DevTools Protocol and renders pages into the terminal grid: crisp text
@@ -2445,14 +2445,14 @@ Navigation, input, tabs, and pixel mode are M2 through M5.
 ## Requirements
 
 - Rust 1.97+
-- Chromium (`sudo pacman -S chromium`), or `WEBMINAL_CHROMIUM` set to a
+- Chromium (`sudo pacman -S chromium`), or `WEBINAL_CHROMIUM` set to a
   Chromium binary
 - A terminal that reports its pixel dimensions; Kitty is the development
   target
 
 ## Usage
 
-    cargo run -p webminal -- https://example.com
+    cargo run -p webinal -- https://example.com
 
 Press `q` to quit.
 
@@ -2460,22 +2460,22 @@ Press `q` to quit.
 
 | Crate | Responsibility |
 |---|---|
-| `wm-frame` | Coordinate model and the cell grid. No I/O. |
-| `wm-cdp` | Chromium launcher and CDP client. |
-| `wm-page` | Text-run extraction from a live page. |
-| `wm-term` | Terminal probing and rendering. |
-| `webminal` | The binary. |
+| `wb-frame` | Coordinate model and the cell grid. No I/O. |
+| `wb-cdp` | Chromium launcher and CDP client. |
+| `wb-page` | Text-run extraction from a live page. |
+| `wb-term` | Terminal probing and rendering. |
+| `webinal` | The binary. |
 
 ## Documentation
 
-- Design: `docs/superpowers/specs/2026-08-19-webminal-design.md`
-- M1 plan: `docs/superpowers/plans/2026-08-19-webminal-m1-walking-skeleton.md`
+- Design: `docs/superpowers/specs/2026-08-19-webinal-design.md`
+- M1 plan: `docs/superpowers/plans/2026-08-19-webinal-m1-walking-skeleton.md`
 ```
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/webminal README.md
+git add Cargo.toml Cargo.lock crates/webinal README.md
 git commit -m "feat: render a URL into the terminal grid end to end"
 ```
 
@@ -2483,10 +2483,10 @@ git commit -m "feat: render a URL into the terminal grid end to end"
 
 ## Definition of done for M1
 
-- `cargo test --workspace` is green, with 47 tests: 17 in `wm-frame`, 13 in
-  `wm-term`, 3 in `wm-cdp`, 12 in `wm-page`, 2 in `webminal`.
+- `cargo test --workspace` is green, with 47 tests: 17 in `wb-frame`, 13 in
+  `wb-term`, 3 in `wb-cdp`, 12 in `wb-page`, 2 in `webinal`.
 - `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-- `cargo run -p webminal -- https://example.com` shows the page's text laid out
+- `cargo run -p webinal -- https://example.com` shows the page's text laid out
   approximately where a browser would put it, in color, and `q` restores the
   terminal.
 - The coordinate roundtrip property test passes at every cell size, because

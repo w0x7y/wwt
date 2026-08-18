@@ -6,20 +6,20 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{cursor, execute};
-use wm_frame::Viewport;
+use wb_frame::Viewport;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let Some(url) = std::env::args().nth(1) else {
-        bail!("usage: webminal <url>");
+        bail!("usage: webinal <url>");
     };
 
-    let (grid, cell) = wm_term::probe().context("measure the terminal")?;
+    let (grid, cell) = wb_term::probe().context("measure the terminal")?;
     let vp = Viewport::new(grid, cell);
 
     // Render before touching the terminal, so a failure leaves the user's
     // screen exactly as it was.
-    let frame = webminal::render_url(&url, vp).await?;
+    let frame = webinal::render_url(&url, vp).await?;
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
@@ -31,9 +31,9 @@ async fn main() -> Result<()> {
     result
 }
 
-fn run(frame: &wm_frame::Frame) -> Result<()> {
+fn run(frame: &wb_frame::Frame) -> Result<()> {
     let mut out = stdout();
-    wm_term::render(frame, &mut out)?;
+    wb_term::render(frame, &mut out)?;
     out.flush()?;
 
     loop {

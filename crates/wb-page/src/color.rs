@@ -1,6 +1,6 @@
 //! Parsing the colors `getComputedStyle` hands back.
 
-use wm_frame::{Rgb, Style};
+use wb_frame::{Rgb, Style};
 
 /// Parse an `rgb()` or `rgba()` string. Anything unrecognized falls back to
 /// the default foreground rather than failing the whole extraction.
