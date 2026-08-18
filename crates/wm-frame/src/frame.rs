@@ -105,6 +105,12 @@ impl Frame {
                 row,
             };
             let Some(idx) = self.index(pos) else { break };
+            // Painter's algorithm: a run may take a cell only from something
+            // at or below its own stacking depth. Equal depth means the later
+            // run wins, which matches paint order inside a stacking context.
+            if run.z < self.cells[idx].z {
+                continue;
+            }
             self.cells[idx] = Cell {
                 ch,
                 style: run.style,
@@ -208,6 +214,56 @@ mod tests {
         // Starts at x = -20, i.e. two cells left of the grid.
         f.paint_run(&vp(), &run("abcdef", -20.0, 14.0, 60.0));
         assert_eq!(f.row_text(0), "cdef");
+    }
+
+    #[test]
+    fn a_higher_stack_wins_a_contested_cell() {
+        let mut f = Frame::new(vp().grid());
+        let mut under = run("aaaa", 0.0, 14.0, 40.0);
+        under.z = 0;
+        let mut over = run("BB", 0.0, 14.0, 20.0);
+        over.z = 5;
+
+        f.paint_run(&vp(), &under);
+        f.paint_run(&vp(), &over);
+        assert_eq!(f.row_text(0), "BBaa");
+    }
+
+    #[test]
+    fn a_lower_stack_does_not_overwrite() {
+        let mut f = Frame::new(vp().grid());
+        let mut over = run("BBBB", 0.0, 14.0, 40.0);
+        over.z = 5;
+        let mut under = run("aa", 0.0, 14.0, 20.0);
+        under.z = 0;
+
+        f.paint_run(&vp(), &over);
+        f.paint_run(&vp(), &under);
+        assert_eq!(f.row_text(0), "BBBB");
+    }
+
+    #[test]
+    fn equal_stacks_resolve_in_document_order() {
+        let mut f = Frame::new(vp().grid());
+        // Same z: the later run wins, matching paint order within a stacking
+        // context.
+        f.paint_run(&vp(), &run("aaaa", 0.0, 14.0, 40.0));
+        f.paint_run(&vp(), &run("BB", 0.0, 14.0, 20.0));
+        assert_eq!(f.row_text(0), "BBaa");
+    }
+
+    #[test]
+    fn a_blocked_run_still_paints_its_uncontested_cells() {
+        let mut f = Frame::new(vp().grid());
+        let mut over = run("BB", 0.0, 14.0, 20.0);
+        over.z = 5;
+        let mut under = run("aaaa", 0.0, 14.0, 40.0);
+        under.z = 0;
+
+        f.paint_run(&vp(), &over);
+        f.paint_run(&vp(), &under);
+        // The first two cells are held by the higher run; the rest are free.
+        assert_eq!(f.row_text(0), "BBaa");
     }
 
     #[test]
