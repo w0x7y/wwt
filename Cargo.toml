@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/wm-frame"]
+members = ["crates/wm-frame", "crates/wm-term"]
 
 [workspace.package]
 edition = "2024"
