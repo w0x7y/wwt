@@ -7,6 +7,12 @@ use wm_frame::{CellSize, GridSize};
 /// 10pt monospace cell; wrong but usable, and the user can override it.
 pub const DEFAULT_CELL: CellSize = CellSize { w: 9, h: 20 };
 
+// A cell must be non-degenerate, and monospace cells are taller than they are
+// wide. Checked at compile time rather than by a test, since it is a property
+// of the constant itself.
+const _: () = assert!(DEFAULT_CELL.w > 0 && DEFAULT_CELL.h > 0);
+const _: () = assert!(DEFAULT_CELL.h > DEFAULT_CELL.w);
+
 /// The four fields of `struct winsize`, lifted out of the syscall so the
 /// arithmetic below can be tested without a tty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +106,4 @@ mod tests {
         assert_eq!(cell_size_from(ws), None);
     }
 
-    #[test]
-    fn the_default_cell_is_a_plausible_monospace_cell() {
-        assert!(DEFAULT_CELL.w > 0 && DEFAULT_CELL.h > 0);
-        assert!(DEFAULT_CELL.h > DEFAULT_CELL.w, "cells are taller than wide");
-    }
 }
