@@ -1,0 +1,12 @@
+[package]
+name = "wb-page"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wb-cdp = { path = "../wb-cdp" }
+wb-frame = { path = "../wb-frame" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
