@@ -1,0 +1,12 @@
+[package]
+name = "wm-page"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wm-cdp = { path = "../wm-cdp" }
+wm-frame = { path = "../wm-frame" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
