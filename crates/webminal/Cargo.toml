@@ -1,0 +1,13 @@
+[package]
+name = "webminal"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wm-cdp = { path = "../wm-cdp" }
+wm-frame = { path = "../wm-frame" }
+wm-page = { path = "../wm-page" }
+wm-term = { path = "../wm-term" }
+anyhow.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
