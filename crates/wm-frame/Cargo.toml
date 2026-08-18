@@ -1,0 +1,6 @@
+[package]
+name = "wm-frame"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
