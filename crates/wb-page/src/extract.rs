@@ -197,6 +197,62 @@ impl Page {
         }
     }
 
+    /// Scroll by a distance in CSS pixels, positive being downward.
+    ///
+    /// This dispatches a real wheel event rather than calling `scrollBy`, so
+    /// Chromium performs the scroll: sticky headers stick, infinite scroll
+    /// loads, and virtualized lists virtualize, all with no help from us.
+    pub async fn scroll_by(&self, dy: f64, vp: Viewport) -> Result<()> {
+        self.client
+            .call_on(
+                &self.session_id,
+                "Input.dispatchMouseEvent",
+                json!({
+                    "type": "mouseWheel",
+                    "x": f64::from(vp.css_width()) / 2.0,
+                    "y": f64::from(vp.css_height()) / 2.0,
+                    "deltaX": 0.0,
+                    "deltaY": dy,
+                    "button": "none",
+                    "clickCount": 0,
+                    "modifiers": 0,
+                }),
+            )
+            .await
+            .context("dispatch a wheel event")?;
+        Ok(())
+    }
+
+    pub async fn scroll_to_top(&self) -> Result<()> {
+        self.scroll_to("0").await
+    }
+
+    /// Jump to the end of the document.
+    ///
+    /// This is the one place M2 does not scroll natively: the distance to the
+    /// document's end is not known to us, and on an infinite-scroll page it
+    /// changes as we go. The consequence is that this reaches the end of what
+    /// has loaded, which is the correct behavior — it is simply not
+    /// wheel-driven.
+    pub async fn scroll_to_end(&self) -> Result<()> {
+        self.scroll_to("document.documentElement.scrollHeight").await
+    }
+
+    async fn scroll_to(&self, y_expression: &str) -> Result<()> {
+        self.client
+            .call_on(
+                &self.session_id,
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!("window.scrollTo(0, {y_expression})"),
+                    "returnByValue": true,
+                }),
+            )
+            .await
+            .context("scroll to a document position")?;
+        Ok(())
+    }
+
     /// Run the extraction script and convert its output.
     pub async fn extract(&self) -> Result<Extraction> {
         let result = self

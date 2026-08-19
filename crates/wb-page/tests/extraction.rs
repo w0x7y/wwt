@@ -176,3 +176,51 @@ fn scroll_progress_is_one_at_the_bottom() {
     };
     assert_eq!(e.scroll_progress(), 1.0);
 }
+
+/// The wheel event is dispatched to the compositor, so the scroll it causes
+/// is not complete when the command returns. Poll for the effect rather than
+/// sleeping a fixed amount.
+async fn await_scroll_past(page: &Page, floor: f64) -> f64 {
+    for _ in 0..100 {
+        let y = page.extract().await.expect("extract").scroll_y;
+        if y > floor {
+            return y;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the page never scrolled past {floor}");
+}
+
+#[tokio::test]
+async fn scrolling_moves_the_page_and_changes_the_runs() {
+    let h = harness().await;
+    let page = open(&h, "tall.html").await;
+
+    let before = page.extract().await.expect("extract");
+    assert_eq!(before.scroll_y, 0.0);
+    let first_before = before.runs.first().expect("a run").text.clone();
+
+    page.scroll_by(200.0, viewport()).await.expect("scroll");
+    await_scroll_past(&page, 0.0).await;
+
+    let after = page.extract().await.expect("extract");
+    let first_after = after.runs.first().expect("a run").text.clone();
+    assert_ne!(
+        first_before, first_after,
+        "the topmost run should differ after scrolling"
+    );
+}
+
+#[tokio::test]
+async fn scroll_to_end_reaches_the_bottom() {
+    let h = harness().await;
+    let page = open(&h, "tall.html").await;
+
+    page.scroll_to_end().await.expect("scroll to end");
+    let end = page.extract().await.expect("extract");
+    assert!(end.scroll_progress() > 0.99, "progress was {}", end.scroll_progress());
+
+    page.scroll_to_top().await.expect("scroll to top");
+    let top = page.extract().await.expect("extract");
+    assert_eq!(top.scroll_y, 0.0);
+}
