@@ -1,0 +1,377 @@
+//! The event loop. It owns all state and is the only thing that mutates it.
+
+use std::io::Write;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant, sleep_until};
+use wb_cdp::Client;
+use wb_frame::{CellSize, Frame, GridSize, TextRun, Viewport};
+use wb_page::{DIRTY_BINDING, Extraction, Page};
+use wb_term::Renderer;
+
+use crate::chrome::{self, Mode, State};
+use crate::command::{self, Command};
+use crate::keymap::{Action, action_for};
+
+/// A dragged window edge produces a resize event per frame, and each one
+/// would otherwise cost a Chromium relayout and a full extraction.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// The result of something that ran off the loop's thread.
+enum Job {
+    Extracted(Box<Extraction>),
+    Failed(String),
+    /// A navigation, history move, or reload finished.
+    Settled,
+}
+
+/// The page viewport: the terminal grid, less the row chrome occupies.
+///
+/// Chromium is told this is the whole window, so the page genuinely does not
+/// know the statusline exists.
+pub fn page_viewport(grid: GridSize, cell: CellSize) -> Viewport {
+    let rows = grid.rows.saturating_sub(1).max(1);
+    Viewport::new(GridSize { cols: grid.cols, rows }, cell)
+}
+
+pub struct Core {
+    page: Arc<Page>,
+    client: Arc<Client>,
+    grid: GridSize,
+    cell: CellSize,
+    vp: Viewport,
+    renderer: Renderer,
+
+    mode: Mode,
+    state: State,
+    url: String,
+    title: String,
+    progress: f64,
+    runs: Vec<TextRun>,
+
+    /// The page says it changed and we have not caught up yet.
+    dirty: bool,
+    /// An extraction is in flight; a second would race it.
+    extracting: bool,
+    /// A navigation is in flight.
+    navigating: bool,
+
+    jobs_tx: mpsc::UnboundedSender<Job>,
+    jobs_rx: mpsc::UnboundedReceiver<Job>,
+}
+
+impl Core {
+    pub fn new(page: Arc<Page>, client: Arc<Client>, grid: GridSize, cell: CellSize) -> Self {
+        let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
+        Self {
+            page,
+            client,
+            grid,
+            cell,
+            vp: page_viewport(grid, cell),
+            renderer: Renderer::new(),
+            mode: Mode::Normal,
+            state: State::Loading,
+            url: String::new(),
+            title: String::new(),
+            progress: 0.0,
+            runs: Vec::new(),
+            dirty: true,
+            extracting: false,
+            navigating: false,
+            jobs_tx,
+            jobs_rx,
+        }
+    }
+
+    /// Paint the page and the chrome into one full-grid frame.
+    pub fn compose(&self) -> Frame {
+        let mut frame = Frame::new(self.grid);
+        for run in &self.runs {
+            frame.paint_run(&self.vp, run);
+        }
+        chrome::paint(
+            &mut frame,
+            &self.mode,
+            &self.state,
+            &self.url,
+            &self.title,
+            self.progress,
+        );
+        frame
+    }
+
+    pub async fn run(&mut self, out: &mut impl Write) -> Result<()> {
+        let mut terminal = EventStream::new();
+        let mut cdp = self.client.subscribe();
+        let mut resize_at: Option<Instant> = None;
+
+        self.start_extract();
+        self.present(out)?;
+
+        loop {
+            tokio::select! {
+                Some(Ok(event)) = terminal.next() => {
+                    match event {
+                        TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                            if self.on_key(key) {
+                                return Ok(());
+                            }
+                        }
+                        TermEvent::Resize(..) => {
+                            resize_at = Some(Instant::now() + RESIZE_DEBOUNCE);
+                        }
+                        _ => {}
+                    }
+                }
+
+                Some(event) = cdp.recv() => {
+                    let ours = event.session_id.as_deref() == Some(self.page.session_id());
+                    if ours
+                        && event.method == "Runtime.bindingCalled"
+                        && event.params["name"] == DIRTY_BINDING
+                    {
+                        self.dirty = true;
+                        self.start_extract();
+                    }
+                }
+
+                Some(job) = self.jobs_rx.recv() => {
+                    self.on_job(job);
+                }
+
+                () = async { sleep_until(resize_at.expect("guarded")).await },
+                    if resize_at.is_some() =>
+                {
+                    resize_at = None;
+                    self.on_resize().await?;
+                }
+            }
+
+            self.present(out)?;
+        }
+    }
+
+    fn present(&mut self, out: &mut impl Write) -> Result<()> {
+        let frame = self.compose();
+        self.renderer.render(&frame, out).context("write the frame")?;
+        out.flush().context("flush the terminal")?;
+        Ok(())
+    }
+
+    /// Handle one key. Returns `true` when it is time to quit.
+    fn on_key(&mut self, key: KeyEvent) -> bool {
+        match &self.mode {
+            Mode::Command(buffer) => {
+                let mut buffer = buffer.clone();
+                match key.code {
+                    KeyCode::Esc => self.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        self.mode = Mode::Command(buffer);
+                    }
+                    KeyCode::Enter => {
+                        self.mode = Mode::Normal;
+                        match command::parse(&buffer) {
+                            Ok(Command::Quit) => return true,
+                            Ok(command) => self.run_command(command),
+                            Err(message) => self.state = State::Error(message),
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        buffer.push(c);
+                        self.mode = Mode::Command(buffer);
+                    }
+                    _ => {}
+                }
+                false
+            }
+            Mode::Normal => match action_for(key, self.vp) {
+                Some(Action::Quit) => true,
+                Some(Action::EnterCommand(prefill)) => {
+                    self.mode = Mode::Command(prefill);
+                    false
+                }
+                Some(action) => {
+                    self.run_action(action);
+                    false
+                }
+                None => false,
+            },
+        }
+    }
+
+    fn run_action(&mut self, action: Action) {
+        let page = Arc::clone(&self.page);
+        let tx = self.jobs_tx.clone();
+        let vp = self.vp;
+
+        match action {
+            Action::Scroll(dy) => {
+                // Scrolling does not settle the way a navigation does; the
+                // page's own scroll listener reports when it has moved.
+                tokio::spawn(async move {
+                    if let Err(error) = page.scroll_by(dy, vp).await {
+                        let _ = tx.send(Job::Failed(error.to_string()));
+                    }
+                });
+            }
+            Action::ScrollTop => {
+                tokio::spawn(async move {
+                    if let Err(error) = page.scroll_to_top().await {
+                        let _ = tx.send(Job::Failed(error.to_string()));
+                    }
+                });
+            }
+            Action::ScrollEnd => {
+                tokio::spawn(async move {
+                    if let Err(error) = page.scroll_to_end().await {
+                        let _ = tx.send(Job::Failed(error.to_string()));
+                    }
+                });
+            }
+            Action::Back => {
+                self.navigate_with(move |page| async move { page.back().await.map(|_| ()) })
+            }
+            Action::Forward => {
+                self.navigate_with(move |page| async move { page.forward().await.map(|_| ()) })
+            }
+            Action::Reload => self.navigate_with(move |page| async move { page.reload().await }),
+            // Handled by the caller.
+            Action::Quit | Action::EnterCommand(_) => {}
+        }
+    }
+
+    fn run_command(&mut self, command: Command) {
+        match command {
+            Command::Open(url) => {
+                self.url = url.clone();
+                self.navigate_with(move |page| async move { page.navigate(&url).await });
+            }
+            Command::Back => self.run_action(Action::Back),
+            Command::Forward => self.run_action(Action::Forward),
+            Command::Reload => self.run_action(Action::Reload),
+            // Handled by the caller.
+            Command::Quit => {}
+        }
+    }
+
+    /// Run something that changes what page we are on, off the loop's thread.
+    ///
+    /// The previous page stays on screen, marked loading, until the new one
+    /// has been extracted. Nothing a page does blanks the frame.
+    fn navigate_with<F, Fut>(&mut self, make: F)
+    where
+        F: FnOnce(Arc<Page>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send,
+    {
+        if self.navigating {
+            return;
+        }
+        self.navigating = true;
+        self.state = State::Loading;
+
+        let page = Arc::clone(&self.page);
+        let tx = self.jobs_tx.clone();
+        tokio::spawn(async move {
+            let job = match make(page).await {
+                Ok(()) => Job::Settled,
+                Err(error) => Job::Failed(error.to_string()),
+            };
+            let _ = tx.send(job);
+        });
+    }
+
+    fn start_extract(&mut self) {
+        if self.extracting || !self.dirty {
+            return;
+        }
+        self.extracting = true;
+        self.dirty = false;
+
+        let page = Arc::clone(&self.page);
+        let tx = self.jobs_tx.clone();
+        tokio::spawn(async move {
+            let job = match page.extract().await {
+                Ok(extraction) => Job::Extracted(Box::new(extraction)),
+                Err(error) => Job::Failed(error.to_string()),
+            };
+            let _ = tx.send(job);
+        });
+    }
+
+    fn on_job(&mut self, job: Job) {
+        match job {
+            Job::Extracted(extraction) => {
+                self.extracting = false;
+                self.progress = extraction.scroll_progress();
+                self.runs = extraction.runs;
+                self.title = extraction.title;
+                self.url = extraction.url;
+                if !self.navigating {
+                    self.state = State::Ready;
+                }
+                // The page may have changed again while we were extracting.
+                self.start_extract();
+            }
+            Job::Settled => {
+                self.navigating = false;
+                self.state = State::Ready;
+                self.dirty = true;
+                self.start_extract();
+            }
+            Job::Failed(message) => {
+                self.extracting = false;
+                self.navigating = false;
+                // The frame stays exactly as it was; only the statusline
+                // changes. Section 8: never blank the frame you are looking at.
+                self.state = State::Error(message);
+            }
+        }
+    }
+
+    async fn on_resize(&mut self) -> Result<()> {
+        let (grid, cell) = wb_term::probe().context("re-measure the terminal")?;
+        if grid == self.grid && cell == self.cell {
+            return Ok(());
+        }
+
+        self.grid = grid;
+        self.cell = cell;
+        self.vp = page_viewport(grid, cell);
+
+        // The page genuinely reflows: it is being told the window changed size.
+        self.page
+            .set_viewport(self.vp)
+            .await
+            .context("resize the page viewport")?;
+
+        // A diff against a frame of different dimensions is meaningless.
+        self.renderer.invalidate();
+        self.dirty = true;
+        self.start_extract();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_page_viewport_is_one_row_shorter_than_the_terminal() {
+        let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+        assert_eq!(vp.grid(), GridSize { cols: 80, rows: 23 });
+        assert_eq!(vp.css_height(), 23 * 20);
+    }
+
+    #[test]
+    fn a_one_row_terminal_still_leaves_a_page_row() {
+        let vp = page_viewport(GridSize { cols: 80, rows: 1 }, CellSize { w: 9, h: 20 });
+        assert_eq!(vp.grid().rows, 1, "never zero, or Chromium gets a zero-height window");
+    }
+}

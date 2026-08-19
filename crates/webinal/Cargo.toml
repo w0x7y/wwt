@@ -10,4 +10,5 @@ wb-page = { path = "../wb-page" }
 wb-term = { path = "../wb-term" }
 anyhow.workspace = true
 crossterm.workspace = true
+futures-util.workspace = true
 tokio.workspace = true

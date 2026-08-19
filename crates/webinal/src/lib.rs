@@ -2,6 +2,7 @@
 
 pub mod chrome;
 pub mod command;
+pub mod core;
 pub mod keymap;
 
 use std::sync::Arc;
