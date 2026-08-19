@@ -12,7 +12,8 @@ use wwt_cdp::Client;
 use wwt_frame::{CellSize, Frame, GridSize, TextRun, Viewport};
 use wwt_page::{DIRTY_BINDING, Extraction, Page};
 use wwt_term::Renderer;
-use wwt_ui::chrome::{self, Mode, State};
+use wwt_ui::Mode;
+use wwt_ui::chrome::{self, State};
 use wwt_ui::command::{self, Command};
 
 use crate::keymap::{Action, action_for};
@@ -193,6 +194,8 @@ impl Core {
                 }
                 false
             }
+            // Wired in Task 10. Until then a mode nothing can enter.
+            Mode::Insert => false,
             Mode::Normal => match action_for(key, self.vp) {
                 Some(Action::Quit) => true,
                 Some(Action::EnterCommand(prefill)) => {

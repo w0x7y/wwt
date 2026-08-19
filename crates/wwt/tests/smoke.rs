@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use wwt_frame::{CellSize, GridSize, Viewport};
-use wwt_ui::chrome::Mode;
+use wwt_ui::Mode;
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

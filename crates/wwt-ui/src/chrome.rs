@@ -2,6 +2,8 @@
 
 use wwt_frame::{CellPos, Frame, GridSize, Rgb, Style};
 
+use crate::mode::Mode;
+
 /// What the page is doing. Shown in the statusline; never a reason to blank
 /// the frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,13 +14,6 @@ pub enum State {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Mode {
-    Normal,
-    /// The `:` line is open, holding what has been typed so far.
-    Command(String),
-}
-
 fn chrome_style() -> Style {
     Style {
         fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 },
@@ -27,8 +22,27 @@ fn chrome_style() -> Style {
     }
 }
 
+/// What the statusline says about the mode, if anything.
+///
+/// Normal mode says nothing: the absence of a tag is what normal looks
+/// like, and a browser that shouts its default state at you all day is
+/// noise.
+fn mode_tag(mode: &Mode) -> String {
+    match mode {
+        Mode::Normal | Mode::Command(_) => String::new(),
+        Mode::Insert => "-- INSERT -- ".to_string(),
+    }
+}
+
 /// Build the statusline, padded or truncated to exactly `cols` characters.
-pub fn statusline(state: &State, url: &str, title: &str, progress: f64, cols: u16) -> String {
+pub fn statusline(
+    mode: &Mode,
+    state: &State,
+    url: &str,
+    title: &str,
+    progress: f64,
+    cols: u16,
+) -> String {
     let tag = match state {
         State::Ready => String::new(),
         State::Loading => "[loading] ".to_string(),
@@ -37,9 +51,9 @@ pub fn statusline(state: &State, url: &str, title: &str, progress: f64, cols: u1
     };
 
     let left = if title.is_empty() {
-        format!("{tag}{url}")
+        format!("{}{tag}{url}", mode_tag(mode))
     } else {
-        format!("{tag}{url} — {title}")
+        format!("{}{tag}{url} — {title}", mode_tag(mode))
     };
 
     let percent = format!("{:>3}%", (progress * 100.0).round() as i64);
@@ -87,8 +101,8 @@ pub fn paint(
         return;
     }
     let text = match mode {
-        Mode::Normal => statusline(state, url, title, progress, cols),
         Mode::Command(buffer) => command_line(buffer, cols),
+        _ => statusline(mode, state, url, title, progress, cols),
     };
     frame.paint_text(CellPos { col: 0, row: rows - 1 }, &text, chrome_style());
 }
@@ -99,7 +113,7 @@ mod tests {
 
     #[test]
     fn statusline_shows_url_title_and_progress() {
-        let line = statusline(&State::Ready, "https://example.com", "Example", 0.5, 40);
+        let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "Example", 0.5, 40);
         assert!(line.contains("https://example.com"), "line was {line:?}");
         assert!(line.contains("Example"), "line was {line:?}");
         assert!(line.ends_with(" 50%"), "line was {line:?}");
@@ -108,28 +122,28 @@ mod tests {
     #[test]
     fn statusline_is_exactly_the_grid_width() {
         for cols in [10u16, 40, 80, 200] {
-            let line = statusline(&State::Ready, "https://example.com", "Example", 0.0, cols);
+            let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "Example", 0.0, cols);
             assert_eq!(line.chars().count(), usize::from(cols), "at {cols} columns");
         }
     }
 
     #[test]
     fn statusline_tags_a_loading_page() {
-        let line = statusline(&State::Loading, "https://example.com", "", 0.0, 60);
+        let line = statusline(&Mode::Normal, &State::Loading, "https://example.com", "", 0.0, 60);
         assert!(line.starts_with("[loading]"), "line was {line:?}");
     }
 
     #[test]
     fn statusline_shows_the_error_text() {
         let state = State::Error("could not resolve host".to_string());
-        let line = statusline(&state, "https://exmaple.com", "", 0.0, 60);
+        let line = statusline(&Mode::Normal, &state, "https://exmaple.com", "", 0.0, 60);
         assert!(line.contains("could not resolve host"), "line was {line:?}");
     }
 
     #[test]
     fn a_long_url_is_truncated_rather_than_overflowing() {
         let url = "https://example.com/".to_string() + &"a".repeat(500);
-        let line = statusline(&State::Ready, &url, "", 0.0, 40);
+        let line = statusline(&Mode::Normal, &State::Ready, &url, "", 0.0, 40);
         assert_eq!(line.chars().count(), 40);
     }
 
@@ -153,4 +167,17 @@ mod tests {
         paint(&mut frame, &mode, &State::Ready, "https://example.com", "", 0.0);
         assert!(frame.row_text(2).starts_with(":open exa"), "row 2 was {:?}", frame.row_text(2));
     }
+    #[test]
+    fn the_statusline_says_when_you_are_in_insert_mode() {
+        let line = statusline(&Mode::Insert, &State::Ready, "https://example.com", "", 0.0, 60);
+        assert!(line.starts_with("-- INSERT --"), "line was {line:?}");
+        assert!(line.contains("https://example.com"), "line was {line:?}");
+    }
+
+    #[test]
+    fn normal_mode_adds_nothing_to_the_statusline() {
+        let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "", 0.0, 60);
+        assert!(line.starts_with("https://example.com"), "line was {line:?}");
+    }
+
 }
