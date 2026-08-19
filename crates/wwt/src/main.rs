@@ -2,6 +2,7 @@ use std::io::{Write, stdout};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -34,13 +35,20 @@ async fn main() -> Result<()> {
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
+    // Its own call, because a terminal that refuses mouse capture is still a
+    // terminal you can read with. Bundling it with the alternate screen
+    // would make one refusal cost the whole session.
+    let mouse = execute!(stdout(), EnableMouseCapture).is_ok();
 
     let mut core = Core::new(page, client, grid, cell);
+    if !mouse {
+        core.notice("mouse unavailable");
+    }
     let mut out = stdout();
     let result = core.run(&mut out).await;
     let _ = out.flush();
 
-    execute!(stdout(), cursor::Show, LeaveAlternateScreen)?;
+    execute!(stdout(), cursor::Show, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result
 }

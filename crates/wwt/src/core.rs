@@ -5,18 +5,22 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, EventStream, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use crossterm::execute;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 use wwt_cdp::Client;
-use wwt_frame::{CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport};
+use wwt_frame::{
+    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport,
+};
 use wwt_page::{DIRTY_BINDING, Extraction, MouseInput, Page};
 use wwt_term::Renderer;
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, State};
-use wwt_ui::command::{self, Command};
+use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
 use crate::input::{Input, InputPump};
@@ -26,6 +30,10 @@ use crate::keys;
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// How far one notch of the wheel scrolls, in rows. Three is what a desktop
+/// browser does, and matching it is what makes the page feel normal.
+const WHEEL_ROWS: f64 = 3.0;
 
 /// What Chromium navigates to when it cannot reach a host.
 const CHROME_ERROR_SCHEME: &str = "chrome-error://";
@@ -49,6 +57,15 @@ enum Job {
 pub fn page_viewport(grid: GridSize, cell: CellSize) -> Viewport {
     let rows = grid.rows.saturating_sub(1).max(1);
     Viewport::new(GridSize { cols: grid.cols, rows }, cell)
+}
+
+/// The page cell a terminal cell refers to, or `None` when it is one of ours.
+///
+/// The last row is chrome. The page does not know it exists, so a click there
+/// has no page coordinate to become.
+pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
+    let grid = vp.grid();
+    (column < grid.cols && row < grid.rows).then_some(CellPos { col: column, row })
 }
 
 pub struct Core {
@@ -75,6 +92,9 @@ pub struct Core {
     /// The last hint query's targets, held so that pressing `f` twice on a
     /// page that has not moved costs one round trip rather than two.
     hints: Option<Vec<HintTarget>>,
+    /// A mouse capture change waiting for the next write to the terminal,
+    /// because that is where we have something to write to.
+    mouse_pending: Option<bool>,
 
     jobs_tx: mpsc::UnboundedSender<Job>,
     jobs_rx: mpsc::UnboundedReceiver<Job>,
@@ -120,6 +140,7 @@ impl Core {
             extracting: false,
             navigating: false,
             hints: None,
+            mouse_pending: None,
             jobs_tx,
             jobs_rx,
             input,
@@ -167,6 +188,7 @@ impl Core {
                                 return Ok(());
                             }
                         }
+                        TermEvent::Mouse(mouse) => self.on_mouse(mouse),
                         TermEvent::Resize(..) => {
                             resize_at = Some(Instant::now() + RESIZE_DEBOUNCE);
                         }
@@ -202,6 +224,14 @@ impl Core {
     }
 
     fn present(&mut self, out: &mut impl Write) -> Result<()> {
+        if let Some(on) = self.mouse_pending.take() {
+            if on {
+                execute!(out, EnableMouseCapture).context("enable mouse capture")?;
+            } else {
+                execute!(out, DisableMouseCapture).context("disable mouse capture")?;
+            }
+        }
+
         let frame = self.compose();
         self.renderer.render(&frame, out).context("write the frame")?;
         out.flush().context("flush the terminal")?;
@@ -295,6 +325,39 @@ impl Core {
         }
     }
 
+    fn on_mouse(&mut self, event: MouseEvent) {
+        let Some(cell) = page_cell(&self.vp, event.column, event.row) else {
+            return;
+        };
+        // `to_css` returns the cell's centre, so the click lands
+        // unambiguously inside the cell you pointed at.
+        let at = self.vp.to_css(cell);
+        let notch = WHEEL_ROWS * f64::from(self.cell.h);
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.input.send(Input::Mouse(MouseInput::press(at)));
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.input.send(Input::Mouse(MouseInput::release(at)));
+            }
+            MouseEventKind::ScrollDown => {
+                self.input.send(Input::Mouse(MouseInput::wheel(at, notch)));
+            }
+            MouseEventKind::ScrollUp => {
+                self.input.send(Input::Mouse(MouseInput::wheel(at, -notch)));
+            }
+            // Motion would cost a round trip per reported frame, and there is
+            // no context menu to open and no tab to middle-click into.
+            _ => {}
+        }
+    }
+
+    /// Say something in the statusline before the loop starts.
+    pub fn notice(&mut self, message: &str) {
+        self.state = State::Notice(message.to_string());
+    }
+
     /// Forward one key to the page, if it is one we know how to describe.
     ///
     /// An unknown key is dropped rather than approximated: a wrong `code` is
@@ -370,6 +433,11 @@ impl Core {
             Command::Back => self.run_action(Action::Back),
             Command::Forward => self.run_action(Action::Forward),
             Command::Reload => self.run_action(Action::Reload),
+            Command::Set(Setting::Mouse(on)) => {
+                self.mouse_pending = Some(on);
+                self.state =
+                    State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
+            }
             // Handled by the caller.
             Command::Quit => {}
         }
@@ -571,4 +639,18 @@ mod tests {
         let vp = page_viewport(GridSize { cols: 80, rows: 1 }, CellSize { w: 9, h: 20 });
         assert_eq!(vp.grid().rows, 1, "never zero, or Chromium gets a zero-height window");
     }
+    #[test]
+    fn a_click_on_the_page_keeps_its_cell() {
+        let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+        assert_eq!(page_cell(&vp, 5, 7), Some(CellPos { col: 5, row: 7 }));
+    }
+
+    #[test]
+    fn a_click_on_the_chrome_row_belongs_to_no_page_cell() {
+        // Row 23 is the statusline. The page does not know that row exists,
+        // so there is nothing to convert a click there into.
+        let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+        assert_eq!(page_cell(&vp, 5, 23), None);
+    }
+
 }
