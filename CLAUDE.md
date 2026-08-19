@@ -8,19 +8,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 a hand-rolled CDP client, with its layout painted into the terminal cell grid.
 Chromium does layout and JavaScript; this codebase never reimplements either.
 
-Currently at **M2** (navigation and reading). Milestones M1–M7 are defined in
+Currently at **M3** (interaction). Milestones M1–M7 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 102 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 147 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
 
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
     cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
+    cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -82,7 +83,8 @@ mutates it. Consequences to preserve when adding features:
 | `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
 | `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | |
 | `wwt-term` | `TIOCGWINSZ` probe, diffing renderer | |
-| `wwt` | Binary: core loop, keymap, `:` commands, chrome | `wwt-ui` is deferred to M3. |
+| `wwt-ui` | Modes, chrome, `:` commands, hint labels | Depends on `wwt-frame` only. No pages, no CDP, no terminal. |
+| `wwt` | Binary: core loop, keymap, key table, input pump | |
 
 `Frame` is the single output type every rendering mode produces, so text mode, and
 later pixel and reader modes, cannot diverge in how they reach the screen.
@@ -95,6 +97,32 @@ returns runs *plus* title, URL, and scroll geometry in one `Runtime.evaluate` ro
 trip — the statusline costs no extra call. Line splitting uses `getClientRects` plus a
 binary search over character offsets (`O(lines · log chars)` forced layouts); this is
 scroll latency, so keep it cheap.
+
+## Input
+
+Three rules carry M3:
+
+- **`Esc` is never forwarded.** A page cannot trap the keyboard. `Ctrl-]`
+  sends the page a literal Escape, because a terminal transmits `Ctrl-[` as
+  `0x1B`, which *is* Escape.
+- **Mode changes only in response to a keystroke.** No `focusin` listener, no
+  page-driven mode. `i` hands the keyboard over, `Esc` takes it back, and
+  hinting a text field enters insert because that was your keystroke.
+- **Input is ordered.** Keys and clicks go through one pump task
+  (`wwt/src/input.rs`), not one spawned task each, or `abc` would sometimes
+  arrive as `acb`. Everything else about the loop is unchanged: nothing
+  blocks it.
+
+`keys.rs` maps a crossterm event to the quad `Input.dispatchKeyEvent` needs.
+It lives in the binary because its output type belongs to `wwt-page` and its
+input type to crossterm, so either other home would point a dependency edge
+backwards. Ctrl and Meta suppress the inserted text, or a page's `Ctrl-S`
+handler would fire *and* type an `s`.
+
+Hint targets come from `__wwt.hints()`, queried on `f` and cached until the
+next dirty signal. They are deliberately not part of extraction: that path
+runs on every scroll frame. Labels are of uniform length, which makes the set
+prefix-free, so activation needs no timeout.
 
 ## Working in this repo
 
