@@ -253,3 +253,58 @@ async fn reload_keeps_the_same_url() {
     page.reload().await.expect("reload");
     assert!(page.extract().await.expect("extract").url.ends_with("simple.html"));
 }
+
+/// Paint an extraction into a frame and return it as lines of text. This is
+/// the ASCII art that makes snapshot diffs readable in review.
+fn snapshot(extraction: &wb_page::Extraction) -> String {
+    let vp = viewport();
+    let mut frame = wb_frame::Frame::new(vp.grid());
+    for run in &extraction.runs {
+        frame.paint_run(&vp, run);
+    }
+    (0..vp.grid().rows)
+        .map(|row| frame.row_text(row))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
+#[tokio::test]
+async fn simple_page_matches_its_snapshot() {
+    let h = harness().await;
+    let extraction = open(&h, "simple.html").await.extract().await.expect("extract");
+    let got = snapshot(&extraction);
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/simple.txt");
+    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create the snapshot dir");
+        std::fs::write(&path, format!("{got}\n")).expect("write the snapshot");
+        return;
+    }
+
+    let want = std::fs::read_to_string(&path)
+        .expect("missing snapshot; regenerate with UPDATE_SNAPSHOTS=1");
+    assert_eq!(got, want.trim_end(), "the rendered page changed");
+}
+
+/// Not an assertion — a measurement. Run with `--nocapture` and record the
+/// number; it is the floor on how fast a scroll can feel.
+#[tokio::test]
+async fn measure_extraction_of_a_heavy_page() {
+    let h = harness().await;
+    let page = open(&h, "heavy.html").await;
+
+    // One warm pass, so the number is steady-state rather than first-run.
+    page.extract().await.expect("extract");
+
+    let start = std::time::Instant::now();
+    let extraction = page.extract().await.expect("extract");
+    let elapsed = start.elapsed();
+
+    println!(
+        "heavy.html: {} runs extracted in {elapsed:?}",
+        extraction.runs.len()
+    );
+    assert!(!extraction.runs.is_empty());
+}

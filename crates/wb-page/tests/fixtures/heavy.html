@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Heavy Fixture</title>
+<style>body { margin: 0; font: 16px/20px sans-serif; width: 720px; }</style>
+<script>
+  const words = "the quick brown fox jumps over a lazy dog while nobody watches".split(" ");
+  let html = "";
+  for (let i = 0; i < 1500; i++) {
+    const n = 8 + (i % 17);
+    const text = Array.from({ length: n }, (_, k) => words[(i + k) % words.length]).join(" ");
+    html += `<p>${text}</p>`;
+  }
+  document.write(html);
+</script>

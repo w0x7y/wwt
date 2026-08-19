@@ -2,10 +2,10 @@
 // it survives navigation. It defines the extraction entry point and the
 // listeners that tell us the page changed.
 //
-// The extraction body measures each character's rect individually and groups
-// by rounded top. That is O(n) ranges per text node and slow on large pages,
-// but it is exact and needs no heuristics about where lines break. A later
-// task replaces the inner loop with a binary search over character offsets.
+// The extraction body asks each text node for its line boxes directly with
+// getClientRects, then binary-searches character offsets to find where the
+// text splits between them: O(lines * log chars) forced layouts rather than
+// the O(chars) of measuring every character.
 (() => {
   if (window.__webinal) return;
 
@@ -52,6 +52,62 @@
   window.addEventListener("scroll", onScroll, { passive: true, capture: true });
   window.addEventListener("load", signal);
 
+  // How far to scan forward past characters with no box (collapsed
+  // whitespace) before giving up and using the caller's fallback.
+  const EMPTY_SCAN_LIMIT = 8;
+
+  // The top edge of the character at `index`, skipping over characters that
+  // have no box of their own.
+  function topAt(range, node, index, fallback) {
+    const limit = Math.min(node.nodeValue.length, index + EMPTY_SCAN_LIMIT);
+    for (let k = index; k < limit; k++) {
+      range.setStart(node, k);
+      range.setEnd(node, k + 1);
+      const rect = range.getBoundingClientRect();
+      if (rect.width > 0 || rect.height > 0) return rect.top;
+    }
+    return fallback;
+  }
+
+  // Split a text node into one entry per line box.
+  //
+  // getClientRects gives us the line boxes directly, so the only unknown is
+  // where in the string each line begins. Character tops increase
+  // monotonically through the string, so each boundary is a binary search
+  // rather than a scan.
+  function linesOf(range, node) {
+    const text = node.nodeValue;
+    range.selectNodeContents(node);
+    const rects = Array.from(range.getClientRects()).filter(
+      (r) => r.width > 0 || r.height > 0
+    );
+    if (rects.length === 0) return [];
+    if (rects.length === 1) {
+      return [{ rect: rects[0], text }];
+    }
+
+    const lines = [];
+    let start = 0;
+    for (let i = 1; i < rects.length; i++) {
+      // The first offset that has moved down to line i.
+      const threshold = rects[i].top - 0.5;
+      let lo = start;
+      let hi = text.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (topAt(range, node, mid, rects[i - 1].top) >= threshold) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      lines.push({ rect: rects[i - 1], text: text.slice(start, lo) });
+      start = lo;
+    }
+    lines.push({ rect: rects[rects.length - 1], text: text.slice(start) });
+    return lines;
+  }
+
   function extract() {
     const runs = [];
     const vw = window.innerWidth;
@@ -79,47 +135,26 @@
       }
       if (parent.tagName === "SCRIPT" || parent.tagName === "STYLE") continue;
 
-      // Group the node's characters into lines by their rounded top edge.
-      const lines = new Map();
-      for (let i = 0; i < text.length; i++) {
-        range.setStart(node, i);
-        range.setEnd(node, i + 1);
-        const r = range.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0) continue;
-
-        const key = Math.round(r.top);
-        let line = lines.get(key);
-        if (!line) {
-          line = { chars: [], left: r.left, right: r.right, top: r.top, bottom: r.bottom };
-          lines.set(key, line);
-        }
-        line.chars.push(text[i]);
-        line.left = Math.min(line.left, r.left);
-        line.right = Math.max(line.right, r.right);
-        line.bottom = Math.max(line.bottom, r.bottom);
-      }
-
       const fontSize = parseFloat(cs.fontSize) || 16;
       const weight = parseInt(cs.fontWeight, 10) || 400;
 
-      for (const line of lines.values()) {
-        const content = line.chars.join("").replace(/\s+/g, " ").trim();
+      for (const line of linesOf(range, node)) {
+        const content = line.text.replace(/\s+/g, " ").trim();
         if (!content) continue;
 
+        const r = line.rect;
         // Cull runs entirely outside the viewport.
-        if (line.bottom < 0 || line.top > vh || line.right < 0 || line.left > vw) {
-          continue;
-        }
+        if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
 
         runs.push({
           text: content,
-          x: line.left,
-          y: line.top,
-          w: line.right - line.left,
-          h: line.bottom - line.top,
+          x: r.left,
+          y: r.top,
+          w: r.width,
+          h: r.height,
           // The descender is roughly a fifth of the font size; close enough to
           // put the baseline in the right cell row.
-          baseline: line.bottom - fontSize * 0.21,
+          baseline: r.bottom - fontSize * 0.21,
           color: cs.color,
           bold: weight >= 600,
           z: 0,
