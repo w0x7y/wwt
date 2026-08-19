@@ -1,5 +1,7 @@
 //! Wiring: browser, page, frame.
 
+pub mod command;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
