@@ -2519,7 +2519,7 @@ pub fn action_for(key: KeyEvent, vp: Viewport) -> Option<Action> {
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 100 tests pass (82 + 8 chrome + 10 keymap). Clippy clean.
+Expected: 99 tests pass (82 + 8 chrome + 9 keymap). Clippy clean.
 
 - [ ] **Step 8: Commit**
 
@@ -2975,7 +2975,7 @@ Add these imports to the test module so it compiles: `use wb_frame::{CellSize, G
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 102 tests pass (100 + 2 new). Clippy clean.
+Expected: 101 tests pass (99 + 2 new). Clippy clean.
 
 If clippy objects to `Job::Extracted(Box<Extraction>)` or to the `select!` guard, fix the code rather than silencing the lint.
 
@@ -3168,7 +3168,7 @@ Commands: `:open <url>`, `:back`, `:forward`, `:reload`, `:quit`.
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 103 tests pass (102 + 1 new). Clippy clean.
+Expected: 102 tests pass (101 + 1 new). Clippy clean.
 
 - [ ] **Step 7: Drive it by hand**
 
@@ -3202,7 +3202,7 @@ git commit -m "feat(webinal): drive the browser from the core loop"
 
 ## Definition of done for M2
 
-- `cargo test --workspace` is green, with 103 tests: 22 `wb-frame`, 18 `wb-term`, 8 `wb-cdp`, 22 `wb-page`, 33 `webinal`.
+- `cargo test --workspace` is green, with 102 tests: 22 `wb-frame`, 18 `wb-term`, 8 `wb-cdp`, 22 `wb-page`, 32 `webinal`.
 - `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - The heavy-page extraction measurement from Task 10 is recorded in that task's commit message, and the after number is better than the before number.
 - `crates/wb-page/tests/snapshots/simple.txt` passes unmodified through the Task 10 rewrite.

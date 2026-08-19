@@ -1,6 +1,8 @@
 //! Wiring: browser, page, frame.
 
+pub mod chrome;
 pub mod command;
+pub mod keymap;
 
 use std::sync::Arc;
 
