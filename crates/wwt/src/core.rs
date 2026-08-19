@@ -196,6 +196,8 @@ impl Core {
             }
             // Wired in Task 10. Until then a mode nothing can enter.
             Mode::Insert => false,
+            // Wired in Task 11.
+            Mode::Hint(_) => false,
             Mode::Normal => match action_for(key, self.vp) {
                 Some(Action::Quit) => true,
                 Some(Action::EnterCommand(prefill)) => {

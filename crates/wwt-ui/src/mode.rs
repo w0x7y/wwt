@@ -1,5 +1,7 @@
 //! What keys mean right now.
 
+use crate::hint::HintSession;
+
 /// The mode the browser is in.
 ///
 /// Mode changes only in response to a keystroke. A page cannot move you
@@ -13,4 +15,6 @@ pub enum Mode {
     /// Every key goes to the page. Entered with `i` or by hinting a text
     /// field, left with `Esc`, which is never forwarded.
     Insert,
+    /// Labels are on screen and the next keys filter them.
+    Hint(HintSession),
 }

@@ -7,6 +7,7 @@
 
 pub mod chrome;
 pub mod command;
+pub mod hint;
 pub mod mode;
 
 pub use mode::Mode;

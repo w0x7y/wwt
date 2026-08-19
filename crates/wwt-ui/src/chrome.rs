@@ -31,6 +31,7 @@ fn mode_tag(mode: &Mode) -> String {
     match mode {
         Mode::Normal | Mode::Command(_) => String::new(),
         Mode::Insert => "-- INSERT -- ".to_string(),
+        Mode::Hint(session) => session.tag(),
     }
 }
 
@@ -178,6 +179,26 @@ mod tests {
     fn normal_mode_adds_nothing_to_the_statusline() {
         let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "", 0.0, 60);
         assert!(line.starts_with("https://example.com"), "line was {line:?}");
+    }
+
+    #[test]
+    fn the_statusline_shows_what_has_been_typed_at_the_hints() {
+        use crate::hint::HintSession;
+        use wwt_frame::{CssRect, HintTarget, TargetKind};
+
+        let targets = vec![HintTarget {
+            rect: CssRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+            kind: TargetKind::Clickable,
+        }];
+        let line = statusline(
+            &Mode::Hint(HintSession::new(targets)),
+            &State::Ready,
+            "https://example.com",
+            "",
+            0.0,
+            60,
+        );
+        assert!(line.starts_with("-- HINT  (1) --"), "line was {line:?}");
     }
 
 }
