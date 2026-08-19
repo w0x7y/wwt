@@ -669,59 +669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
-name = "wb-cdp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures-util",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "wb-frame"
-version = "0.1.0"
-
-[[package]]
-name = "wb-page"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "wb-cdp",
- "wb-frame",
-]
-
-[[package]]
-name = "wb-term"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "rustix",
- "wb-frame",
-]
-
-[[package]]
-name = "webinal"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "futures-util",
- "tokio",
- "wb-cdp",
- "wb-frame",
- "wb-page",
- "wb-term",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -756,6 +703,59 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wwt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "futures-util",
+ "tokio",
+ "wwt-cdp",
+ "wwt-frame",
+ "wwt-page",
+ "wwt-term",
+]
+
+[[package]]
+name = "wwt-cdp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "wwt-frame"
+version = "0.1.0"
+
+[[package]]
+name = "wwt-page"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wwt-cdp",
+ "wwt-frame",
+]
+
+[[package]]
+name = "wwt-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "rustix",
+ "wwt-frame",
 ]
 
 [[package]]

@@ -1,0 +1,12 @@
+[package]
+name = "wwt-page"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wwt-cdp = { path = "../wwt-cdp" }
+wwt-frame = { path = "../wwt-frame" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

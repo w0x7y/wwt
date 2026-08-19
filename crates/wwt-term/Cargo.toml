@@ -1,0 +1,10 @@
+[package]
+name = "wwt-term"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wwt-frame = { path = "../wwt-frame" }
+anyhow.workspace = true
+crossterm.workspace = true
+rustix.workspace = true

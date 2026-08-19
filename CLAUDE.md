@@ -4,25 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A terminal web browser: headless Chromium driven over a hand-rolled CDP client, with
-its layout painted into the terminal cell grid. Chromium does layout and JavaScript;
-this codebase never reimplements either.
+`wwt` (world wide terminal) is a terminal web browser: headless Chromium driven over
+a hand-rolled CDP client, with its layout painted into the terminal cell grid.
+Chromium does layout and JavaScript; this codebase never reimplements either.
 
 Currently at **M2** (navigation and reading). Milestones M1–M7 are defined in
-`docs/superpowers/specs/2026-08-19-webinal-design.md` §11.
+`docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
-    cargo run -p webinal -- example.com          # run it (needs a real terminal)
+    cargo run -p wwt -- example.com              # run it (needs a real terminal)
     cargo test --workspace                       # 102 tests; the integration ones launch Chromium
-    cargo test -p wb-frame                       # pure logic, no browser needed
-    cargo test -p wb-page --test extraction extracts_the_visible_text   # one test by name
+    cargo test -p wwt-frame                      # pure logic, no browser needed
+    cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
 
-    UPDATE_SNAPSHOTS=1 cargo test -p wb-page --test extraction  # regenerate the ASCII snapshot
-    cargo test -p wb-page --test extraction measure_extraction -- --nocapture  # extraction latency
+    UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
+    cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
 
-`WEBINAL_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
+`WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
 
 Unit tests in `src/` must run without Chromium; anything needing a browser goes in
@@ -30,7 +30,7 @@ Unit tests in `src/` must run without Chromium; anything needing a browser goes 
 
 ## The coordinate model
 
-This is the load-bearing decision (`wb-frame/src/geom.rs`, spec §3). Chromium is told
+This is the load-bearing decision (`wwt-frame/src/geom.rs`, spec §3). Chromium is told
 the window is exactly `grid × cell_size` CSS pixels, so a normal desktop layout maps
 one-to-one onto cells. Everything follows:
 
@@ -56,13 +56,13 @@ job results ────┘         │                       │
 resize timer ───┘         └──> compose Frame ──> Renderer (diff) ──> stdout
 ```
 
-`Core` (`crates/webinal/src/core.rs`) owns all state and is the only thing that
+`Core` (`crates/wwt/src/core.rs`) owns all state and is the only thing that
 mutates it. Consequences to preserve when adding features:
 
 - **Nothing blocks the loop.** Page operations spawn and report back as a `Job` on one
   channel. A thirty-second load still leaves keys responsive.
 - **Re-extraction is event-driven, never polled.** `bootstrap.js` calls the
-  `__webinal_dirty` binding from a debounced `MutationObserver`, scroll listener, and
+  `__wwt_dirty` binding from a debounced `MutationObserver`, scroll listener, and
   `load`; the core keeps at most one extraction in flight and re-runs if the flag is
   still set. An idle page must cost ~zero CPU — do not add a tick loop.
 - **Never blank the frame you are looking at** (spec §8). Every failure path degrades
@@ -78,18 +78,18 @@ mutates it. Consequences to preserve when adding features:
 
 | Crate | Responsibility | Hard rule |
 |---|---|---|
-| `wb-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
-| `wb-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
-| `wb-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | |
-| `wb-term` | `TIOCGWINSZ` probe, diffing renderer | |
-| `webinal` | Binary: core loop, keymap, `:` commands, chrome | `wm-ui` is deferred to M3. |
+| `wwt-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
+| `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
+| `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | |
+| `wwt-term` | `TIOCGWINSZ` probe, diffing renderer | |
+| `wwt` | Binary: core loop, keymap, `:` commands, chrome | `wwt-ui` is deferred to M3. |
 
 `Frame` is the single output type every rendering mode produces, so text mode, and
 later pixel and reader modes, cannot diverge in how they reach the screen.
 
 ## The injected script
 
-`crates/wb-page/assets/bootstrap.js` is installed once per document via
+`crates/wwt-page/assets/bootstrap.js` is installed once per document via
 `Page.addScriptToEvaluateOnNewDocument`, so it survives navigation. `extract()`
 returns runs *plus* title, URL, and scroll geometry in one `Runtime.evaluate` round
 trip — the statusline costs no extra call. Line splitting uses `getClientRects` plus a

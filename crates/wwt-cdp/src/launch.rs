@@ -1,0 +1,110 @@
+//! Starting a Chromium and finding its websocket endpoint.
+
+use std::path::PathBuf;
+use std::process::Stdio;
+
+use anyhow::{Context, Result, anyhow, bail};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::time::{Duration, timeout};
+
+const CANDIDATES: &[&str] = &["chromium", "chromium-browser", "google-chrome-stable"];
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Locate a Chromium binary. `WWT_CHROMIUM` wins if set.
+///
+/// We never download a browser; an absent one is a clear error with an
+/// actionable message, per spec section 8.
+pub fn find_chromium() -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var("WWT_CHROMIUM") {
+        let path = PathBuf::from(&explicit);
+        if !path.is_file() {
+            bail!("WWT_CHROMIUM is set to {explicit}, which is not a file");
+        }
+        return Ok(path);
+    }
+
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for name in CANDIDATES {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "no Chromium found. Install one (`sudo pacman -S chromium`) or set \
+         WWT_CHROMIUM to the absolute path of a Chromium binary."
+    ))
+}
+
+/// A running headless Chromium. Killed on drop.
+pub struct Chromium {
+    child: Child,
+    ws_url: String,
+    /// Held so the profile directory outlives the browser. M4 replaces this
+    /// with a persistent profile under the user's data directory.
+    _profile: tempfile::TempDir,
+}
+
+impl Chromium {
+    pub async fn launch() -> Result<Self> {
+        let binary = find_chromium()?;
+        let profile = tempfile::tempdir().context("create a temporary profile directory")?;
+
+        let mut child = Command::new(&binary)
+            .arg("--headless=new")
+            // Port 0 lets the OS pick; we read the real one back off stderr.
+            .arg("--remote-debugging-port=0")
+            .arg(format!("--user-data-dir={}", profile.path().display()))
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-gpu")
+            .arg("about:blank")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("failed to start {}", binary.display()))?;
+
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("chromium stderr was not piped"))?;
+
+        let ws_url = timeout(STARTUP_TIMEOUT, read_ws_url(stderr))
+            .await
+            .map_err(|_| anyhow!("chromium did not report a debugging endpoint within 20s"))??;
+
+        Ok(Self {
+            child,
+            ws_url,
+            _profile: profile,
+        })
+    }
+
+    pub fn ws_url(&self) -> &str {
+        &self.ws_url
+    }
+}
+
+impl Drop for Chromium {
+    fn drop(&mut self) {
+        // kill_on_drop handles the process; start_kill makes it prompt.
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Chromium announces its endpoint on stderr as
+/// `DevTools listening on ws://127.0.0.1:PORT/devtools/browser/UUID`.
+async fn read_ws_url(stderr: tokio::process::ChildStderr) -> Result<String> {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Some(line) = lines.next_line().await? {
+        if let Some(idx) = line.find("ws://") {
+            return Ok(line[idx..].trim().to_string());
+        }
+    }
+    bail!("chromium exited before announcing a debugging endpoint")
+}

@@ -1,0 +1,14 @@
+[package]
+name = "wwt"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wwt-cdp = { path = "../wwt-cdp" }
+wwt-frame = { path = "../wwt-frame" }
+wwt-page = { path = "../wwt-page" }
+wwt-term = { path = "../wwt-term" }
+anyhow.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
