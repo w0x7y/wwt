@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mutating Fixture</title>
+<style>body { margin: 0; font: 16px/20px monospace; }</style>
+<p id="target">before</p>
+<script>
+  // Mutate after load, so the observer is installed and we are subscribed.
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      document.getElementById("target").textContent = "after";
+    }, 100);
+  });
+</script>

@@ -15,10 +15,46 @@ const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_POLL: Duration = Duration::from_millis(50);
 
+/// The page-side function the injected script calls to say it changed.
+/// Arrives back as a `Runtime.bindingCalled` event.
+pub const DIRTY_BINDING: &str = "__webinal_dirty";
+
 /// The shape `extract.js` returns.
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
+    title: String,
+    url: String,
+    #[serde(rename = "scrollY")]
+    scroll_y: f64,
+    #[serde(rename = "scrollHeight")]
+    scroll_height: f64,
+    #[serde(rename = "innerHeight")]
+    inner_height: f64,
+}
+
+/// One pass of the extraction script: everything the renderer and the
+/// statusline need, from one round trip.
+#[derive(Debug, Clone)]
+pub struct Extraction {
+    pub runs: Vec<TextRun>,
+    pub title: String,
+    pub url: String,
+    pub scroll_y: f64,
+    pub scroll_height: f64,
+    pub viewport_height: f64,
+}
+
+impl Extraction {
+    /// How far down the document we are: 0.0 at the top, 1.0 when the last
+    /// line is on screen, and 0.0 when the document fits without scrolling.
+    pub fn scroll_progress(&self) -> f64 {
+        let scrollable = self.scroll_height - self.viewport_height;
+        if scrollable <= 0.0 {
+            return 0.0;
+        }
+        (self.scroll_y / scrollable).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +104,20 @@ impl Page {
             .call_on(&page.session_id, "Page.enable", json!({}))
             .await
             .context("enable the Page domain")?;
+        page.client
+            .call_on(&page.session_id, "Runtime.enable", json!({}))
+            .await
+            .context("enable the Runtime domain")?;
+        // Registered before the first navigation, so the binding exists by
+        // the time the bootstrap runs.
+        page.client
+            .call_on(
+                &page.session_id,
+                "Runtime.addBinding",
+                json!({ "name": DIRTY_BINDING }),
+            )
+            .await
+            .context("install the dirty-signal binding")?;
         page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
         page.navigate(url).await?;
@@ -149,21 +199,8 @@ impl Page {
         }
     }
 
-    pub async fn title(&self) -> Result<String> {
-        let result = self
-            .client
-            .call_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({ "expression": "document.title", "returnByValue": true }),
-            )
-            .await
-            .context("read document.title")?;
-        Ok(result["result"]["value"].as_str().unwrap_or_default().to_string())
-    }
-
-    /// Run the extraction script and convert its output into `TextRun`s.
-    pub async fn extract(&self) -> Result<Vec<TextRun>> {
+    /// Run the extraction script and convert its output.
+    pub async fn extract(&self) -> Result<Extraction> {
         let result = self
             .client
             .call_on(
@@ -185,20 +222,27 @@ impl Page {
         let raw: RawExtraction = serde_json::from_value(result["result"]["value"].clone())
             .context("the extraction script returned an unexpected shape")?;
 
-        Ok(raw
-            .runs
-            .into_iter()
-            .map(|r| TextRun {
-                text: r.text,
-                rect: CssRect { x: r.x, y: r.y, w: r.w, h: r.h },
-                baseline: r.baseline,
-                style: Style {
-                    fg: parse_css_color(&r.color),
-                    bold: r.bold,
-                    reverse: false,
-                },
-                z: r.z,
-            })
-            .collect())
+        Ok(Extraction {
+            runs: raw
+                .runs
+                .into_iter()
+                .map(|r| TextRun {
+                    text: r.text,
+                    rect: CssRect { x: r.x, y: r.y, w: r.w, h: r.h },
+                    baseline: r.baseline,
+                    style: Style {
+                        fg: parse_css_color(&r.color),
+                        bold: r.bold,
+                        reverse: false,
+                    },
+                    z: r.z,
+                })
+                .collect(),
+            title: raw.title,
+            url: raw.url,
+            scroll_y: raw.scroll_y,
+            scroll_height: raw.scroll_height,
+            viewport_height: raw.inner_height,
+        })
     }
 }

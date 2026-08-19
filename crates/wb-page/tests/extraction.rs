@@ -40,7 +40,7 @@ async fn open(h: &Harness, fixture: &str) -> Page {
 #[tokio::test]
 async fn extracts_the_visible_text_of_a_page() {
     let h = harness().await;
-    let runs = open(&h, "simple.html").await.extract().await.expect("extract");
+    let runs = open(&h, "simple.html").await.extract().await.expect("extract").runs;
 
     let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
     assert!(texts.contains(&"Heading"), "runs were {texts:?}");
@@ -50,7 +50,7 @@ async fn extracts_the_visible_text_of_a_page() {
 #[tokio::test]
 async fn skips_hidden_text() {
     let h = harness().await;
-    let runs = open(&h, "simple.html").await.extract().await.expect("extract");
+    let runs = open(&h, "simple.html").await.extract().await.expect("extract").runs;
 
     let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
     assert!(
@@ -62,7 +62,7 @@ async fn skips_hidden_text() {
 #[tokio::test]
 async fn carries_color_and_weight_through() {
     let h = harness().await;
-    let runs = open(&h, "simple.html").await.extract().await.expect("extract");
+    let runs = open(&h, "simple.html").await.extract().await.expect("extract").runs;
 
     let heading = runs.iter().find(|r| r.text == "Heading").expect("heading run");
     assert_eq!(heading.style.fg, wb_frame::Rgb { r: 255, g: 0, b: 0 });
@@ -79,7 +79,7 @@ async fn carries_color_and_weight_through() {
 #[tokio::test]
 async fn orders_runs_down_the_page() {
     let h = harness().await;
-    let runs = open(&h, "simple.html").await.extract().await.expect("extract");
+    let runs = open(&h, "simple.html").await.extract().await.expect("extract").runs;
 
     let heading = runs.iter().find(|r| r.text == "Heading").expect("heading");
     let para = runs
@@ -96,13 +96,13 @@ async fn orders_runs_down_the_page() {
 async fn reads_the_document_title() {
     let h = harness().await;
     let page = open(&h, "simple.html").await;
-    assert_eq!(page.title().await.expect("title"), "Fixture Page");
+    assert_eq!(page.extract().await.expect("extract").title, "Fixture Page");
 }
 
 #[tokio::test]
 async fn lays_the_page_out_at_the_viewport_we_asked_for() {
     let h = harness().await;
-    let runs = open(&h, "simple.html").await.extract().await.expect("extract");
+    let runs = open(&h, "simple.html").await.extract().await.expect("extract").runs;
 
     // The viewport is 80 * 9 = 720 CSS px wide; nothing may be laid out
     // beyond it, which is how we know setDeviceMetricsOverride took effect.
@@ -113,4 +113,66 @@ async fn lays_the_page_out_at_the_viewport_we_asked_for() {
             run.text
         );
     }
+}
+
+#[tokio::test]
+async fn a_dom_mutation_signals_dirtiness() {
+    let h = harness().await;
+    let mut events = h.client.subscribe();
+    let page = open(&h, "mutating.html").await;
+
+    // The fixture mutates itself 100ms after load, so the signal arrives
+    // after we are already subscribed and watching.
+    let signalled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = events.recv().await {
+            if event.method == "Runtime.bindingCalled"
+                && event.params["name"] == wb_page::DIRTY_BINDING
+                && event.session_id.as_deref() == Some(page.session_id())
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("the dirty binding should fire within ten seconds");
+
+    assert!(signalled, "the CDP connection closed before the binding fired");
+}
+
+#[tokio::test]
+async fn extraction_reports_scroll_geometry() {
+    let h = harness().await;
+    let extraction = open(&h, "simple.html").await.extract().await.expect("extract");
+
+    assert_eq!(extraction.scroll_y, 0.0);
+    assert!(extraction.viewport_height > 0.0);
+    assert!(extraction.url.ends_with("simple.html"), "url was {}", extraction.url);
+    assert_eq!(extraction.title, "Fixture Page");
+}
+
+#[test]
+fn scroll_progress_is_zero_when_the_document_fits() {
+    let e = wb_page::Extraction {
+        runs: Vec::new(),
+        title: String::new(),
+        url: String::new(),
+        scroll_y: 0.0,
+        scroll_height: 400.0,
+        viewport_height: 400.0,
+    };
+    assert_eq!(e.scroll_progress(), 0.0);
+}
+
+#[test]
+fn scroll_progress_is_one_at_the_bottom() {
+    let e = wb_page::Extraction {
+        runs: Vec::new(),
+        title: String::new(),
+        url: String::new(),
+        scroll_y: 600.0,
+        scroll_height: 1000.0,
+        viewport_height: 400.0,
+    };
+    assert_eq!(e.scroll_progress(), 1.0);
 }

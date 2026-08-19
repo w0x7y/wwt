@@ -1,6 +1,6 @@
 // Installed once per document via Page.addScriptToEvaluateOnNewDocument, so
-// it survives navigation. It defines the extraction entry point; the dirty
-// signal listeners are added in the next task.
+// it survives navigation. It defines the extraction entry point and the
+// listeners that tell us the page changed.
 //
 // The extraction body measures each character's rect individually and groups
 // by rounded top. That is O(n) ranges per text node and slow on large pages,
@@ -8,6 +8,49 @@
 // task replaces the inner loop with a binary search over character offsets.
 (() => {
   if (window.__webinal) return;
+
+  // Trailing debounces. Mutations are bursty and cheap to coalesce; scroll
+  // fires per frame and must not outrun a single extraction.
+  const MUTATION_DEBOUNCE_MS = 50;
+  const SCROLL_DEBOUNCE_MS = 16;
+
+  function signal() {
+    // The binding may not be installed yet on the very first document.
+    if (typeof window.__webinal_dirty === "function") {
+      try {
+        window.__webinal_dirty("");
+      } catch (e) {
+        // A torn-down context is not worth reporting.
+      }
+    }
+  }
+
+  function debounce(fn, ms) {
+    let timer = null;
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn();
+      }, ms);
+    };
+  }
+
+  const onMutation = debounce(signal, MUTATION_DEBOUNCE_MS);
+  const onScroll = debounce(signal, SCROLL_DEBOUNCE_MS);
+
+  // `document` exists even at document-start, so the observer can be
+  // attached before there is a body to observe.
+  new MutationObserver(onMutation).observe(document, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+  });
+
+  // Capture, because scrolling inside a nested scroller does not bubble.
+  window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+  window.addEventListener("load", signal);
 
   function extract() {
     const runs = [];

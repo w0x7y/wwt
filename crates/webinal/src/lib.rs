@@ -18,9 +18,9 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
         .context("connect to chromium")?;
     let page = Page::open(Arc::new(client), url, vp).await?;
 
-    let runs = page.extract().await?;
+    let extraction = page.extract().await?;
     let mut frame = Frame::new(vp.grid());
-    for run in &runs {
+    for run in &extraction.runs {
         frame.paint_run(&vp, run);
     }
     Ok(frame)

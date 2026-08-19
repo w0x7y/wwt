@@ -1,4 +1,4 @@
 pub mod color;
 pub mod extract;
 
-pub use extract::Page;
+pub use extract::{DIRTY_BINDING, Extraction, Page};
