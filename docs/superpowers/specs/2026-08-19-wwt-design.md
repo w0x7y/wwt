@@ -215,11 +215,16 @@ special handling.
 - **Normal** — keys are browser commands: `j`/`k` scroll, `f` hints, `o` open,
   `:` command palette, `gt`/`gT` tab switching, `p` toggles pixel mode, `r` toggles
   reader mode.
-- **Insert** — every keystroke forwards to the page. Entered by hinting or clicking a
-  text field, exited with `Esc`.
+- **Insert** — every keystroke forwards to the page. Entered with `i` or by hinting a
+  text field, exited with `Esc`, which is never forwarded. `Ctrl-]` sends the page a
+  literal Escape, since a terminal cannot distinguish `Ctrl-[` from `Esc`.
 - **Hint** — `f` overlays labels on every interactive box; typing a label clicks it.
-  Because boxes are already in cell coordinates from the same extraction, this is
-  nearly free: assign labels, paint over the frame, filter on keypress.
+  The boxes come from their own query, run when `f` is pressed and cached until the
+  page next says it changed. Extraction knows only about text nodes, and adding an
+  element sweep with a hit test per candidate to a path that runs on every scroll
+  frame would buy nothing: hints are pressed occasionally, and a query made at the
+  moment you press `f` describes the page as it is now. Filtering is then local:
+  assign labels, paint over the frame, filter on keypress.
 - **Command** — a `:` line for `:open`, `:tabclose`, `:set zoom`, and similar.
 
 ### Reader mode
@@ -235,9 +240,12 @@ so hints within it address reflowed positions, and switching back to text mode r
 the page's true layout at the scroll position we entered from. It is a distinct view,
 not a third mode of the same view, and the statusline says so.
 
-Mode tracks the page's reality, not only keystrokes: the injected script's `focusin`
-listener means a site that autofocuses its search box on load puts us in insert mode
-automatically, and clicking away drops out of it.
+Mode changes only in response to a keystroke. A page that autofocuses its search box
+does not take the keyboard, and a mouse click does not either: `i` hands it over and
+`Esc` takes it back. Tracking the page's own focus was considered and rejected. It
+reads as convenient until a page uses it to swallow `j`, and a browser whose keyboard
+belongs to whatever site you happened to open is not one you can trust with a
+single-key quit.
 
 ## 7. Sessions and tabs
 
@@ -323,9 +331,9 @@ slowest and most careful about — everything later assumes it is right.
 **M2 — Navigation and reading.** Scroll, `:open`, history, the diffing renderer, the
 `MutationObserver` dirty-signal loop. At this point it is a usable read-only browser.
 
-**M3 — Interaction.** The keymap table, mouse dispatch, hint mode, insert mode, and
-page-driven focus tracking. Forms work. This is the milestone that makes it a browser
-rather than a viewer.
+**M3 — Interaction.** The keymap table, mouse dispatch, hint mode, and insert mode,
+with the four-mode state machine and the chrome moving into `wwt-ui`. Forms work. This
+is the milestone that makes it a browser rather than a viewer.
 
 **M4 — Tabs and sessions.** Multiple targets, the persistent profile, session
 serialization and restore, background-tab idling and eviction. Logins survive
