@@ -83,3 +83,28 @@ fn the_command_line_opens_fills_and_closes() {
         );
     }
 }
+
+/// The same physical key means two different things depending on the mode,
+/// which is the whole point of having modes. Normal mode's `q` quits; insert
+/// mode's `q` is a letter.
+#[test]
+fn a_letter_is_a_command_in_normal_mode_and_a_keystroke_in_insert_mode() {
+    let vp = wwt_frame::Viewport::new(
+        wwt_frame::GridSize { cols: 80, rows: 24 },
+        wwt_frame::CellSize { w: 9, h: 20 },
+    );
+    let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+
+    assert_eq!(wwt::keymap::action_for(q, vp), Some(wwt::keymap::Action::Quit));
+    assert_eq!(
+        wwt::keys::describe(q).expect("q is a key we can send").text,
+        "q"
+    );
+
+    let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+    assert_eq!(
+        wwt::keymap::action_for(i, vp),
+        Some(wwt::keymap::Action::Insert),
+        "`i` is what puts you in the mode where q is a letter"
+    );
+}

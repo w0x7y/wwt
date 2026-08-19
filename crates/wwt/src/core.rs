@@ -4,7 +4,9 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
@@ -16,7 +18,9 @@ use wwt_ui::Mode;
 use wwt_ui::chrome::{self, State};
 use wwt_ui::command::{self, Command};
 
+use crate::input::{Input, InputPump};
 use crate::keymap::{Action, action_for};
+use crate::keys;
 
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
@@ -31,6 +35,8 @@ enum Job {
     Failed(String),
     /// A navigation, history move, or reload finished.
     Settled,
+    /// A key, a click, or a blur failed after the loop had moved on.
+    InputFailed(String),
 }
 
 /// The page viewport: the terminal grid, less the row chrome occupies.
@@ -66,11 +72,31 @@ pub struct Core {
 
     jobs_tx: mpsc::UnboundedSender<Job>,
     jobs_rx: mpsc::UnboundedReceiver<Job>,
+
+    /// Ordered delivery of keys and clicks to the page.
+    input: InputPump,
+    /// Where things that failed after the loop moved on report themselves:
+    /// a keystroke that did not land, a blur that did not take.
+    errors_tx: mpsc::UnboundedSender<String>,
 }
 
 impl Core {
     pub fn new(page: Arc<Page>, client: Arc<Client>, grid: GridSize, cell: CellSize) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
+        let (errors_tx, mut errors_rx) = mpsc::unbounded_channel::<String>();
+        let input = InputPump::spawn(Arc::clone(&page), errors_tx.clone());
+
+        // Input failures arrive on their own channel and are folded into the
+        // one the loop already selects on. Two receivers would mean two
+        // mutable borrows of `self` inside one `select!`, which does not
+        // compile, and a second failure path the loop has to think about.
+        let jobs_for_errors = jobs_tx.clone();
+        tokio::spawn(async move {
+            while let Some(message) = errors_rx.recv().await {
+                let _ = jobs_for_errors.send(Job::InputFailed(message));
+            }
+        });
+
         Self {
             page,
             client,
@@ -89,6 +115,8 @@ impl Core {
             navigating: false,
             jobs_tx,
             jobs_rx,
+            input,
+            errors_tx,
         }
     }
 
@@ -194,14 +222,34 @@ impl Core {
                 }
                 false
             }
-            // Wired in Task 10. Until then a mode nothing can enter.
-            Mode::Insert => false,
+            Mode::Insert => {
+                match key.code {
+                    // Never forwarded. A page cannot trap the keyboard,
+                    // which is what makes handing it over safe.
+                    KeyCode::Esc => {
+                        self.mode = Mode::Normal;
+                        self.blur();
+                    }
+                    // A terminal transmits `Ctrl-[` as 0x1B, which is
+                    // Escape: the two are one keystroke on the wire. So the
+                    // page's Escape lives on `Ctrl-]`, which is 0x1D.
+                    KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.send_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                    }
+                    _ => self.send_key(key),
+                }
+                false
+            }
             // Wired in Task 11.
             Mode::Hint(_) => false,
             Mode::Normal => match action_for(key, self.vp) {
                 Some(Action::Quit) => true,
                 Some(Action::EnterCommand(prefill)) => {
                     self.mode = Mode::Command(prefill);
+                    false
+                }
+                Some(Action::Insert) => {
+                    self.mode = Mode::Insert;
                     false
                 }
                 Some(action) => {
@@ -211,6 +259,31 @@ impl Core {
                 None => false,
             },
         }
+    }
+
+    /// Forward one key to the page, if it is one we know how to describe.
+    ///
+    /// An unknown key is dropped rather than approximated: a wrong `code` is
+    /// worse than a missing keystroke, because the page acts on it.
+    fn send_key(&self, key: KeyEvent) {
+        if let Some(input) = keys::describe(key) {
+            self.input.send(Input::Key(input));
+        }
+    }
+
+    /// Take focus off whatever has it, without waiting for it.
+    ///
+    /// Leaving insert mode has already happened by the time this runs. If it
+    /// fails the statusline says so, and the keyboard is still yours: taking
+    /// it back must never depend on the page.
+    fn blur(&self) {
+        let page = Arc::clone(&self.page);
+        let errors = self.errors_tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = page.blur().await {
+                let _ = errors.send(error.to_string());
+            }
+        });
     }
 
     fn run_action(&mut self, action: Action) {
@@ -250,7 +323,7 @@ impl Core {
             }
             Action::Reload => self.navigate_with(move |page| async move { page.reload().await }),
             // Handled by the caller.
-            Action::Quit | Action::EnterCommand(_) => {}
+            Action::Quit | Action::EnterCommand(_) | Action::Insert => {}
         }
     }
 
@@ -344,6 +417,11 @@ impl Core {
                 self.dirty = true;
                 self.start_extract();
             }
+            // The frame stays exactly as it was; only the statusline
+            // changes. Spec section 8. Deliberately not `Job::Failed`: that
+            // one clears the extraction and navigation flags, and a
+            // keystroke that failed has finished neither of those.
+            Job::InputFailed(message) => self.state = State::Error(message),
             Job::Failed(message) => {
                 self.extracting = false;
                 self.navigating = false;

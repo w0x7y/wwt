@@ -14,6 +14,8 @@ pub enum Action {
     Reload,
     /// Open the `:` line, pre-filled with this text.
     EnterCommand(String),
+    /// Hand the keyboard to the page until `Esc`.
+    Insert,
     Quit,
 }
 
@@ -52,6 +54,7 @@ pub fn action_for(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('G') | KeyCode::End => Some(Action::ScrollEnd),
         KeyCode::Char('H') => Some(Action::Back),
         KeyCode::Char('L') => Some(Action::Forward),
+        KeyCode::Char('i') => Some(Action::Insert),
         KeyCode::Char(':') => Some(Action::EnterCommand(String::new())),
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
         KeyCode::Char('q') => Some(Action::Quit),
@@ -132,5 +135,10 @@ mod tests {
         let tiny = Viewport::new(GridSize { cols: 20, rows: 1 }, CellSize { w: 9, h: 20 });
         // rows - 2 would underflow; a page scroll must still move forward.
         assert_eq!(action_for(key(' '), tiny), Some(Action::Scroll(20.0)));
+    }
+
+    #[test]
+    fn i_hands_the_keyboard_to_the_page() {
+        assert_eq!(action_for(key('i'), vp()), Some(Action::Insert));
     }
 }
