@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wwt_cdp::{Chromium, Client};
-use wwt_frame::{CellSize, CssPoint, GridSize, Viewport};
+use wwt_frame::{CellSize, CssPoint, GridSize, TargetKind, Viewport};
 use wwt_page::{KeyInput, MouseInput, Page};
 
 fn fixture_url(name: &str) -> String {
@@ -161,4 +161,73 @@ async fn a_wheel_scrolls_what_is_under_the_pointer() {
         Some(0.0),
         "the document must not scroll when a nested scroller was under the pointer"
     );
+}
+
+#[tokio::test]
+async fn hints_find_every_interactive_element_in_document_order() {
+    let h = harness().await;
+    let targets = open(&h, "interactive.html").await.hints().await.expect("hints");
+
+    let kinds: Vec<TargetKind> = targets.iter().map(|t| t.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![TargetKind::Clickable, TargetKind::Clickable, TargetKind::Editable],
+        "expected the link, the button, and the text field, in that order"
+    );
+}
+
+#[tokio::test]
+async fn hints_skip_what_is_outside_the_viewport() {
+    let h = harness().await;
+    let targets = open(&h, "interactive.html").await.hints().await.expect("hints");
+
+    assert!(
+        targets.iter().all(|t| t.rect.y < 1000.0),
+        "a target 3000px down the page was labelled: {targets:?}"
+    );
+}
+
+#[tokio::test]
+async fn hints_skip_what_something_else_is_covering() {
+    let h = harness().await;
+    let targets = open(&h, "interactive.html").await.hints().await.expect("hints");
+
+    // The covered link is the only thing at x >= 600. A label on it would
+    // lie: the click would land on the div on top of it.
+    assert!(
+        targets.iter().all(|t| t.rect.x < 600.0),
+        "a covered target was labelled: {targets:?}"
+    );
+}
+
+#[tokio::test]
+async fn hint_geometry_is_the_elements_own_box() {
+    let h = harness().await;
+    let page = open(&h, "interactive.html").await;
+    let targets = page.hints().await.expect("hints");
+    let button = &targets[1];
+
+    let expected = center_of(&page, "#two").await;
+    assert!(
+        (button.center().x - expected.x).abs() < 1.0
+            && (button.center().y - expected.y).abs() < 1.0,
+        "hint centre {:?} should match the button's own centre {expected:?}",
+        button.center()
+    );
+}
+
+#[tokio::test]
+async fn measure_hints_on_a_page_full_of_links() {
+    let h = harness().await;
+    let page = open(&h, "links.html").await;
+
+    // One warm pass, so the number is steady-state rather than first-run.
+    page.hints().await.expect("hints");
+
+    let start = std::time::Instant::now();
+    let targets = page.hints().await.expect("hints");
+    let elapsed = start.elapsed();
+
+    println!("links.html: {} targets found in {elapsed:?}", targets.len());
+    assert!(!targets.is_empty(), "the fixture is full of links");
 }

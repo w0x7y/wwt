@@ -175,5 +175,80 @@
     };
   }
 
-  window.__wwt = { extract };
+  // What counts as interactive. Anything a click or a keystroke does
+  // something to, which is broader than "has an href".
+  const HINT_SELECTOR = [
+    "a[href]",
+    "button",
+    "input:not([type=hidden])",
+    "select",
+    "textarea",
+    "[contenteditable='']",
+    "[contenteditable='true']",
+    "[role=button]",
+    "[role=link]",
+    "[role=checkbox]",
+    "[role=radio]",
+    "[role=menuitem]",
+    "[role=tab]",
+    "[role=textbox]",
+    "[tabindex]:not([tabindex='-1'])",
+  ].join(",");
+
+  // Input types you type into, as opposed to the ones you click.
+  const TYPABLE = new Set([
+    "text", "search", "email", "url", "tel", "password", "number",
+    "date", "time", "month", "week", "datetime-local",
+  ]);
+
+  function isEditable(el) {
+    if (el.isContentEditable) return true;
+    if (el.tagName === "TEXTAREA") return true;
+    if (el.tagName !== "INPUT") return false;
+    return TYPABLE.has((el.getAttribute("type") || "text").toLowerCase());
+  }
+
+  // Interactive boxes, in document order.
+  //
+  // This is deliberately not part of extract(): it sweeps the whole
+  // document and pays a hit test per candidate, and extraction runs on
+  // every scroll frame. This runs when someone presses `f`.
+  function hints() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const out = [];
+
+    for (const el of document.querySelectorAll(HINT_SELECTOR)) {
+      if (el.disabled) continue;
+
+      const cs = window.getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
+        continue;
+      }
+
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+
+      // The point a click would land on. If something else is on top of it,
+      // a label here would lie about what pressing it does.
+      const x = Math.min(Math.max(r.left + r.width / 2, 0), vw - 1);
+      const y = Math.min(Math.max(r.top + r.height / 2, 0), vh - 1);
+      const hit = document.elementFromPoint(x, y);
+      if (!hit) continue;
+      if (hit !== el && !el.contains(hit) && !hit.contains(el)) continue;
+
+      out.push({
+        x: r.left,
+        y: r.top,
+        w: r.width,
+        h: r.height,
+        editable: isEditable(el),
+      });
+    }
+
+    return out;
+  }
+
+  window.__wwt = { extract, hints };
 })()

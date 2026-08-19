@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use wwt_cdp::{Client, Event};
-use wwt_frame::{CssPoint, CssRect, Style, TextRun, Viewport};
+use wwt_frame::{CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 use crate::input::{KeyInput, MouseAction, MouseInput};
@@ -69,6 +69,16 @@ struct RawRun {
     color: String,
     bold: bool,
     z: i32,
+}
+
+/// The shape one entry of `__wwt.hints()` returns.
+#[derive(Debug, Deserialize)]
+struct RawTarget {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    editable: bool,
 }
 
 pub struct Page {
@@ -459,5 +469,23 @@ impl Page {
             .await
             .context("dispatch a mouse event")?;
         Ok(())
+    }
+    /// Every interactive box on screen, in document order.
+    ///
+    /// Run when hint mode opens rather than during extraction: it sweeps the
+    /// document and hit-tests each candidate, which is too much to pay on
+    /// every scroll frame for something pressed occasionally.
+    pub async fn hints(&self) -> Result<Vec<HintTarget>> {
+        let value = self.eval("window.__wwt.hints()").await.context("run the hint query")?;
+        let raw: Vec<RawTarget> = serde_json::from_value(value)
+            .context("the hint query returned an unexpected shape")?;
+
+        Ok(raw
+            .into_iter()
+            .map(|t| HintTarget {
+                rect: CssRect { x: t.x, y: t.y, w: t.w, h: t.h },
+                kind: if t.editable { TargetKind::Editable } else { TargetKind::Clickable },
+            })
+            .collect())
     }
 }
