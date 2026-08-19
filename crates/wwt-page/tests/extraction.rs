@@ -155,6 +155,7 @@ async fn extraction_reports_scroll_geometry() {
 fn scroll_progress_is_zero_when_the_document_fits() {
     let e = wwt_page::Extraction {
         runs: Vec::new(),
+        caret: None,
         title: String::new(),
         url: String::new(),
         scroll_y: 0.0,
@@ -168,6 +169,7 @@ fn scroll_progress_is_zero_when_the_document_fits() {
 fn scroll_progress_is_one_at_the_bottom() {
     let e = wwt_page::Extraction {
         runs: Vec::new(),
+        caret: None,
         title: String::new(),
         url: String::new(),
         scroll_y: 600.0,

@@ -2921,7 +2921,8 @@ git commit -m "docs: describe M3's input model"
 
 ## Known M3 limitations (deliberate, do not "fix")
 
-- No caret: you can see what you have typed, but not where the insertion point is.
+- No caret in a `contenteditable`; it needs the Selection API rather than a mirror.
+  The caret in an `input` or `textarea` is painted, in insert mode only.
 - No IME and no multi-byte composition. A composed character types correctly, but there is no composition state and no candidate window.
 - The key table is a US layout. The character you type is right on any layout; `e.code` names the physical key a US keyboard would have used.
 - Occlusion is one hit test at the box centre. A target whose centre is covered but whose edges are not will be dropped.

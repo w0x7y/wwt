@@ -24,6 +24,7 @@ pub const DIRTY_BINDING: &str = "__wwt_dirty";
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
+    caret: Option<RawCaret>,
     title: String,
     url: String,
     #[serde(rename = "scrollY")]
@@ -34,11 +35,23 @@ struct RawExtraction {
     inner_height: f64,
 }
 
+/// The insertion point, as the injected script measured it.
+#[derive(Debug, Deserialize)]
+struct RawCaret {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
 /// One pass of the extraction script: everything the renderer and the
 /// statusline need, from one round trip.
 #[derive(Debug, Clone)]
 pub struct Extraction {
     pub runs: Vec<TextRun>,
+    /// Where typing would land, when a form control has focus. A zero-width
+    /// box on the line the insertion point sits on.
+    pub caret: Option<CssRect>,
     pub title: String,
     pub url: String,
     pub scroll_y: f64,
@@ -348,6 +361,7 @@ impl Page {
                     z: r.z,
                 })
                 .collect(),
+            caret: raw.caret.map(|c| CssRect { x: c.x, y: c.y, w: c.w, h: c.h }),
             title: raw.title,
             url: raw.url,
             scroll_y: raw.scroll_y,

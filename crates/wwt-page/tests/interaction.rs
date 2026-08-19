@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, CssPoint, GridSize, TargetKind, Viewport};
-use wwt_page::{KeyInput, MouseInput, Page};
+use wwt_page::{DIRTY_BINDING, KeyInput, MouseInput, Page};
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -305,3 +305,157 @@ async fn a_select_shows_its_chosen_option_and_a_checkbox_shows_nothing() {
     // A checkbox's value is the string "on". Nothing renders it, so nor do we.
     assert!(!texts.contains(&"on"), "a checkbox has no text: {texts:?}");
 }
+
+#[tokio::test]
+async fn a_textarea_wraps_the_way_the_browser_wraps_it() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    let value = page
+        .eval("document.querySelector('#wrapped').value")
+        .await
+        .expect("value")
+        .as_str()
+        .expect("a string")
+        .to_string();
+
+    let extraction = page.extract().await.expect("extract");
+    let wrapped: Vec<&wwt_frame::TextRun> = extraction
+        .runs
+        .iter()
+        .filter(|r| !r.text.is_empty() && value.contains(r.text.as_str()))
+        .collect();
+
+    let lines: Vec<&str> = wrapped.iter().map(|r| r.text.as_str()).collect();
+    assert!(
+        lines.len() >= 2,
+        "the value is wider than the box, so the browser wrapped it and so must we: {lines:?}"
+    );
+    assert_eq!(
+        lines.join(" "),
+        value,
+        "wrapping must not lose or reorder any of the text"
+    );
+    for pair in wrapped.windows(2) {
+        assert!(
+            pair[1].rect.y > pair[0].rect.y,
+            "each wrapped line belongs on the row below the last: {:?}",
+            wrapped.iter().map(|r| r.rect.y).collect::<Vec<f64>>()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_field_scrolled_sideways_shows_the_part_you_are_looking_at() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    let value = "0123456789".repeat(12);
+    page.eval(&format!(
+        "const el = document.querySelector('#typed'); \
+         el.value = '{value}'; el.scrollLeft = el.scrollWidth;"
+    ))
+    .await
+    .expect("scroll the field to its end");
+
+    let extraction = page.extract().await.expect("extract");
+    let run = extraction
+        .runs
+        .iter()
+        .find(|r| !r.text.is_empty() && value.contains(r.text.as_str()))
+        .unwrap_or_else(|| panic!("the field's text is missing: {:?}", texts(&extraction)));
+
+    assert!(
+        !value.starts_with(run.text.as_str()),
+        "a field scrolled to its end must not show its head: {:?}",
+        run.text
+    );
+    assert!(
+        value.ends_with(run.text.as_str()),
+        "it shows the tail you are looking at: {:?}",
+        run.text
+    );
+}
+
+#[tokio::test]
+async fn the_caret_follows_the_insertion_point() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    page.eval("const el = document.querySelector('#typed'); el.value = 'hello world'; el.focus();")
+        .await
+        .expect("set up the field");
+
+    let mut xs = Vec::new();
+    for offset in [0, 5, 11] {
+        page.eval(&format!(
+            "document.querySelector('#typed').setSelectionRange({offset}, {offset})"
+        ))
+        .await
+        .expect("move the insertion point");
+        let extraction = page.extract().await.expect("extract");
+        let caret = extraction.caret.expect("a focused field has an insertion point");
+        xs.push(caret.x);
+    }
+
+    assert!(
+        xs[0] < xs[1] && xs[1] < xs[2],
+        "the caret moves right as the offset grows: {xs:?}"
+    );
+
+    let edge = page
+        .eval(
+            "(() => { const el = document.querySelector('#typed'); \
+              const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); \
+              return r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft); })()",
+        )
+        .await
+        .expect("the box's left edge")
+        .as_f64()
+        .expect("a number");
+    assert!(
+        (xs[0] - edge).abs() < 3.0,
+        "at offset 0 the caret sits at the left edge of the box: caret {}, edge {edge}",
+        xs[0]
+    );
+}
+
+#[tokio::test]
+async fn there_is_no_caret_when_no_field_is_focused() {
+    let h = harness().await;
+    let extraction = open(&h, "fields.html").await.extract().await.expect("extract");
+    assert!(
+        extraction.caret.is_none(),
+        "nothing is focused, so nothing is being typed into"
+    );
+}
+
+#[tokio::test]
+async fn extracting_a_field_does_not_signal_the_page_dirty() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    // Subscribed before the setup, because focusing a field whose value
+    // overflows scrolls it to the caret, and that fires a signal of its own.
+    // Waiting for that one to pass is a race; draining it is not.
+    let mut events = h.client.subscribe();
+    page.eval(
+        "const el = document.querySelector('#typed'); \
+         el.value = 'a value long enough to overflow its box several times over'; el.focus();",
+    )
+    .await
+    .expect("set up the field");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while events.try_recv().is_ok() {}
+
+    page.extract().await.expect("extract");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Measuring a field puts a mirror of it into the document. If our own
+    // MutationObserver sees that, the page reports itself dirty, the core
+    // re-extracts, and an idle page spins forever.
+    let mut signals = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.method == "Runtime.bindingCalled" && event.params["name"] == DIRTY_BINDING {
+            signals += 1;
+        }
+    }
+    assert_eq!(signals, 0, "extraction made the page call itself dirty");
+}
+

@@ -39,14 +39,17 @@
   const onMutation = debounce(signal, MUTATION_DEBOUNCE_MS);
   const onScroll = debounce(signal, SCROLL_DEBOUNCE_MS);
 
-  // `document` exists even at document-start, so the observer can be
-  // attached before there is a body to observe.
-  new MutationObserver(onMutation).observe(document, {
+  const OBSERVER_OPTIONS = {
     subtree: true,
     childList: true,
     characterData: true,
     attributes: true,
-  });
+  };
+
+  // `document` exists even at document-start, so the observer can be
+  // attached before there is a body to observe.
+  const observer = new MutationObserver(onMutation);
+  observer.observe(document, OBSERVER_OPTIONS);
 
   // Capture, because scrolling inside a nested scroller does not bubble.
   window.addEventListener("scroll", onScroll, { passive: true, capture: true });
@@ -83,7 +86,7 @@
     );
     if (rects.length === 0) return [];
     if (rects.length === 1) {
-      return [{ rect: rects[0], text }];
+      return [{ rect: rects[0], text, start: 0, end: text.length }];
     }
 
     const lines = [];
@@ -101,10 +104,15 @@
           lo = mid + 1;
         }
       }
-      lines.push({ rect: rects[i - 1], text: text.slice(start, lo) });
+      lines.push({ rect: rects[i - 1], text: text.slice(start, lo), start, end: lo });
       start = lo;
     }
-    lines.push({ rect: rects[rects.length - 1], text: text.slice(start) });
+    lines.push({
+      rect: rects[rects.length - 1],
+      text: text.slice(start),
+      start,
+      end: text.length,
+    });
     return lines;
   }
 
@@ -163,19 +171,151 @@
     }
 
     // A form control's text is not a text node, so the walk above missed it.
-    runs.push(...fieldRuns());
+    const fields = fieldRuns();
+    runs.push(...fields.runs);
 
     // Scroll geometry rides along with the runs so the statusline costs no
     // extra round trip.
     const doc = document.documentElement;
     return {
       runs,
+      caret: fields.caret,
       title: document.title,
       url: location.href,
       scrollY: window.scrollY,
       scrollHeight: Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0),
       innerHeight: window.innerHeight,
     };
+  }
+
+  // The styles that decide where a character lands. Copied onto the mirror so
+  // that it breaks its lines in exactly the places the control does.
+  const MIRROR_STYLES = [
+    "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize",
+    "fontFamily", "lineHeight", "letterSpacing", "wordSpacing",
+    "textTransform", "textIndent", "textRendering", "wordBreak",
+    "overflowWrap", "tabSize", "direction",
+  ];
+
+  // A stand-in for a control's text box, laid out by the same engine on the
+  // same inputs.
+  //
+  // There is no Range inside an `input`, so this is the only way to learn
+  // where its characters are: where the browser wrapped a line, which part of
+  // a scrolled value is on screen, and where the insertion point sits.
+  function makeMirror(cs, width, multiline) {
+    const mirror = document.createElement("div");
+    for (const property of MIRROR_STYLES) mirror.style[property] = cs[property];
+    mirror.style.position = "absolute";
+    mirror.style.top = "0";
+    mirror.style.left = "0";
+    // Laid out but not painted. `display: none` would throw away the boxes
+    // this exists to measure.
+    mirror.style.visibility = "hidden";
+    mirror.style.margin = "0";
+    mirror.style.padding = "0";
+    mirror.style.border = "0";
+    // A textarea wraps at its content width; a single-line control never
+    // wraps however long its value is.
+    mirror.style.whiteSpace = multiline ? "pre-wrap" : "pre";
+    mirror.style.width = width + "px";
+    return mirror;
+  }
+
+  // Measure with `mirror` in the document, then take it out again.
+  //
+  // Inserting it is a DOM mutation and our own observer is watching the whole
+  // document, so left alone this would signal dirtiness, cause another
+  // extraction, and spin forever on an idle page. Extraction is synchronous
+  // and JavaScript is single-threaded, so nothing real can mutate across this
+  // window; takeRecords drops the records we caused ourselves.
+  function withMirror(mirror, measure) {
+    observer.disconnect();
+    document.body.appendChild(mirror);
+    try {
+      return measure();
+    } finally {
+      mirror.remove();
+      observer.takeRecords();
+      observer.observe(document, OBSERVER_OPTIONS);
+    }
+  }
+
+  // The first offset in [lo, hi) whose character reaches past `x`.
+  //
+  // Character positions increase monotonically along a line, so this is a
+  // binary search rather than a scan, the same trick linesOf uses vertically.
+  function offsetPast(range, node, lo, hi, x) {
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      range.setStart(node, mid);
+      range.setEnd(node, mid + 1);
+      if (range.getBoundingClientRect().right > x) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  }
+
+  // Where the lines and the insertion point of one control are, relative to
+  // the top left of its content box.
+  function measureField(el, shown, multiline, width, focused) {
+    const cs = window.getComputedStyle(el);
+    const mirror = makeMirror(cs, width, multiline);
+    const node = document.createTextNode(shown);
+    mirror.appendChild(node);
+
+    return withMirror(mirror, () => {
+      const origin = mirror.getBoundingClientRect();
+      const range = document.createRange();
+      const scrollLeft = el.scrollLeft;
+      const scrollTop = el.scrollTop;
+      const lines = [];
+
+      for (const line of linesOf(range, node)) {
+        let text = line.text;
+        let x = line.rect.left - origin.left;
+
+        // A control scrolled sideways shows a window into its value, not the
+        // head of it.
+        if (scrollLeft > 0) {
+          const cut = offsetPast(range, node, line.start, line.end, origin.left + scrollLeft);
+          if (cut >= line.end) continue;
+          range.setStart(node, cut);
+          range.setEnd(node, line.end);
+          x = range.getBoundingClientRect().left - origin.left;
+          text = node.nodeValue.slice(cut, line.end);
+        }
+
+        // Trailing space is where a line was broken, not something to paint.
+        lines.push({
+          text: text.replace(/\s+$/, ""),
+          x: x - scrollLeft,
+          y: line.rect.top - origin.top - scrollTop,
+        });
+      }
+
+      let caret = null;
+      if (focused) {
+        // Measured from a real character rather than from a collapsed range,
+        // which browsers are inconsistent about at the end of a line.
+        const offset = el.selectionStart;
+        if (node.nodeValue.length === 0) {
+          caret = { x: 0, y: 0 };
+        } else if (offset > 0) {
+          range.setStart(node, offset - 1);
+          range.setEnd(node, offset);
+          const rect = range.getBoundingClientRect();
+          caret = { x: rect.right - origin.left - scrollLeft, y: rect.top - origin.top - scrollTop };
+        } else {
+          range.setStart(node, 0);
+          range.setEnd(node, 1);
+          const rect = range.getBoundingClientRect();
+          caret = { x: rect.left - origin.left - scrollLeft, y: rect.top - origin.top - scrollTop };
+        }
+      }
+
+      return { lines, caret };
+    });
   }
 
   // Input types whose value is not text on screen. A checkbox's value is the
@@ -204,25 +344,25 @@
     return value;
   }
 
-  // Runs for the text inside form controls.
+  // Runs for the text inside form controls, and the insertion point.
   //
   // A control's value is not in the DOM: `input.childNodes` is empty however
   // much you type into it, because the browser paints the value from element
   // state rather than from a text node. The walk in extract() therefore
   // cannot see it, and without this pass you cannot see what you are typing.
   //
-  // Soft wrapping inside a textarea is not reproduced, and neither is a
-  // control scrolled sideways past its own width: both show the head of the
-  // text, elided at the box edge.
+  // Measuring a control costs a mirror of it, so only the controls that need
+  // one get one: a textarea, which may wrap; a control whose value overflows
+  // or is scrolled, which shows a window into itself rather than its head;
+  // and the focused one, whose insertion point has to be found. A plain field
+  // showing all of its value costs nothing beyond the styles already read.
   function fieldRuns() {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const runs = [];
+    let caret = null;
 
     for (const el of document.querySelectorAll("input, textarea, select")) {
-      const text = fieldText(el);
-      if (!text) continue;
-
       const cs = window.getComputedStyle(el);
       if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
         continue;
@@ -232,50 +372,95 @@
       if (r.width <= 0 || r.height <= 0) continue;
       if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
 
-      // The content box: where the browser actually puts the text.
+      const shown = fieldText(el);
+      const focused =
+        el === document.activeElement && typeof el.selectionStart === "number";
+      if (!shown && !focused) continue;
+
       const left = r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
-      const right = r.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
       const top = r.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop);
-      const bottom = r.bottom - parseFloat(cs.borderBottomWidth) - parseFloat(cs.paddingBottom);
+      const width = Math.max(
+        0,
+        el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
+      );
+      const height = Math.max(
+        0,
+        el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+      );
 
       const fontSize = parseFloat(cs.fontSize) || 16;
       // `line-height: normal` parses to NaN, and a control's own line height
       // is what decides which row its text lands on.
       const lineHeight = parseFloat(cs.lineHeight) || fontSize * 1.2;
-      const weight = parseInt(cs.fontWeight, 10) || 400;
+      const color = cs.color;
+      const bold = (parseInt(cs.fontWeight, 10) || 400) >= 600;
 
-      // A textarea stacks its lines from the top; everything else is one line
-      // centred in the box.
       const multiline = el.tagName === "TEXTAREA";
-      const lines = multiline ? text.split("\n") : [text];
-      const first = multiline
-        ? top
-        : top + Math.max(0, (bottom - top - lineHeight) / 2);
+      // A single-line control centres its text in the box; a textarea starts
+      // at the top of it.
+      const centring = multiline ? 0 : Math.max(0, (height - lineHeight) / 2);
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (!line) continue;
+      const overflowing =
+        el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight;
+      const scrolled = el.scrollLeft > 0 || el.scrollTop > 0;
+      const measurable = el.tagName !== "SELECT" && shown !== "";
+      const needsMirror =
+        measurable && (multiline || overflowing || scrolled || focused);
 
-        const lineTop = first + i * lineHeight;
-        if (lineTop >= bottom) break;
+      if (!needsMirror) {
+        if (shown) {
+          const y = top + centring;
+          runs.push({
+            text: shown,
+            x: left,
+            y,
+            w: width,
+            h: lineHeight,
+            baseline: y + lineHeight - fontSize * 0.21,
+            color,
+            bold,
+            z: 0,
+          });
+        }
+        // An empty field still has an insertion point, at the start of it.
+        if (focused) {
+          caret = { x: left, y: top + centring, w: 0, h: lineHeight };
+        }
+        continue;
+      }
+
+      const measured = measureField(el, shown, multiline, width, focused);
+
+      for (const line of measured.lines) {
+        if (!line.text) continue;
+        const y = top + centring + line.y;
+        // Scrolled out of the top or bottom of its own box.
+        if (y + lineHeight <= top || y >= top + height) continue;
 
         runs.push({
-          text: line,
-          x: left,
-          y: lineTop,
-          w: Math.max(0, right - left),
+          text: line.text,
+          x: left + line.x,
+          y,
+          w: Math.max(0, width - line.x),
           h: lineHeight,
-          // The same convention the text walk uses: the descender is roughly
-          // a fifth of the font size below the baseline.
-          baseline: lineTop + lineHeight - fontSize * 0.21,
-          color: cs.color,
-          bold: weight >= 600,
+          baseline: y + lineHeight - fontSize * 0.21,
+          color,
+          bold,
           z: 0,
         });
       }
+
+      if (measured.caret) {
+        caret = {
+          x: left + measured.caret.x,
+          y: top + centring + measured.caret.y,
+          w: 0,
+          h: lineHeight,
+        };
+      }
     }
 
-    return runs;
+    return { runs, caret };
   }
 
   // What counts as interactive. Anything a click or a keystroke does

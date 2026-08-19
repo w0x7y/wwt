@@ -14,7 +14,7 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 151 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 158 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -124,6 +124,16 @@ value is not in the DOM (`input.childNodes` is empty however much you type), so
 the text walk cannot see it and you would not be able to see what you type. It
 reports what the browser shows: a placeholder for an empty field, the chosen
 option for a `select`, bullets for a password.
+
+Wrapping, scroll position and the caret need character positions, and there is no
+`Range` inside an `input`. The script mirrors the control into a hidden div with
+its font and content width and measures that instead. **The mirror is a DOM
+mutation and the dirty observer watches the document**, so the pass disconnects
+the observer, measures, and re-observes after `takeRecords`: without that, every
+extraction signals dirty and an idle page spins forever. A mirror costs a layout,
+so only controls that need one get one (multiline, overflowing, scrolled, or
+focused). `Extraction::caret` is painted by inverting one cell, in insert mode
+only, because a page can focus a field without being asked.
 
 Hint targets come from `__wwt.hints()`, queried on `f` and cached until the
 next dirty signal. They are deliberately not part of extraction: that path

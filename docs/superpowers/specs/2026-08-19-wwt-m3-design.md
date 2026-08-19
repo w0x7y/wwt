@@ -257,9 +257,59 @@ This one is not on demand. It is part of every extraction, because the text in a
 field is page content in the way a hint target is not: leaving it out of a pass
 would blank text that is on screen.
 
-Two things it does not reproduce, both showing the head of the text elided at
-the box edge: soft wrapping inside a textarea, and a control scrolled sideways
-past its own width. Explicit newlines in a textarea do become separate lines.
+### Measuring inside a control
+
+Knowing *that* a control has text is not enough. Where the browser wrapped a
+line, which part of a scrolled value is on screen, and where the insertion point
+sits are all facts about character positions, and there is no `Range` inside an
+`input` to ask.
+
+So the script mirrors the control: an absolutely positioned, `visibility:
+hidden` div carrying the control's own font, line height, wrapping rules and
+content width. The same engine on the same inputs breaks the lines in the same
+places, and the mirror *does* have a `Range`, so `linesOf` reads its line boxes
+with the binary search it already uses for the page's text. Positions come back
+relative to the mirror's origin and are translated into the control's content
+box, less its scroll offsets.
+
+`visibility: hidden` and not `display: none`: the latter would throw away the
+boxes this exists to measure.
+
+**The mirror is a DOM mutation, and the observer that signals dirtiness watches
+the whole document.** Left alone, extraction would signal itself dirty, the core
+would re-extract, and an idle page would spin forever, which is the one thing
+the dirty-signal design exists to prevent. The measuring pass therefore
+disconnects the observer, measures, removes the mirror, discards the records it
+caused with `takeRecords`, and observes again. Extraction is synchronous and
+JavaScript is single-threaded, so no genuine mutation can occur inside that
+window. There is a test asserting that extracting a focused field produces no
+dirty signal.
+
+A mirror costs a layout, and extraction runs on every scroll frame, so only the
+controls that need one get one: a `textarea`, which may wrap; a control whose
+value overflows or is scrolled, which shows a window into itself rather than its
+head; and the focused one, whose insertion point must be found. A plain field
+showing all of its value takes the cheap path and costs nothing beyond the
+styles already read.
+
+### The caret
+
+`Extraction` carries `caret: Option<CssRect>`, a zero-width box on the line the
+insertion point is on, measured from the character beside `selectionStart`
+rather than from a collapsed range, which browsers treat inconsistently at the
+end of a line.
+
+`Core` inverts that cell rather than overwriting it, so the character under the
+caret stays readable. It paints **only in insert mode**: a page can focus a
+field without being asked, and a caret in normal mode would promise that your
+typing lands there when it does not.
+
+The caret does not blink. Blinking needs a timer, and an idle page must cost
+nothing.
+
+Still uncovered: the caret in a `contenteditable`, which needs the Selection API
+rather than a mirror. Its *text* already renders, because that content is real
+text nodes.
 
 ## 6. Mouse
 
@@ -332,12 +382,6 @@ The hint query carries a measurement, not a test: the heavy fixture from M2 time
 `hints()`, recorded in the plan, the way extraction was.
 
 ## 11. Open questions
-
-**No caret.** You can see what you have typed, but not where the insertion point
-is. That is invisible while you are appending to a field and awkward the moment
-you edit the middle of one. Drawing it means tracking `selectionStart` and
-painting a cell in reverse video, which is small; leaving it out of M3 is a
-scope call, not a difficulty.
 
 **IME and multi-byte input.** crossterm reports composed characters as `Char`, so a
 composed glyph types correctly, but there is no composition state, no candidate
