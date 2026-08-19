@@ -16,6 +16,8 @@ pub enum Action {
     EnterCommand(String),
     /// Hand the keyboard to the page until `Esc`.
     Insert,
+    /// Label every interactive box and filter them as you type.
+    Hints,
     Quit,
 }
 
@@ -54,6 +56,7 @@ pub fn action_for(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('G') | KeyCode::End => Some(Action::ScrollEnd),
         KeyCode::Char('H') => Some(Action::Back),
         KeyCode::Char('L') => Some(Action::Forward),
+        KeyCode::Char('f') => Some(Action::Hints),
         KeyCode::Char('i') => Some(Action::Insert),
         KeyCode::Char(':') => Some(Action::EnterCommand(String::new())),
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
@@ -141,4 +144,9 @@ mod tests {
     fn i_hands_the_keyboard_to_the_page() {
         assert_eq!(action_for(key('i'), vp()), Some(Action::Insert));
     }
+    #[test]
+    fn f_opens_the_hints() {
+        assert_eq!(action_for(key('f'), vp()), Some(Action::Hints));
+    }
+
 }

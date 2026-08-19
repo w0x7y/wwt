@@ -12,6 +12,9 @@ pub enum State {
     Ready,
     Stalled,
     Error(String),
+    /// Something worth saying that is not a failure: no hints on this page,
+    /// the mouse turned off. Cleared by the next successful extraction.
+    Notice(String),
 }
 
 fn chrome_style() -> Style {
@@ -49,6 +52,7 @@ pub fn statusline(
         State::Loading => "[loading] ".to_string(),
         State::Stalled => "[stalled] ".to_string(),
         State::Error(message) => format!("[error] {message} — "),
+        State::Notice(message) => format!("[{message}] "),
     };
 
     let left = if title.is_empty() {
@@ -199,6 +203,20 @@ mod tests {
             60,
         );
         assert!(line.starts_with("-- HINT  (1) --"), "line was {line:?}");
+    }
+
+    #[test]
+    fn a_notice_is_not_dressed_up_as_an_error() {
+        let line = statusline(
+            &Mode::Normal,
+            &State::Notice("no hints".to_string()),
+            "https://example.com",
+            "",
+            0.0,
+            60,
+        );
+        assert!(line.starts_with("[no hints]"), "line was {line:?}");
+        assert!(!line.contains("error"), "line was {line:?}");
     }
 
 }

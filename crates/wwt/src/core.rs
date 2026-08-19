@@ -11,12 +11,13 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 use wwt_cdp::Client;
-use wwt_frame::{CellSize, Frame, GridSize, TextRun, Viewport};
-use wwt_page::{DIRTY_BINDING, Extraction, Page};
+use wwt_frame::{CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport};
+use wwt_page::{DIRTY_BINDING, Extraction, MouseInput, Page};
 use wwt_term::Renderer;
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, State};
 use wwt_ui::command::{self, Command};
+use wwt_ui::hint::{Filtered, HintSession};
 
 use crate::input::{Input, InputPump};
 use crate::keymap::{Action, action_for};
@@ -37,6 +38,8 @@ enum Job {
     Settled,
     /// A key, a click, or a blur failed after the loop had moved on.
     InputFailed(String),
+    /// The page reported its interactive boxes.
+    Hints(Vec<HintTarget>),
 }
 
 /// The page viewport: the terminal grid, less the row chrome occupies.
@@ -69,6 +72,9 @@ pub struct Core {
     extracting: bool,
     /// A navigation is in flight.
     navigating: bool,
+    /// The last hint query's targets, held so that pressing `f` twice on a
+    /// page that has not moved costs one round trip rather than two.
+    hints: Option<Vec<HintTarget>>,
 
     jobs_tx: mpsc::UnboundedSender<Job>,
     jobs_rx: mpsc::UnboundedReceiver<Job>,
@@ -113,6 +119,7 @@ impl Core {
             dirty: true,
             extracting: false,
             navigating: false,
+            hints: None,
             jobs_tx,
             jobs_rx,
             input,
@@ -125,6 +132,12 @@ impl Core {
         let mut frame = Frame::new(self.grid);
         for run in &self.runs {
             frame.paint_run(&self.vp, run);
+        }
+        // After the page and before the chrome: labels cover the text they
+        // point at, which is what makes them readable, and the chrome still
+        // owns its row.
+        if let Mode::Hint(session) = &self.mode {
+            session.paint(&mut frame, &self.vp);
         }
         chrome::paint(
             &mut frame,
@@ -167,7 +180,7 @@ impl Core {
                         && event.method == "Runtime.bindingCalled"
                         && event.params["name"] == DIRTY_BINDING
                     {
-                        self.dirty = true;
+                        self.mark_dirty();
                         self.start_extract();
                     }
                 }
@@ -240,8 +253,22 @@ impl Core {
                 }
                 false
             }
-            // Wired in Task 11.
-            Mode::Hint(_) => false,
+            Mode::Hint(session) => {
+                let mut session = session.clone();
+                match key.code {
+                    KeyCode::Esc => self.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        let filtered = session.pop();
+                        self.on_filtered(session, filtered);
+                    }
+                    KeyCode::Char(c) => {
+                        let filtered = session.push(c);
+                        self.on_filtered(session, filtered);
+                    }
+                    _ => {}
+                }
+                false
+            }
             Mode::Normal => match action_for(key, self.vp) {
                 Some(Action::Quit) => true,
                 Some(Action::EnterCommand(prefill)) => {
@@ -250,6 +277,13 @@ impl Core {
                 }
                 Some(Action::Insert) => {
                     self.mode = Mode::Insert;
+                    false
+                }
+                Some(Action::Hints) => {
+                    match self.hints.clone() {
+                        Some(targets) => self.enter_hints(targets),
+                        None => self.start_hints(),
+                    }
                     false
                 }
                 Some(action) => {
@@ -323,7 +357,7 @@ impl Core {
             }
             Action::Reload => self.navigate_with(move |page| async move { page.reload().await }),
             // Handled by the caller.
-            Action::Quit | Action::EnterCommand(_) | Action::Insert => {}
+            Action::Quit | Action::EnterCommand(_) | Action::Insert | Action::Hints => {}
         }
     }
 
@@ -365,6 +399,67 @@ impl Core {
             };
             let _ = tx.send(job);
         });
+    }
+
+    /// Note that the page has changed under us.
+    ///
+    /// Hint targets are geometry, so a page that moved has invalidated them.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.hints = None;
+    }
+
+    fn start_hints(&mut self) {
+        let page = Arc::clone(&self.page);
+        let tx = self.jobs_tx.clone();
+        let errors = self.errors_tx.clone();
+        tokio::spawn(async move {
+            match page.hints().await {
+                Ok(targets) => {
+                    let _ = tx.send(Job::Hints(targets));
+                }
+                // Not a `Job::Failed`: that one clears the extraction and
+                // navigation flags, and a failed hint query has finished
+                // neither of those.
+                Err(error) => {
+                    let _ = errors.send(error.to_string());
+                }
+            }
+        });
+    }
+
+    fn enter_hints(&mut self, targets: Vec<HintTarget>) {
+        let session = HintSession::new(targets);
+        if session.is_empty() {
+            // Entering a mode with nothing in it would only need escaping.
+            self.state = State::Notice("no hints".to_string());
+            return;
+        }
+        self.mode = Mode::Hint(session);
+    }
+
+    /// Apply what filtering decided about the character just typed.
+    fn on_filtered(&mut self, session: HintSession, filtered: Filtered) {
+        match filtered {
+            Filtered::Waiting(_) => self.mode = Mode::Hint(session),
+            Filtered::Activate(target) => self.activate(target),
+            // Nothing matches, so there is nothing left to type. Leaving is
+            // friendlier than sitting there waiting for an Esc.
+            Filtered::None => self.mode = Mode::Normal,
+        }
+    }
+
+    fn activate(&mut self, target: HintTarget) {
+        let at = target.center();
+        self.input.send(Input::Mouse(MouseInput::press(at)));
+        self.input.send(Input::Mouse(MouseInput::release(at)));
+        // Clicking a text field is the beginning of typing into it, so that
+        // is where the mode goes. Anything else is finished when the click
+        // lands.
+        self.mode = match target.kind {
+            TargetKind::Editable => Mode::Insert,
+            TargetKind::Clickable => Mode::Normal,
+        };
     }
 
     fn start_extract(&mut self) {
@@ -411,10 +506,14 @@ impl Core {
                 // The page may have changed again while we were extracting.
                 self.start_extract();
             }
+            Job::Hints(targets) => {
+                self.hints = Some(targets.clone());
+                self.enter_hints(targets);
+            }
             Job::Settled => {
                 self.navigating = false;
                 self.state = State::Ready;
-                self.dirty = true;
+                self.mark_dirty();
                 self.start_extract();
             }
             // The frame stays exactly as it was; only the statusline
@@ -450,7 +549,7 @@ impl Core {
 
         // A diff against a frame of different dimensions is meaningless.
         self.renderer.invalidate();
-        self.dirty = true;
+        self.mark_dirty();
         self.start_extract();
         Ok(())
     }
