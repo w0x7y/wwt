@@ -240,6 +240,27 @@ to normal for a `clickable` one. `Esc` cancels and paints nothing.
 If the query returns no targets, hint mode is not entered: the statusline says so and
 the mode stays normal. Entering a mode with nothing in it would only need escaping.
 
+### Seeing what you type
+
+A form control's value is not a text node. `extract()` walks text nodes, so
+before M3 shipped typing there was nothing to reveal the gap: you could fill in
+a form, submit it, and never see a character of what you had entered.
+
+So extraction gains a second pass over `input`, `textarea` and `select`, reading
+each control's rendered text from element state and placing it in the control's
+content box. It reports what the browser shows rather than what the control
+holds: a placeholder when the value is empty, the chosen option for a `select`,
+bullets for a password, and nothing at all for a checkbox, whose value is the
+string `on`.
+
+This one is not on demand. It is part of every extraction, because the text in a
+field is page content in the way a hint target is not: leaving it out of a pass
+would blank text that is on screen.
+
+Two things it does not reproduce, both showing the head of the text elided at
+the box edge: soft wrapping inside a textarea, and a control scrolled sideways
+past its own width. Explicit newlines in a textarea do become separate lines.
+
 ## 6. Mouse
 
 Terminal mouse capture is enabled in `main.rs` beside the alternate screen, and
@@ -311,6 +332,12 @@ The hint query carries a measurement, not a test: the heavy fixture from M2 time
 `hints()`, recorded in the plan, the way extraction was.
 
 ## 11. Open questions
+
+**No caret.** You can see what you have typed, but not where the insertion point
+is. That is invisible while you are appending to a field and awkward the moment
+you edit the middle of one. Drawing it means tracking `selectionStart` and
+painting a cell in reverse video, which is small; leaving it out of M3 is a
+scope call, not a difficulty.
 
 **IME and multi-byte input.** crossterm reports composed characters as `Char`, so a
 composed glyph types correctly, but there is no composition state, no candidate

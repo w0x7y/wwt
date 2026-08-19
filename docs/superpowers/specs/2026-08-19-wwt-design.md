@@ -159,17 +159,26 @@ survives navigation. Responsibilities:
 
 1. Walk text nodes, collecting `Range.getClientRects()` and computed style
    (color, weight, size, stacking depth) per run
-2. Collect interactive elements (`a`, `button`, `input`, `select`, `textarea`,
-   `[role=button]`, `[tabindex]`, `[onclick]`) with their client rects
-3. Collect replaced-content boxes (`img`, `canvas`, `video`, `svg`) as block
+2. Read the text of form controls, which point 1 cannot reach. A control's value
+   is not in the DOM: `input.childNodes` is empty however much you type into it,
+   because the browser paints the value from element state rather than from a
+   text node. Without this pass you cannot see what you are typing. The pass
+   also covers placeholders, a `select`'s chosen option, and passwords, which
+   are reported as bullets: the frame shows what the browser shows.
+3. Collect interactive elements (`a`, `button`, `input`, `select`, `textarea`,
+   `[role=button]`, `[tabindex]`, `[onclick]`) with their client rects, on demand
+   rather than per extraction (section 6)
+4. Collect replaced-content boxes (`img`, `canvas`, `video`, `svg`) as block
    placeholders
-4. Signal dirtiness through `Runtime.addBinding` from a debounced `MutationObserver`
+5. Signal dirtiness through `Runtime.addBinding` from a debounced `MutationObserver`
    plus scroll and resize listeners
-5. Report focus changes via a `focusin` listener, so mode tracking follows the page
 
-Point 4 is what makes the system event-driven rather than polling: we re-extract only
+Point 5 is what makes the system event-driven rather than polling: we re-extract only
 when the page changes, so an idle page costs no CPU. This is the difference between a
 browser you leave open and one you close.
+
+There is deliberately no `focusin` listener. An earlier draft had one, so that mode
+could follow the page's own focus; section 6 says why it is gone.
 
 Extraction returns one flat, sorted array per pass through a single `Runtime.evaluate`
 round trip, never thousands of individual `DOM.getBoxModel` calls. On a heavy page

@@ -231,3 +231,77 @@ async fn measure_hints_on_a_page_full_of_links() {
     println!("links.html: {} targets found in {elapsed:?}", targets.len());
     assert!(!targets.is_empty(), "the fixture is full of links");
 }
+
+/// Every run's text, for a failure message worth reading.
+fn texts(extraction: &wwt_page::Extraction) -> Vec<&str> {
+    extraction.runs.iter().map(|r| r.text.as_str()).collect()
+}
+
+#[tokio::test]
+async fn a_fields_value_is_extracted_even_though_it_is_not_a_text_node() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    page.eval("document.querySelector('#typed').focus()").await.expect("focus");
+    for c in "hi".chars() {
+        page.dispatch_key(&letter(c)).await.expect("dispatch");
+    }
+    eventually(&page, "document.querySelector('#typed').value", "hi").await;
+
+    let extraction = page.extract().await.expect("extract");
+    let run = extraction
+        .runs
+        .iter()
+        .find(|r| r.text == "hi")
+        .unwrap_or_else(|| panic!("typed text is missing from the frame: {:?}", texts(&extraction)));
+
+    // It has to land inside the box it was typed into, not at the origin.
+    let centre = center_of(&page, "#typed").await;
+    let run_centre_y = run.rect.y + run.rect.h / 2.0;
+    assert!(
+        (run_centre_y - centre.y).abs() < 12.0 && run.rect.x < centre.x,
+        "the value should be painted inside its own box: run {:?}, box centre {centre:?}",
+        run.rect
+    );
+}
+
+#[tokio::test]
+async fn a_placeholder_stands_in_for_an_empty_field() {
+    let h = harness().await;
+    let extraction = open(&h, "fields.html").await.extract().await.expect("extract");
+    assert!(
+        texts(&extraction).contains(&"search the web"),
+        "the placeholder is on screen, so it belongs in the frame: {:?}",
+        texts(&extraction)
+    );
+}
+
+#[tokio::test]
+async fn a_password_is_extracted_as_bullets_and_never_as_itself() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    page.eval("document.querySelector('#secret').focus()").await.expect("focus");
+    for c in "pw".chars() {
+        page.dispatch_key(&letter(c)).await.expect("dispatch");
+    }
+    eventually(&page, "document.querySelector('#secret').value", "pw").await;
+
+    let extraction = page.extract().await.expect("extract");
+    let texts = texts(&extraction);
+    assert!(texts.contains(&"••"), "a password field shows bullets: {texts:?}");
+    assert!(
+        !texts.contains(&"pw"),
+        "the frame must show what the browser shows, never the password itself: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_select_shows_its_chosen_option_and_a_checkbox_shows_nothing() {
+    let h = harness().await;
+    let extraction = open(&h, "fields.html").await.extract().await.expect("extract");
+    let texts = texts(&extraction);
+
+    assert!(texts.contains(&"second"), "the chosen option is what is on screen: {texts:?}");
+    assert!(!texts.contains(&"first"), "an unchosen option is not on screen: {texts:?}");
+    // A checkbox's value is the string "on". Nothing renders it, so nor do we.
+    assert!(!texts.contains(&"on"), "a checkbox has no text: {texts:?}");
+}

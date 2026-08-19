@@ -14,7 +14,7 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 147 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 151 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -118,6 +118,12 @@ It lives in the binary because its output type belongs to `wwt-page` and its
 input type to crossterm, so either other home would point a dependency edge
 backwards. Ctrl and Meta suppress the inserted text, or a page's `Ctrl-S`
 handler would fire *and* type an `s`.
+
+`extract()` has a second pass over `input`, `textarea` and `select`. A control's
+value is not in the DOM (`input.childNodes` is empty however much you type), so
+the text walk cannot see it and you would not be able to see what you type. It
+reports what the browser shows: a placeholder for an empty field, the chosen
+option for a `select`, bullets for a password.
 
 Hint targets come from `__wwt.hints()`, queried on `f` and cached until the
 next dirty signal. They are deliberately not part of extraction: that path

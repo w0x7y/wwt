@@ -162,6 +162,9 @@
       }
     }
 
+    // A form control's text is not a text node, so the walk above missed it.
+    runs.push(...fieldRuns());
+
     // Scroll geometry rides along with the runs so the statusline costs no
     // extra round trip.
     const doc = document.documentElement;
@@ -173,6 +176,106 @@
       scrollHeight: Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0),
       innerHeight: window.innerHeight,
     };
+  }
+
+  // Input types whose value is not text on screen. A checkbox's value is the
+  // string "on", and painting that would be inventing content.
+  const VALUELESS_INPUTS = new Set([
+    "checkbox", "radio", "range", "color", "file", "image", "hidden",
+  ]);
+
+  // What a form control shows, which is not always what it holds.
+  function fieldText(el) {
+    if (el.tagName === "SELECT") {
+      const option = el.selectedOptions && el.selectedOptions[0];
+      return option ? option.label : "";
+    }
+
+    const type = el.tagName === "INPUT"
+      ? (el.getAttribute("type") || "text").toLowerCase()
+      : "";
+    if (VALUELESS_INPUTS.has(type)) return "";
+
+    const value = el.value || "";
+    if (value === "") return el.placeholder || "";
+    // The frame shows what the browser shows. A password on screen is
+    // bullets, so a password in the frame is bullets.
+    if (type === "password") return "\u2022".repeat(value.length);
+    return value;
+  }
+
+  // Runs for the text inside form controls.
+  //
+  // A control's value is not in the DOM: `input.childNodes` is empty however
+  // much you type into it, because the browser paints the value from element
+  // state rather than from a text node. The walk in extract() therefore
+  // cannot see it, and without this pass you cannot see what you are typing.
+  //
+  // Soft wrapping inside a textarea is not reproduced, and neither is a
+  // control scrolled sideways past its own width: both show the head of the
+  // text, elided at the box edge.
+  function fieldRuns() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const runs = [];
+
+    for (const el of document.querySelectorAll("input, textarea, select")) {
+      const text = fieldText(el);
+      if (!text) continue;
+
+      const cs = window.getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
+        continue;
+      }
+
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+
+      // The content box: where the browser actually puts the text.
+      const left = r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft);
+      const right = r.right - parseFloat(cs.borderRightWidth) - parseFloat(cs.paddingRight);
+      const top = r.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop);
+      const bottom = r.bottom - parseFloat(cs.borderBottomWidth) - parseFloat(cs.paddingBottom);
+
+      const fontSize = parseFloat(cs.fontSize) || 16;
+      // `line-height: normal` parses to NaN, and a control's own line height
+      // is what decides which row its text lands on.
+      const lineHeight = parseFloat(cs.lineHeight) || fontSize * 1.2;
+      const weight = parseInt(cs.fontWeight, 10) || 400;
+
+      // A textarea stacks its lines from the top; everything else is one line
+      // centred in the box.
+      const multiline = el.tagName === "TEXTAREA";
+      const lines = multiline ? text.split("\n") : [text];
+      const first = multiline
+        ? top
+        : top + Math.max(0, (bottom - top - lineHeight) / 2);
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+
+        const lineTop = first + i * lineHeight;
+        if (lineTop >= bottom) break;
+
+        runs.push({
+          text: line,
+          x: left,
+          y: lineTop,
+          w: Math.max(0, right - left),
+          h: lineHeight,
+          // The same convention the text walk uses: the descender is roughly
+          // a fifth of the font size below the baseline.
+          baseline: lineTop + lineHeight - fontSize * 0.21,
+          color: cs.color,
+          bold: weight >= 600,
+          z: 0,
+        });
+      }
+    }
+
+    return runs;
   }
 
   // What counts as interactive. Anything a click or a keystroke does
