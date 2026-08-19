@@ -12,9 +12,9 @@ use wwt_cdp::Client;
 use wwt_frame::{CellSize, Frame, GridSize, TextRun, Viewport};
 use wwt_page::{DIRTY_BINDING, Extraction, Page};
 use wwt_term::Renderer;
+use wwt_ui::chrome::{self, Mode, State};
+use wwt_ui::command::{self, Command};
 
-use crate::chrome::{self, Mode, State};
-use crate::command::{self, Command};
 use crate::keymap::{Action, action_for};
 
 /// A dragged window edge produces a resize event per frame, and each one

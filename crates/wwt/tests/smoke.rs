@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use wwt::chrome::Mode;
 use wwt_frame::{CellSize, GridSize, Viewport};
+use wwt_ui::chrome::Mode;
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,7 +68,7 @@ fn the_command_line_opens_fills_and_closes() {
         }
     }
     let mut frame = wwt_frame::Frame::new(wwt_frame::GridSize { cols: 40, rows: 3 });
-    wwt::chrome::paint(&mut frame, &mode, &wwt::chrome::State::Ready, "", "", 0.0);
+    wwt_ui::chrome::paint(&mut frame, &mode, &wwt_ui::chrome::State::Ready, "", "", 0.0);
     assert!(
         frame.row_text(2).starts_with(":open example.com"),
         "row 2 was {:?}",
@@ -78,8 +78,8 @@ fn the_command_line_opens_fills_and_closes() {
     // And the command it holds parses to the navigation we expect.
     if let Mode::Command(buffer) = &mode {
         assert_eq!(
-            wwt::command::parse(buffer),
-            Ok(wwt::command::Command::Open("https://example.com".to_string()))
+            wwt_ui::command::parse(buffer),
+            Ok(wwt_ui::command::Command::Open("https://example.com".to_string()))
         );
     }
 }

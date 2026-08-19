@@ -8,7 +8,8 @@ use crossterm::terminal::{
 use crossterm::{cursor, execute};
 use wwt_cdp::{Chromium, Client};
 use wwt_page::Page;
-use wwt::command::normalize_url;
+use wwt_ui::command::normalize_url;
+
 use wwt::core::Core;
 
 #[tokio::main]

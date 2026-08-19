@@ -1,7 +1,5 @@
 //! Wiring: browser, page, frame.
 
-pub mod chrome;
-pub mod command;
 pub mod core;
 pub mod keymap;
 
