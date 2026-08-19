@@ -1,0 +1,80 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc;
+use wwt::input::{Input, InputPump};
+use wwt_cdp::{Chromium, Client};
+use wwt_frame::{CellSize, GridSize, Viewport};
+use wwt_page::{KeyInput, Page};
+
+fn fixture_url(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    format!("file://{}", path.display())
+}
+
+fn letter(c: char) -> KeyInput {
+    KeyInput {
+        key: c.to_string(),
+        code: format!("Key{}", c.to_ascii_uppercase()),
+        windows_virtual_key_code: c.to_ascii_uppercase() as u32,
+        text: c.to_string(),
+        modifiers: 0,
+    }
+}
+
+/// The space bar comes off a key of its own, not `Key `.
+fn space() -> KeyInput {
+    KeyInput {
+        key: " ".to_string(),
+        code: "Space".to_string(),
+        windows_virtual_key_code: 32,
+        text: " ".to_string(),
+        modifiers: 0,
+    }
+}
+
+/// Typing is the first page operation whose order matters. Sending a burst
+/// without awaiting anything is exactly what the core loop does, so this is
+/// the shape of the bug it would otherwise have.
+#[tokio::test]
+async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
+    let browser = Chromium::launch().await.expect("launch chromium");
+    let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
+    let vp = Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+    let page = Arc::new(
+        Page::open(Arc::clone(&client), &fixture_url("form.html"), vp)
+            .await
+            .expect("open the fixture"),
+    );
+    page.eval("document.querySelector('#name').focus()").await.expect("focus");
+
+    let (errors_tx, mut errors_rx) = mpsc::unbounded_channel();
+    let pump = InputPump::spawn(Arc::clone(&page), errors_tx);
+
+    let typed = "the quick brown fox";
+    for c in typed.chars() {
+        // No await between sends: the pump is what keeps these in order.
+        pump.send(Input::Key(if c == ' ' { space() } else { letter(c) }));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut value = String::new();
+    while Instant::now() < deadline {
+        value = page
+            .eval("document.querySelector('#name').value")
+            .await
+            .expect("read the field")
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if value.len() == typed.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(value, typed);
+    assert!(errors_rx.try_recv().is_err(), "the pump reported an error");
+}

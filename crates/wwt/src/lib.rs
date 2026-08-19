@@ -1,6 +1,7 @@
 //! Wiring: browser, page, frame.
 
 pub mod core;
+pub mod input;
 pub mod keys;
 pub mod keymap;
 
