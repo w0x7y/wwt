@@ -5,15 +5,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::time::{Duration, Instant, sleep};
-use wb_cdp::Client;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
+use wb_cdp::{Client, Event};
 use wb_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
-const LOAD_POLL: Duration = Duration::from_millis(50);
 
 /// The page-side function the injected script calls to say it changed.
 /// Arrives back as a `Runtime.bindingCalled` event.
@@ -160,7 +160,12 @@ impl Page {
         Ok(())
     }
 
-    async fn navigate(&self, url: &str) -> Result<()> {
+    /// Navigate this page, and wait for its load event.
+    pub async fn navigate(&self, url: &str) -> Result<()> {
+        // Subscribe before issuing the command: the load event for a fast
+        // page can arrive before the navigate response does.
+        let mut events = self.client.subscribe();
+
         let result = self
             .client
             .call_on(&self.session_id, "Page.navigate", json!({ "url": url }))
@@ -171,31 +176,24 @@ impl Page {
             bail!("navigation to {url} failed: {error}");
         }
 
-        self.wait_for_load().await
+        self.wait_for_load(&mut events).await
     }
 
-    /// M1 polls `document.readyState`. M2 replaces this with the
-    /// `Page.loadEventFired` event once the CDP event pump exists.
-    async fn wait_for_load(&self) -> Result<()> {
-        let deadline = Instant::now() + LOAD_TIMEOUT;
-        loop {
-            let state = self
-                .client
-                .call_on(
-                    &self.session_id,
-                    "Runtime.evaluate",
-                    json!({ "expression": "document.readyState", "returnByValue": true }),
-                )
-                .await
-                .context("poll document.readyState")?;
+    async fn wait_for_load(&self, events: &mut mpsc::UnboundedReceiver<Event>) -> Result<()> {
+        let watch = async {
+            while let Some(event) = events.recv().await {
+                if event.method == "Page.loadEventFired"
+                    && event.session_id.as_deref() == Some(self.session_id.as_str())
+                {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!("the CDP connection closed while the page was loading"))
+        };
 
-            if state["result"]["value"].as_str() == Some("complete") {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!("the page did not finish loading within {LOAD_TIMEOUT:?}");
-            }
-            sleep(LOAD_POLL).await;
+        match timeout(LOAD_TIMEOUT, watch).await {
+            Ok(result) => result,
+            Err(_) => bail!("the page did not finish loading within {LOAD_TIMEOUT:?}"),
         }
     }
 
