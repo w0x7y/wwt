@@ -35,4 +35,5 @@ Press `q` to quit.
 
 - Design: `docs/superpowers/specs/2026-08-19-webinal-design.md`
 - M2 design: `docs/superpowers/specs/2026-08-19-webinal-m2-design.md`
+- M2 plan: `docs/superpowers/plans/2026-08-19-webinal-m2-navigation.md`
 - M1 plan: `docs/superpowers/plans/2026-08-19-webinal-m1-walking-skeleton.md`
