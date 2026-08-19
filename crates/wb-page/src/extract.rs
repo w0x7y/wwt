@@ -1,22 +1,60 @@
 //! One page: navigate, size it to the terminal, pull its text runs out.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::time::{Duration, Instant, sleep};
-use wb_cdp::Client;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
+use wb_cdp::{Client, Event};
 use wb_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 
-const EXTRACT_JS: &str = include_str!("../assets/extract.js");
+const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
-const LOAD_POLL: Duration = Duration::from_millis(50);
+
+/// The page-side function the injected script calls to say it changed.
+/// Arrives back as a `Runtime.bindingCalled` event.
+pub const DIRTY_BINDING: &str = "__webinal_dirty";
 
 /// The shape `extract.js` returns.
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
+    title: String,
+    url: String,
+    #[serde(rename = "scrollY")]
+    scroll_y: f64,
+    #[serde(rename = "scrollHeight")]
+    scroll_height: f64,
+    #[serde(rename = "innerHeight")]
+    inner_height: f64,
+}
+
+/// One pass of the extraction script: everything the renderer and the
+/// statusline need, from one round trip.
+#[derive(Debug, Clone)]
+pub struct Extraction {
+    pub runs: Vec<TextRun>,
+    pub title: String,
+    pub url: String,
+    pub scroll_y: f64,
+    pub scroll_height: f64,
+    pub viewport_height: f64,
+}
+
+impl Extraction {
+    /// How far down the document we are: 0.0 at the top, 1.0 when the last
+    /// line is on screen, and 0.0 when the document fits without scrolling.
+    pub fn scroll_progress(&self) -> f64 {
+        let scrollable = self.scroll_height - self.viewport_height;
+        if scrollable <= 0.0 {
+            return 0.0;
+        }
+        (self.scroll_y / scrollable).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,14 +70,14 @@ struct RawRun {
     z: i32,
 }
 
-pub struct Page<'a> {
-    client: &'a Client,
+pub struct Page {
+    client: Arc<Client>,
     session_id: String,
 }
 
-impl<'a> Page<'a> {
+impl Page {
     /// Create a target, size it to the viewport, navigate, and wait for load.
-    pub async fn open(client: &'a Client, url: &str, vp: Viewport) -> Result<Page<'a>> {
+    pub async fn open(client: Arc<Client>, url: &str, vp: Viewport) -> Result<Page> {
         let target = client
             .call("Target.createTarget", json!({ "url": "about:blank" }))
             .await
@@ -62,9 +100,46 @@ impl<'a> Page<'a> {
             .to_string();
 
         let page = Page { client, session_id };
+        page.client
+            .call_on(&page.session_id, "Page.enable", json!({}))
+            .await
+            .context("enable the Page domain")?;
+        page.client
+            .call_on(&page.session_id, "Runtime.enable", json!({}))
+            .await
+            .context("enable the Runtime domain")?;
+        // Registered before the first navigation, so the binding exists by
+        // the time the bootstrap runs.
+        page.client
+            .call_on(
+                &page.session_id,
+                "Runtime.addBinding",
+                json!({ "name": DIRTY_BINDING }),
+            )
+            .await
+            .context("install the dirty-signal binding")?;
+        page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
         page.navigate(url).await?;
         Ok(page)
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Install the page-side script for every document this target loads,
+    /// including ones it navigates to later.
+    async fn install_bootstrap(&self) -> Result<()> {
+        self.client
+            .call_on(
+                &self.session_id,
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": BOOTSTRAP_JS }),
+            )
+            .await
+            .context("install the bootstrap script")?;
+        Ok(())
     }
 
     /// Tell Chromium the window is exactly the terminal grid. Spec section 3.
@@ -85,11 +160,11 @@ impl<'a> Page<'a> {
         Ok(())
     }
 
-    async fn navigate(&self, url: &str) -> Result<()> {
-        self.client
-            .call_on(&self.session_id, "Page.enable", json!({}))
-            .await
-            .context("enable the Page domain")?;
+    /// Navigate this page, and wait for its load event.
+    pub async fn navigate(&self, url: &str) -> Result<()> {
+        // Subscribe before issuing the command: the load event for a fast
+        // page can arrive before the navigate response does.
+        let mut events = self.client.subscribe();
 
         let result = self
             .client
@@ -101,56 +176,148 @@ impl<'a> Page<'a> {
             bail!("navigation to {url} failed: {error}");
         }
 
-        self.wait_for_load().await
+        self.wait_for_load(&mut events).await
     }
 
-    /// M1 polls `document.readyState`. M2 replaces this with the
-    /// `Page.loadEventFired` event once the CDP event pump exists.
-    async fn wait_for_load(&self) -> Result<()> {
-        let deadline = Instant::now() + LOAD_TIMEOUT;
-        loop {
-            let state = self
-                .client
-                .call_on(
-                    &self.session_id,
-                    "Runtime.evaluate",
-                    json!({ "expression": "document.readyState", "returnByValue": true }),
-                )
-                .await
-                .context("poll document.readyState")?;
+    async fn wait_for_load(&self, events: &mut mpsc::UnboundedReceiver<Event>) -> Result<()> {
+        let watch = async {
+            while let Some(event) = events.recv().await {
+                if event.method == "Page.loadEventFired"
+                    && event.session_id.as_deref() == Some(self.session_id.as_str())
+                {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!("the CDP connection closed while the page was loading"))
+        };
 
-            if state["result"]["value"].as_str() == Some("complete") {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                bail!("the page did not finish loading within {LOAD_TIMEOUT:?}");
-            }
-            sleep(LOAD_POLL).await;
+        match timeout(LOAD_TIMEOUT, watch).await {
+            Ok(result) => result,
+            Err(_) => bail!("the page did not finish loading within {LOAD_TIMEOUT:?}"),
         }
     }
 
-    pub async fn title(&self) -> Result<String> {
-        let result = self
+    /// Move `delta` entries through the browser's own history.
+    ///
+    /// Returns `false` when there is no such entry — the end of the history
+    /// is a fact about the world, not an error.
+    async fn go(&self, delta: i64) -> Result<bool> {
+        let history = self
             .client
+            .call_on(&self.session_id, "Page.getNavigationHistory", json!({}))
+            .await
+            .context("read the navigation history")?;
+
+        let index = history["currentIndex"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("the navigation history has no currentIndex"))?;
+        let entries = history["entries"]
+            .as_array()
+            .ok_or_else(|| anyhow!("the navigation history has no entries"))?;
+
+        let target = index + delta;
+        if target < 0 || target >= entries.len() as i64 {
+            return Ok(false);
+        }
+        let entry_id = entries[target as usize]["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("a history entry has no id"))?;
+
+        let mut events = self.client.subscribe();
+        self.client
+            .call_on(
+                &self.session_id,
+                "Page.navigateToHistoryEntry",
+                json!({ "entryId": entry_id }),
+            )
+            .await
+            .context("navigate to a history entry")?;
+        self.wait_for_load(&mut events).await?;
+        Ok(true)
+    }
+
+    pub async fn back(&self) -> Result<bool> {
+        self.go(-1).await
+    }
+
+    pub async fn forward(&self) -> Result<bool> {
+        self.go(1).await
+    }
+
+    pub async fn reload(&self) -> Result<()> {
+        let mut events = self.client.subscribe();
+        self.client
+            .call_on(&self.session_id, "Page.reload", json!({}))
+            .await
+            .context("reload the page")?;
+        self.wait_for_load(&mut events).await
+    }
+
+    /// Scroll by a distance in CSS pixels, positive being downward.
+    ///
+    /// This dispatches a real wheel event rather than calling `scrollBy`, so
+    /// Chromium performs the scroll: sticky headers stick, infinite scroll
+    /// loads, and virtualized lists virtualize, all with no help from us.
+    pub async fn scroll_by(&self, dy: f64, vp: Viewport) -> Result<()> {
+        self.client
+            .call_on(
+                &self.session_id,
+                "Input.dispatchMouseEvent",
+                json!({
+                    "type": "mouseWheel",
+                    "x": f64::from(vp.css_width()) / 2.0,
+                    "y": f64::from(vp.css_height()) / 2.0,
+                    "deltaX": 0.0,
+                    "deltaY": dy,
+                    "button": "none",
+                    "clickCount": 0,
+                    "modifiers": 0,
+                }),
+            )
+            .await
+            .context("dispatch a wheel event")?;
+        Ok(())
+    }
+
+    pub async fn scroll_to_top(&self) -> Result<()> {
+        self.scroll_to("0").await
+    }
+
+    /// Jump to the end of the document.
+    ///
+    /// This is the one place M2 does not scroll natively: the distance to the
+    /// document's end is not known to us, and on an infinite-scroll page it
+    /// changes as we go. The consequence is that this reaches the end of what
+    /// has loaded, which is the correct behavior — it is simply not
+    /// wheel-driven.
+    pub async fn scroll_to_end(&self) -> Result<()> {
+        self.scroll_to("document.documentElement.scrollHeight").await
+    }
+
+    async fn scroll_to(&self, y_expression: &str) -> Result<()> {
+        self.client
             .call_on(
                 &self.session_id,
                 "Runtime.evaluate",
-                json!({ "expression": "document.title", "returnByValue": true }),
+                json!({
+                    "expression": format!("window.scrollTo(0, {y_expression})"),
+                    "returnByValue": true,
+                }),
             )
             .await
-            .context("read document.title")?;
-        Ok(result["result"]["value"].as_str().unwrap_or_default().to_string())
+            .context("scroll to a document position")?;
+        Ok(())
     }
 
-    /// Run the extraction script and convert its output into `TextRun`s.
-    pub async fn extract(&self) -> Result<Vec<TextRun>> {
+    /// Run the extraction script and convert its output.
+    pub async fn extract(&self) -> Result<Extraction> {
         let result = self
             .client
             .call_on(
                 &self.session_id,
                 "Runtime.evaluate",
                 json!({
-                    "expression": EXTRACT_JS,
+                    "expression": "window.__webinal.extract()",
                     "returnByValue": true,
                     "awaitPromise": false,
                 }),
@@ -165,19 +332,27 @@ impl<'a> Page<'a> {
         let raw: RawExtraction = serde_json::from_value(result["result"]["value"].clone())
             .context("the extraction script returned an unexpected shape")?;
 
-        Ok(raw
-            .runs
-            .into_iter()
-            .map(|r| TextRun {
-                text: r.text,
-                rect: CssRect { x: r.x, y: r.y, w: r.w, h: r.h },
-                baseline: r.baseline,
-                style: Style {
-                    fg: parse_css_color(&r.color),
-                    bold: r.bold,
-                },
-                z: r.z,
-            })
-            .collect())
+        Ok(Extraction {
+            runs: raw
+                .runs
+                .into_iter()
+                .map(|r| TextRun {
+                    text: r.text,
+                    rect: CssRect { x: r.x, y: r.y, w: r.w, h: r.h },
+                    baseline: r.baseline,
+                    style: Style {
+                        fg: parse_css_color(&r.color),
+                        bold: r.bold,
+                        reverse: false,
+                    },
+                    z: r.z,
+                })
+                .collect(),
+            title: raw.title,
+            url: raw.url,
+            scroll_y: raw.scroll_y,
+            scroll_height: raw.scroll_height,
+            viewport_height: raw.inner_height,
+        })
     }
 }

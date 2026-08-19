@@ -260,9 +260,15 @@ degrades to stale-but-labeled, never to empty.
 - **Page hangs.** Every CDP command carries a deadline. On timeout the tab is marked
   stalled in the statusline, keeps its last frame, and remains switchable-away-from.
 - **Injected script throws.** Caught at its top level and reported through the
-  binding; that tab falls back to extracting from `Accessibility.getFullAXTree`. This
-  fallback is CDP-native and shares no code with our script, so a bug in the extractor
-  cannot take a page from degraded to unusable.
+  binding; that tab falls back to a CDP-native extractor that shares no code with our
+  script, so a bug in the extractor cannot take a page from degraded to unusable.
+  **Open question — settle before M6 is planned.** The original choice was
+  `Accessibility.getFullAXTree`, but `AXNode` carries no geometry, so an AX-sourced
+  fallback cannot feed the geometric renderer and can only produce a reflowed linear
+  document — which is what couples it to reader mode. `DOMSnapshot.captureSnapshot`
+  meets the same independence requirement and does return layout geometry, so it
+  would feed the normal renderer and need no reflow layer. The trade is fidelity of
+  the degraded view against the size and placement of the milestone.
 - **Terminal resize.** Debounce 100ms, recompute the grid, push a new
   `Emulation.setDeviceMetricsOverride`, force re-extract. The page genuinely reflows.
 - **No Kitty graphics.** Pixel mode degrades to half-block unicode, then to labeled
@@ -327,8 +333,18 @@ restarts.
 **M5 — Pixel mode.** `Page.startScreencast`, the Kitty graphics protocol with unicode
 placeholders, mode toggling, and the half-block degradation path.
 
-**M6 — Reader mode and hardening.** Reflow view, the accessibility-tree fallback, the
-Chromium supervisor and restart path, per-command deadlines.
+**M6 — Reader mode and the degradation path.** The reflow renderer, reader mode on
+top of it, and the fallback extractor that feeds it when the injected script throws.
+These are one milestone because they are one rendering path with two sources, not
+because they are related in purpose. Splitting the fallback out would mean building
+the reflow layer in one milestone and its second consumer in the next. See the open
+question in section 8: if the fallback is sourced from `DOMSnapshot` rather than the
+accessibility tree it needs no reflow, becomes independent of reader mode, and can
+land considerably earlier.
+
+**M7 — Hardening.** The Chromium supervisor and restart path, per-command deadlines,
+and session recovery after a crash. Operational robustness, sharing nothing with M6
+but the fact that both were once one milestone.
 
 Daily use realistically begins at M4. M1 through M3 are the foundation and should not
 be rushed to reach it.

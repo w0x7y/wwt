@@ -1,5 +1,12 @@
 //! Wiring: browser, page, frame.
 
+pub mod chrome;
+pub mod command;
+pub mod core;
+pub mod keymap;
+
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use wb_cdp::{Chromium, Client};
 use wb_frame::{Frame, Viewport};
@@ -14,11 +21,11 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
     let client = Client::connect(browser.ws_url())
         .await
         .context("connect to chromium")?;
-    let page = Page::open(&client, url, vp).await?;
+    let page = Page::open(Arc::new(client), url, vp).await?;
 
-    let runs = page.extract().await?;
+    let extraction = page.extract().await?;
     let mut frame = Frame::new(vp.grid());
-    for run in &runs {
+    for run in &extraction.runs {
         frame.paint_run(&vp, run);
     }
     Ok(frame)

@@ -10,6 +10,9 @@ pub struct Rgb {
 pub struct Style {
     pub fg: Rgb,
     pub bold: bool,
+    /// Swap foreground and background. Chrome uses this; extraction never
+    /// produces it, which is why there is no background color here yet.
+    pub reverse: bool,
 }
 
 impl Default for Style {
@@ -17,6 +20,7 @@ impl Default for Style {
         Self {
             fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 },
             bold: false,
+            reverse: false,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::cell::Cell;
+use crate::cell::{Cell, Style};
 use crate::geom::{CellPos, GridSize, Viewport};
 use crate::run::TextRun;
 
@@ -116,6 +116,22 @@ impl Frame {
                 style: run.style,
                 z: run.z,
             };
+        }
+    }
+
+    /// Paint a string starting at one cell, clipped at the right edge.
+    ///
+    /// Chrome uses this. It paints at the maximum stacking depth, and the
+    /// compositor paints chrome last, so it takes every cell it touches:
+    /// `paint_run` yields a cell to anything at or above its own depth.
+    pub fn paint_text(&mut self, pos: CellPos, text: &str, style: Style) {
+        for (i, ch) in text.chars().enumerate() {
+            let Ok(offset) = u16::try_from(i) else { break };
+            let Some(col) = pos.col.checked_add(offset) else { break };
+            let Some(idx) = self.index(CellPos { col, row: pos.row }) else {
+                break;
+            };
+            self.cells[idx] = Cell { ch, style, z: i32::MAX };
         }
     }
 
@@ -270,11 +286,61 @@ mod tests {
     fn paint_carries_style_onto_the_cells() {
         let mut f = Frame::new(vp().grid());
         let mut r = run("hi", 0.0, 14.0, 20.0);
-        r.style = Style { fg: Rgb { r: 255, g: 0, b: 0 }, bold: true };
+        r.style = Style { fg: Rgb { r: 255, g: 0, b: 0 }, bold: true, reverse: false };
         f.paint_run(&vp(), &r);
         let c = f.cell(CellPos { col: 0, row: 0 }).unwrap();
         assert_eq!(c.ch, 'h');
         assert_eq!(c.style.fg, Rgb { r: 255, g: 0, b: 0 });
         assert!(c.style.bold);
+    }
+
+    #[test]
+    fn paint_text_writes_at_the_given_cell() {
+        let mut f = Frame::new(GridSize { cols: 10, rows: 2 });
+        f.paint_text(CellPos { col: 2, row: 1 }, "hi", Style::default());
+        assert_eq!(f.row_text(1), "  hi");
+        assert_eq!(f.row_text(0), "");
+    }
+
+    #[test]
+    fn paint_text_clips_at_the_right_edge() {
+        let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
+        f.paint_text(CellPos { col: 2, row: 0 }, "abcd", Style::default());
+        assert_eq!(f.row_text(0), "  ab");
+    }
+
+    #[test]
+    fn paint_text_off_the_bottom_is_a_no_op() {
+        let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
+        f.paint_text(CellPos { col: 0, row: 5 }, "abcd", Style::default());
+        assert_eq!(f.row_text(0), "");
+    }
+
+    #[test]
+    fn paint_text_carries_its_style() {
+        let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
+        let style = Style { fg: Rgb { r: 1, g: 2, b: 3 }, bold: false, reverse: true };
+        f.paint_text(CellPos { col: 0, row: 0 }, "x", style);
+        assert_eq!(f.cell(CellPos { col: 0, row: 0 }).unwrap().style, style);
+    }
+
+    #[test]
+    fn paint_text_outranks_any_page_run() {
+        // Composition order: the page is painted first, then chrome over it.
+        // Chrome must win even against the deepest run expressible, which is
+        // what lets the compositor paint chrome without checking anything.
+        let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
+        f.paint_run(
+            &Viewport::new(GridSize { cols: 4, rows: 1 }, CellSize { w: 10, h: 20 }),
+            &TextRun {
+                text: "zz".to_string(),
+                rect: CssRect { x: 0.0, y: 0.0, w: 40.0, h: 16.0 },
+                baseline: 14.0,
+                style: Style::default(),
+                z: i32::MAX,
+            },
+        );
+        f.paint_text(CellPos { col: 0, row: 0 }, "ab", Style::default());
+        assert_eq!(f.row_text(0), "ab");
     }
 }

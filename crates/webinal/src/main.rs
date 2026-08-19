@@ -1,46 +1,45 @@
 use std::io::{Write, stdout};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use crossterm::event::{Event, KeyCode, KeyEvent, read};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{cursor, execute};
-use wb_frame::Viewport;
+use wb_cdp::{Chromium, Client};
+use wb_page::Page;
+use webinal::command::normalize_url;
+use webinal::core::Core;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Some(url) = std::env::args().nth(1) else {
+    let Some(argument) = std::env::args().nth(1) else {
         bail!("usage: webinal <url>");
     };
+    let url = normalize_url(&argument).map_err(|message| anyhow::anyhow!(message))?;
 
     let (grid, cell) = wb_term::probe().context("measure the terminal")?;
-    let vp = Viewport::new(grid, cell);
 
-    // Render before touching the terminal, so a failure leaves the user's
-    // screen exactly as it was.
-    let frame = webinal::render_url(&url, vp).await?;
+    // Everything that can fail loudly happens before we touch the terminal,
+    // so a failure leaves the user's screen exactly as it was.
+    let browser = Chromium::launch().await.context("launch chromium")?;
+    let client = Arc::new(
+        Client::connect(browser.ws_url())
+            .await
+            .context("connect to chromium")?,
+    );
+    let vp = webinal::core::page_viewport(grid, cell);
+    let page = Arc::new(Page::open(Arc::clone(&client), &url, vp).await?);
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
 
-    let result = run(&frame);
+    let mut core = Core::new(page, client, grid, cell);
+    let mut out = stdout();
+    let result = core.run(&mut out).await;
+    let _ = out.flush();
 
     execute!(stdout(), cursor::Show, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result
-}
-
-fn run(frame: &wb_frame::Frame) -> Result<()> {
-    let mut out = stdout();
-    wb_term::render(frame, &mut out)?;
-    out.flush()?;
-
-    loop {
-        if let Event::Key(KeyEvent { code, .. }) = read()?
-            && matches!(code, KeyCode::Char('q') | KeyCode::Esc)
-        {
-            return Ok(());
-        }
-    }
 }
