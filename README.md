@@ -4,8 +4,9 @@ A terminal web browser in Rust. It drives a real headless Chromium over the
 Chrome DevTools Protocol and renders pages into the terminal grid: crisp text
 by default, true pixels on demand.
 
-**Status: M1, the walking skeleton.** It renders one page's text and quits.
-Navigation, input, tabs, and pixel mode are M2 through M5.
+**Status: M2, navigation and reading.** It renders a page, scrolls it,
+follows history, and opens other URLs. Clicking, typing, tabs, and pixel
+mode are M3 through M5.
 
 ## Requirements
 
@@ -17,9 +18,21 @@ Navigation, input, tabs, and pixel mode are M2 through M5.
 
 ## Usage
 
-    cargo run -p webinal -- https://example.com
+    cargo run -p webinal -- example.com
 
-Press `q` to quit.
+| Key | |
+|---|---|
+| `j` `k` | scroll a line |
+| `d` `u` | scroll half a screen |
+| `space` `b` | scroll a screen |
+| `g` `G` | top, bottom |
+| `H` `L` | back, forward |
+| `Ctrl-r` | reload |
+| `o` | open a URL |
+| `:` | command line |
+| `q` | quit |
+
+Commands: `:open <url>`, `:back`, `:forward`, `:reload`, `:quit`.
 
 ## Layout
 

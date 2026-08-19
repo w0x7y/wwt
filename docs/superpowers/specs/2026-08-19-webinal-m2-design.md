@@ -226,9 +226,20 @@ Loading | Ready | Stalled | Error(String)
 The statusline shows it alongside the URL, the title, and the scroll percentage.
 
 **The frame is never blanked**, per parent spec section 8. Navigating keeps the
-previous page on screen, marked `loading`, until the new one has been extracted. A
-navigation that fails — bad URL, DNS failure, a load that exceeds its deadline —
-sets `Error` or `Stalled` and leaves the old frame exactly where it was.
+previous page on screen, marked `loading`, until the new one has been extracted.
+
+Failures split in two, because Chromium handles one kind itself:
+
+- **Failures Chromium reports to us** — a malformed URL, a load that exceeds its
+  deadline, a CDP error — set `Error` or `Stalled` and leave the old frame exactly
+  where it was.
+- **Failures Chromium absorbs** — DNS and connection failures — are not command
+  failures at all. Chromium navigates to its own `chrome-error://` page and fires a
+  normal load event, so we extract and render that page. We keep it: it names the
+  host and the specific failure, which is more use than a stale frame, and it is what
+  every other browser shows. What we add is the statusline, which detects the
+  `chrome-error://` URL and reports `Error` against the URL that was asked for, so
+  the address line never silently claims a page loaded that did not.
 
 This is a behavioral change, not only an addition: M1 exits the process on a
 navigation failure. After M2, nothing a page does terminates the browser.
@@ -274,7 +285,7 @@ browser.
 | `wb-term` | An unchanged frame emits nothing. One changed cell emits one cursor address and one glyph. A dimension change forces a full repaint. |
 | `wb-cdp` | The event pump, by feeding a synthetic stream into `read_loop` — it is already generic over `S: Stream`, so this needs no browser and no trait refactor. Responses must still correlate while events flow. |
 | `wb-page` | A tall fixture: extract, scroll, extract, assert the first row differs. A mutation fixture: change the DOM, assert the dirty binding fires. |
-| `webinal` | Command parsing (`:open example.com` → `https://example.com`; unparseable input → error). Scroll arithmetic at each key. One PTY test through `:` and `q`. |
+| `webinal` | Command parsing (`:open example.com` → `https://example.com`; unparseable input → error). Scroll arithmetic at each key. One test driving the modal flow through the same types the loop uses rather than a PTY: it covers the `:`-to-command path deterministically, needs no new dependency, and cannot flake on process timing. |
 
 The extraction rewrite in section 4 carries a measurement, not a test: a heavy
 fixture timed before and after, recorded in the plan.

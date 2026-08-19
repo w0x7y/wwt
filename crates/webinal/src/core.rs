@@ -21,6 +21,9 @@ use crate::keymap::{Action, action_for};
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// What Chromium navigates to when it cannot reach a host.
+const CHROME_ERROR_SCHEME: &str = "chrome-error://";
+
 /// The result of something that ran off the loop's thread.
 enum Job {
     Extracted(Box<Extraction>),
@@ -311,9 +314,21 @@ impl Core {
                 self.progress = extraction.scroll_progress();
                 self.runs = extraction.runs;
                 self.title = extraction.title;
-                self.url = extraction.url;
-                if !self.navigating {
-                    self.state = State::Ready;
+
+                // Chromium answers a DNS or connection failure by navigating
+                // to its own error page rather than failing the command, so a
+                // navigation can "succeed" into one. Its error page is more
+                // use than a stale frame — it says what went wrong — but the
+                // statusline must not go on claiming the page is fine.
+                if extraction.url.starts_with(CHROME_ERROR_SCHEME) {
+                    // The statusline prints the URL itself, so naming it here
+                    // too would print it twice.
+                    self.state = State::Error("could not be reached".to_string());
+                } else {
+                    self.url = extraction.url;
+                    if !self.navigating {
+                        self.state = State::Ready;
+                    }
                 }
                 // The page may have changed again while we were extracting.
                 self.start_extract();
