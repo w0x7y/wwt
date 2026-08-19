@@ -85,10 +85,14 @@ Add to the `mod tests` block at the bottom of `crates/wb-frame/src/frame.rs`:
 
     #[test]
     fn paint_text_outranks_any_page_run() {
-        // Chrome is painted after the page and must never lose a cell to it,
-        // whatever stacking depth the page claimed.
+        // Composition order: the page is painted first, then chrome over it.
+        // Chrome must win even against the deepest run expressible, which is
+        // what lets the compositor paint chrome without checking anything.
+        //
+        // Paint in this order and no other: `paint_run` yields a cell to
+        // anything at or *above* its own depth, so a run painted after chrome
+        // at an equal depth would legitimately take the cell back.
         let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
-        f.paint_text(CellPos { col: 0, row: 0 }, "ab", Style::default());
         f.paint_run(
             &Viewport::new(GridSize { cols: 4, rows: 1 }, CellSize { w: 10, h: 20 }),
             &TextRun {
@@ -99,6 +103,7 @@ Add to the `mod tests` block at the bottom of `crates/wb-frame/src/frame.rs`:
                 z: i32::MAX,
             },
         );
+        f.paint_text(CellPos { col: 0, row: 0 }, "ab", Style::default());
         assert_eq!(f.row_text(0), "ab");
     }
 ```
@@ -145,8 +150,9 @@ In `crates/wb-frame/src/frame.rs`, add to `impl Frame`, directly after `paint_ru
 ```rust
     /// Paint a string starting at one cell, clipped at the right edge.
     ///
-    /// Chrome uses this. It paints at the maximum stacking depth so that
-    /// nothing the page produces can take a cell back from it.
+    /// Chrome uses this. It paints at the maximum stacking depth, and the
+    /// compositor paints chrome last, so it takes every cell it touches:
+    /// `paint_run` yields a cell to anything at or above its own depth.
     pub fn paint_text(&mut self, pos: CellPos, text: &str, style: Style) {
         for (i, ch) in text.chars().enumerate() {
             let Ok(offset) = u16::try_from(i) else { break };

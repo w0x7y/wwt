@@ -175,6 +175,7 @@ impl<'a> Page<'a> {
                 style: Style {
                     fg: parse_css_color(&r.color),
                     bold: r.bold,
+                    reverse: false,
                 },
                 z: r.z,
             })

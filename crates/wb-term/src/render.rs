@@ -101,14 +101,14 @@ mod tests {
 
     #[test]
     fn render_sets_truecolor_foreground() {
-        let style = Style { fg: Rgb { r: 255, g: 128, b: 0 }, bold: false };
+        let style = Style { fg: Rgb { r: 255, g: 128, b: 0 }, bold: false, reverse: false };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[38;2;255;128;0m"), "output was {out:?}");
     }
 
     #[test]
     fn render_sets_and_clears_bold() {
-        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bold: true };
+        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bold: true, reverse: false };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[1m"), "output was {out:?}");
         assert!(out.ends_with("\x1b[0m"), "output was {out:?}");
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn render_does_not_repeat_an_unchanged_style() {
-        let style = Style { fg: Rgb { r: 10, g: 20, b: 30 }, bold: false };
+        let style = Style { fg: Rgb { r: 10, g: 20, b: 30 }, bold: false, reverse: false };
         let out = render_to_string(&painted("hello", style));
         assert_eq!(
             out.matches("\x1b[38;2;10;20;30m").count(),
