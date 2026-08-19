@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wwt_cdp::{Chromium, Client};
-use wwt_frame::{CellSize, GridSize, Viewport};
-use wwt_page::{KeyInput, Page};
+use wwt_frame::{CellSize, CssPoint, GridSize, Viewport};
+use wwt_page::{KeyInput, MouseInput, Page};
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -105,4 +105,60 @@ async fn blurring_takes_the_focus_off_the_field() {
 
     let active = eventually(&page, "document.activeElement.tagName", "BODY").await;
     assert_eq!(active, "BODY", "focus should have gone back to the document");
+}
+
+/// Where an element is, right now, in CSS pixels.
+async fn center_of(page: &Page, selector: &str) -> CssPoint {
+    let value = page
+        .eval(&format!(
+            "(() => {{ const r = document.querySelector('{selector}').getBoundingClientRect(); \
+              return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }}; }})()"
+        ))
+        .await
+        .expect("read a rect");
+    CssPoint {
+        x: value["x"].as_f64().expect("an x"),
+        y: value["y"].as_f64().expect("a y"),
+    }
+}
+
+#[tokio::test]
+async fn clicking_a_link_follows_it() {
+    let h = harness().await;
+    let page = open(&h, "form.html").await;
+    let at = center_of(&page, "#link").await;
+
+    page.dispatch_mouse(&MouseInput::press(at)).await.expect("press");
+    page.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
+
+    assert_eq!(
+        eventually(&page, "document.title", "Fixture Page").await,
+        "Fixture Page"
+    );
+}
+
+#[tokio::test]
+async fn a_wheel_scrolls_what_is_under_the_pointer() {
+    let h = harness().await;
+    let page = open(&h, "form.html").await;
+    let at = center_of(&page, "#scroller").await;
+
+    page.dispatch_mouse(&MouseInput::wheel(at, 200.0)).await.expect("wheel");
+
+    assert_eq!(
+        eventually(
+            &page,
+            "String(document.querySelector('#scroller').scrollTop > 0)",
+            "true"
+        )
+        .await,
+        "true",
+        "the scroller under the pointer should have moved"
+    );
+    let document_scroll = page.eval("window.scrollY").await.expect("scrollY");
+    assert_eq!(
+        document_scroll.as_f64(),
+        Some(0.0),
+        "the document must not scroll when a nested scroller was under the pointer"
+    );
 }

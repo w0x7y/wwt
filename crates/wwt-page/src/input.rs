@@ -4,6 +4,8 @@
 //! the fields. Where they come from is a keyboard-layout question, and the
 //! binary owns it.
 
+use wwt_frame::CssPoint;
+
 /// Alt. The modifier bits are a CDP bitmask, not crossterm's.
 pub const ALT: u32 = 1;
 pub const CTRL: u32 = 2;
@@ -25,4 +27,34 @@ pub struct KeyInput {
     /// What the key inserts. Empty for a key that inserts nothing.
     pub text: String,
     pub modifiers: u32,
+}
+
+/// What a mouse event does at a point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    /// A wheel turn in CSS pixels, positive being downward.
+    Wheel(f64),
+}
+
+/// One mouse event, at a point in the page's own coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouseInput {
+    pub at: CssPoint,
+    pub action: MouseAction,
+}
+
+impl MouseInput {
+    pub fn press(at: CssPoint) -> Self {
+        Self { at, action: MouseAction::Press }
+    }
+
+    pub fn release(at: CssPoint) -> Self {
+        Self { at, action: MouseAction::Release }
+    }
+
+    pub fn wheel(at: CssPoint, dy: f64) -> Self {
+        Self { at, action: MouseAction::Wheel(dy) }
+    }
 }

@@ -8,10 +8,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use wwt_cdp::{Client, Event};
-use wwt_frame::{CssRect, Style, TextRun, Viewport};
+use wwt_frame::{CssPoint, CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
-use crate::input::KeyInput;
+use crate::input::{KeyInput, MouseAction, MouseInput};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -260,24 +260,13 @@ impl Page {
     /// Chromium performs the scroll: sticky headers stick, infinite scroll
     /// loads, and virtualized lists virtualize, all with no help from us.
     pub async fn scroll_by(&self, dy: f64, vp: Viewport) -> Result<()> {
-        self.client
-            .call_on(
-                &self.session_id,
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": "mouseWheel",
-                    "x": f64::from(vp.css_width()) / 2.0,
-                    "y": f64::from(vp.css_height()) / 2.0,
-                    "deltaX": 0.0,
-                    "deltaY": dy,
-                    "button": "none",
-                    "clickCount": 0,
-                    "modifiers": 0,
-                }),
-            )
-            .await
-            .context("dispatch a wheel event")?;
-        Ok(())
+        // Aimed at the middle of the viewport, because a keyboard scroll has
+        // no pointer to aim with.
+        let at = CssPoint {
+            x: f64::from(vp.css_width()) / 2.0,
+            y: f64::from(vp.css_height()) / 2.0,
+        };
+        self.dispatch_mouse(&MouseInput::wheel(at, dy)).await
     }
 
     pub async fn scroll_to_top(&self) -> Result<()> {
@@ -427,6 +416,48 @@ impl Page {
     pub async fn blur(&self) -> Result<()> {
         self.eval("document.activeElement && document.activeElement.blur()")
             .await?;
+        Ok(())
+    }
+    /// Send one mouse event to the page.
+    ///
+    /// The point is the page's, not the terminal's: the caller converts
+    /// through `Viewport`, which is the only place a cell becomes a pixel.
+    pub async fn dispatch_mouse(&self, mouse: &MouseInput) -> Result<()> {
+        let params = match mouse.action {
+            MouseAction::Press => json!({
+                "type": "mousePressed",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "button": "left",
+                "buttons": 1,
+                "clickCount": 1,
+                "modifiers": 0,
+            }),
+            MouseAction::Release => json!({
+                "type": "mouseReleased",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "button": "left",
+                "buttons": 0,
+                "clickCount": 1,
+                "modifiers": 0,
+            }),
+            MouseAction::Wheel(dy) => json!({
+                "type": "mouseWheel",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "deltaX": 0.0,
+                "deltaY": dy,
+                "button": "none",
+                "clickCount": 0,
+                "modifiers": 0,
+            }),
+        };
+
+        self.client
+            .call_on(&self.session_id, "Input.dispatchMouseEvent", params)
+            .await
+            .context("dispatch a mouse event")?;
         Ok(())
     }
 }
