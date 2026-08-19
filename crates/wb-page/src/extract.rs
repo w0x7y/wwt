@@ -11,7 +11,7 @@ use wb_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 
-const EXTRACT_JS: &str = include_str!("../assets/extract.js");
+const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_POLL: Duration = Duration::from_millis(50);
 
@@ -64,6 +64,11 @@ impl Page {
             .to_string();
 
         let page = Page { client, session_id };
+        page.client
+            .call_on(&page.session_id, "Page.enable", json!({}))
+            .await
+            .context("enable the Page domain")?;
+        page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
         page.navigate(url).await?;
         Ok(page)
@@ -71,6 +76,20 @@ impl Page {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Install the page-side script for every document this target loads,
+    /// including ones it navigates to later.
+    async fn install_bootstrap(&self) -> Result<()> {
+        self.client
+            .call_on(
+                &self.session_id,
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": BOOTSTRAP_JS }),
+            )
+            .await
+            .context("install the bootstrap script")?;
+        Ok(())
     }
 
     /// Tell Chromium the window is exactly the terminal grid. Spec section 3.
@@ -92,11 +111,6 @@ impl Page {
     }
 
     async fn navigate(&self, url: &str) -> Result<()> {
-        self.client
-            .call_on(&self.session_id, "Page.enable", json!({}))
-            .await
-            .context("enable the Page domain")?;
-
         let result = self
             .client
             .call_on(&self.session_id, "Page.navigate", json!({ "url": url }))
@@ -156,7 +170,7 @@ impl Page {
                 &self.session_id,
                 "Runtime.evaluate",
                 json!({
-                    "expression": EXTRACT_JS,
+                    "expression": "window.__webinal.extract()",
                     "returnByValue": true,
                     "awaitPromise": false,
                 }),
