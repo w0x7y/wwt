@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use wb_cdp::{Chromium, Client};
 use wb_frame::{CellSize, GridSize, Viewport};
 use wb_page::Page;
@@ -13,12 +15,11 @@ fn viewport() -> Viewport {
     Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 })
 }
 
-/// Owns the browser and the connection. A `Page` borrows the `Client`, so the
-/// two cannot be returned from one helper together — the harness holds them
-/// and each test opens its own page against `harness.client`.
+/// Owns the browser and the connection, so every test in this file shares one
+/// Chromium rather than launching its own.
 struct Harness {
     _browser: Chromium,
-    client: Client,
+    client: Arc<Client>,
 }
 
 async fn harness() -> Harness {
@@ -26,12 +27,12 @@ async fn harness() -> Harness {
     let client = Client::connect(browser.ws_url()).await.expect("connect");
     Harness {
         _browser: browser,
-        client,
+        client: Arc::new(client),
     }
 }
 
-async fn open<'a>(h: &'a Harness, fixture: &str) -> Page<'a> {
-    Page::open(&h.client, &fixture_url(fixture), viewport())
+async fn open(h: &Harness, fixture: &str) -> Page {
+    Page::open(Arc::clone(&h.client), &fixture_url(fixture), viewport())
         .await
         .expect("open the fixture")
 }

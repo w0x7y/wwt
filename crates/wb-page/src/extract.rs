@@ -1,5 +1,7 @@
 //! One page: navigate, size it to the terminal, pull its text runs out.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::json;
@@ -32,14 +34,14 @@ struct RawRun {
     z: i32,
 }
 
-pub struct Page<'a> {
-    client: &'a Client,
+pub struct Page {
+    client: Arc<Client>,
     session_id: String,
 }
 
-impl<'a> Page<'a> {
+impl Page {
     /// Create a target, size it to the viewport, navigate, and wait for load.
-    pub async fn open(client: &'a Client, url: &str, vp: Viewport) -> Result<Page<'a>> {
+    pub async fn open(client: Arc<Client>, url: &str, vp: Viewport) -> Result<Page> {
         let target = client
             .call("Target.createTarget", json!({ "url": "about:blank" }))
             .await
@@ -65,6 +67,10 @@ impl<'a> Page<'a> {
         page.set_viewport(vp).await?;
         page.navigate(url).await?;
         Ok(page)
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Tell Chromium the window is exactly the terminal grid. Spec section 3.

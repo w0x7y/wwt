@@ -1,5 +1,7 @@
 //! Wiring: browser, page, frame.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use wb_cdp::{Chromium, Client};
 use wb_frame::{Frame, Viewport};
@@ -14,7 +16,7 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
     let client = Client::connect(browser.ws_url())
         .await
         .context("connect to chromium")?;
-    let page = Page::open(&client, url, vp).await?;
+    let page = Page::open(Arc::new(client), url, vp).await?;
 
     let runs = page.extract().await?;
     let mut frame = Frame::new(vp.grid());
