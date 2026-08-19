@@ -11,6 +11,7 @@ use wwt_cdp::{Client, Event};
 use wwt_frame::{CssRect, Style, TextRun, Viewport};
 
 use crate::color::parse_css_color;
+use crate::input::KeyInput;
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -354,5 +355,78 @@ impl Page {
             scroll_height: raw.scroll_height,
             viewport_height: raw.inner_height,
         })
+    }
+    /// Evaluate an expression in the page and return its value.
+    ///
+    /// This is the escape hatch the tests use to see what a keystroke did.
+    /// It is deliberately not how anything in the browser reads the page:
+    /// that is `extract`, once, in one round trip.
+    pub async fn eval(&self, expression: &str) -> Result<serde_json::Value> {
+        let result = self
+            .client
+            .call_on(
+                &self.session_id,
+                "Runtime.evaluate",
+                json!({ "expression": expression, "returnByValue": true }),
+            )
+            .await
+            .with_context(|| format!("evaluate {expression}"))?;
+
+        if let Some(details) = result.get("exceptionDetails") {
+            bail!("{expression} threw: {details}");
+        }
+        Ok(result["result"]["value"].clone())
+    }
+
+    /// Send one key to the page.
+    ///
+    /// A key that inserts text dispatches `keyDown`, which Chromium turns
+    /// into a character insertion. A key that inserts nothing dispatches
+    /// `rawKeyDown`, which stays a bare key event. Sending the wrong one
+    /// either loses your typing or types your shortcuts.
+    pub async fn dispatch_key(&self, key: &KeyInput) -> Result<()> {
+        let mut down = json!({
+            "type": if key.text.is_empty() { "rawKeyDown" } else { "keyDown" },
+            "key": key.key,
+            "code": key.code,
+            "windowsVirtualKeyCode": key.windows_virtual_key_code,
+            "nativeVirtualKeyCode": key.windows_virtual_key_code,
+            "modifiers": key.modifiers,
+        });
+        if !key.text.is_empty() {
+            down["text"] = json!(key.text);
+            down["unmodifiedText"] = json!(key.text);
+        }
+
+        self.client
+            .call_on(&self.session_id, "Input.dispatchKeyEvent", down)
+            .await
+            .context("dispatch a key down")?;
+        self.client
+            .call_on(
+                &self.session_id,
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "keyUp",
+                    "key": key.key,
+                    "code": key.code,
+                    "windowsVirtualKeyCode": key.windows_virtual_key_code,
+                    "nativeVirtualKeyCode": key.windows_virtual_key_code,
+                    "modifiers": key.modifiers,
+                }),
+            )
+            .await
+            .context("dispatch a key up")?;
+        Ok(())
+    }
+
+    /// Take focus off whatever has it.
+    ///
+    /// Leaving insert mode has to be local: if this fails, the mode changes
+    /// anyway. Taking the keyboard back must not depend on the page.
+    pub async fn blur(&self) -> Result<()> {
+        self.eval("document.activeElement && document.activeElement.blur()")
+            .await?;
+        Ok(())
     }
 }
