@@ -518,15 +518,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dropped_subscriber_is_forgotten() {
+    async fn a_dead_subscriber_does_not_stop_delivery_to_a_live_one() {
+        // The pruning itself is memory hygiene and not observable from here —
+        // what must hold is that dropping one subscriber never costs another
+        // its events. Do not assert the subscriber list is empty after the
+        // loop: it clears on exit regardless, so that assertion passes with
+        // the pruning removed entirely.
         let (pending, subs) = parts();
-        let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let (dead_tx, dead_rx) = mpsc::unbounded_channel::<Event>();
+        let (live_tx, mut live_rx) = mpsc::unbounded_channel::<Event>();
+        subs.lock().unwrap().push(dead_tx);
+        subs.lock().unwrap().push(live_tx);
+        drop(dead_rx);
+
+        let messages = vec![
+            Ok::<_, WsError>(Message::text(r#"{"method":"Page.loadEventFired","params":{}}"#.to_string())),
+            Ok(Message::text(r#"{"method":"Page.frameNavigated","params":{}}"#.to_string())),
+        ];
+        read_loop(stream::iter(messages), pending, subs).await;
+
+        assert_eq!(live_rx.recv().await.expect("first").method, "Page.loadEventFired");
+        assert_eq!(live_rx.recv().await.expect("second").method, "Page.frameNavigated");
+    }
+
+    #[tokio::test]
+    async fn a_closed_socket_closes_every_subscriber() {
+        // Otherwise a subscriber waits on a connection that will never speak
+        // again, instead of learning that the browser is gone.
+        let (pending, subs) = parts();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
         subs.lock().unwrap().push(tx);
-        drop(rx);
 
-        read_loop(one(r#"{"method":"Page.loadEventFired","params":{}}"#), pending, Arc::clone(&subs)).await;
+        read_loop(one(r#"{"method":"Page.loadEventFired","params":{}}"#), pending, subs).await;
 
-        assert!(subs.lock().unwrap().is_empty(), "the dead sender should be pruned");
+        assert!(rx.recv().await.is_some(), "the event itself");
+        assert!(rx.recv().await.is_none(), "the channel should close with the socket");
     }
 }
 ```
@@ -688,7 +714,7 @@ pub use client::{Client, Event};
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 61 tests pass (57 + 4 new). Clippy clean.
+Expected: 62 tests pass (57 + 5 new). Clippy clean.
 
 - [ ] **Step 8: Commit**
 
@@ -784,7 +810,7 @@ In `crates/webinal/src/lib.rs`, add `use std::sync::Arc;` and replace lines 15-1
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 61 tests pass, unchanged. Clippy clean.
+Expected: 62 tests pass, unchanged. Clippy clean.
 
 - [ ] **Step 5: Commit**
 
@@ -977,7 +1003,7 @@ In `extract`, replace the `"expression"` value:
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 61 tests pass, unchanged — the existing extraction tests are the proof that the move preserved behavior. Clippy clean.
+Expected: 62 tests pass, unchanged — the existing extraction tests are the proof that the move preserved behavior. Clippy clean.
 
 - [ ] **Step 4: Commit**
 
@@ -1295,7 +1321,7 @@ pub use extract::{DIRTY_BINDING, Extraction, Page};
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 65 tests pass (61 + 4 new). Clippy clean.
+Expected: 66 tests pass (62 + 4 new). Clippy clean.
 
 - [ ] **Step 9: Commit**
 
@@ -1374,7 +1400,7 @@ Delete the `LOAD_POLL` constant. Replace `navigate` and `wait_for_load`:
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 65 tests pass, unchanged — every existing browser test navigates, so they are the proof. Clippy clean.
+Expected: 66 tests pass, unchanged — every existing browser test navigates, so they are the proof. Clippy clean.
 
 - [ ] **Step 3: Commit**
 
@@ -1545,7 +1571,7 @@ Add to `impl Page` in `crates/wb-page/src/extract.rs`:
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 67 tests pass (65 + 2 new). Clippy clean.
+Expected: 68 tests pass (66 + 2 new). Clippy clean.
 
 - [ ] **Step 5: Commit**
 
@@ -1679,7 +1705,7 @@ Add to `impl Page` in `crates/wb-page/src/extract.rs`:
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 69 tests pass (67 + 2 new). Clippy clean.
+Expected: 70 tests pass (68 + 2 new). Clippy clean.
 
 - [ ] **Step 5: Commit**
 
@@ -1941,7 +1967,7 @@ Replace `<before>` and `<after>` with the measured durations.
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 71 tests pass (69 + 2 new). Clippy clean.
+Expected: 72 tests pass (70 + 2 new). Clippy clean.
 
 ---
 
@@ -2115,7 +2141,7 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 81 tests pass (71 + 10 new). Clippy clean.
+Expected: 82 tests pass (72 + 10 new). Clippy clean.
 
 - [ ] **Step 5: Commit**
 
@@ -2493,7 +2519,7 @@ pub fn action_for(key: KeyEvent, vp: Viewport) -> Option<Action> {
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 99 tests pass (81 + 8 chrome + 10 keymap). Clippy clean.
+Expected: 100 tests pass (82 + 8 chrome + 10 keymap). Clippy clean.
 
 - [ ] **Step 8: Commit**
 
@@ -2949,7 +2975,7 @@ Add these imports to the test module so it compiles: `use wb_frame::{CellSize, G
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 101 tests pass (99 + 2 new). Clippy clean.
+Expected: 102 tests pass (100 + 2 new). Clippy clean.
 
 If clippy objects to `Job::Extracted(Box<Extraction>)` or to the `select!` guard, fix the code rather than silencing the lint.
 
@@ -3142,7 +3168,7 @@ Commands: `:open <url>`, `:back`, `:forward`, `:reload`, `:quit`.
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Expected: 102 tests pass (101 + 1 new). Clippy clean.
+Expected: 103 tests pass (102 + 1 new). Clippy clean.
 
 - [ ] **Step 7: Drive it by hand**
 
@@ -3176,7 +3202,7 @@ git commit -m "feat(webinal): drive the browser from the core loop"
 
 ## Definition of done for M2
 
-- `cargo test --workspace` is green, with 102 tests: 22 `wb-frame`, 18 `wb-term`, 7 `wb-cdp`, 22 `wb-page`, 33 `webinal`.
+- `cargo test --workspace` is green, with 103 tests: 22 `wb-frame`, 18 `wb-term`, 8 `wb-cdp`, 22 `wb-page`, 33 `webinal`.
 - `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - The heavy-page extraction measurement from Task 10 is recorded in that task's commit message, and the after number is better than the before number.
 - `crates/wb-page/tests/snapshots/simple.txt` passes unmodified through the Task 10 rewrite.
