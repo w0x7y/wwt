@@ -224,3 +224,32 @@ async fn scroll_to_end_reaches_the_bottom() {
     let top = page.extract().await.expect("extract");
     assert_eq!(top.scroll_y, 0.0);
 }
+
+#[tokio::test]
+async fn history_moves_back_and_forward() {
+    let h = harness().await;
+    let page = open(&h, "simple.html").await;
+    page.navigate(&fixture_url("tall.html")).await.expect("navigate");
+
+    assert!(page.back().await.expect("back"), "there should be an entry to go back to");
+    assert!(
+        page.extract().await.expect("extract").url.ends_with("simple.html"),
+        "back should land on the first fixture"
+    );
+
+    assert!(page.forward().await.expect("forward"), "there should be an entry to go forward to");
+    assert!(
+        page.extract().await.expect("extract").url.ends_with("tall.html"),
+        "forward should land on the second fixture"
+    );
+
+    assert!(!page.forward().await.expect("forward"), "there is nothing further forward");
+}
+
+#[tokio::test]
+async fn reload_keeps_the_same_url() {
+    let h = harness().await;
+    let page = open(&h, "simple.html").await;
+    page.reload().await.expect("reload");
+    assert!(page.extract().await.expect("extract").url.ends_with("simple.html"));
+}

@@ -197,6 +197,62 @@ impl Page {
         }
     }
 
+    /// Move `delta` entries through the browser's own history.
+    ///
+    /// Returns `false` when there is no such entry — the end of the history
+    /// is a fact about the world, not an error.
+    async fn go(&self, delta: i64) -> Result<bool> {
+        let history = self
+            .client
+            .call_on(&self.session_id, "Page.getNavigationHistory", json!({}))
+            .await
+            .context("read the navigation history")?;
+
+        let index = history["currentIndex"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("the navigation history has no currentIndex"))?;
+        let entries = history["entries"]
+            .as_array()
+            .ok_or_else(|| anyhow!("the navigation history has no entries"))?;
+
+        let target = index + delta;
+        if target < 0 || target >= entries.len() as i64 {
+            return Ok(false);
+        }
+        let entry_id = entries[target as usize]["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("a history entry has no id"))?;
+
+        let mut events = self.client.subscribe();
+        self.client
+            .call_on(
+                &self.session_id,
+                "Page.navigateToHistoryEntry",
+                json!({ "entryId": entry_id }),
+            )
+            .await
+            .context("navigate to a history entry")?;
+        self.wait_for_load(&mut events).await?;
+        Ok(true)
+    }
+
+    pub async fn back(&self) -> Result<bool> {
+        self.go(-1).await
+    }
+
+    pub async fn forward(&self) -> Result<bool> {
+        self.go(1).await
+    }
+
+    pub async fn reload(&self) -> Result<()> {
+        let mut events = self.client.subscribe();
+        self.client
+            .call_on(&self.session_id, "Page.reload", json!({}))
+            .await
+            .context("reload the page")?;
+        self.wait_for_load(&mut events).await
+    }
+
     /// Scroll by a distance in CSS pixels, positive being downward.
     ///
     /// This dispatches a real wheel event rather than calling `scrollBy`, so
