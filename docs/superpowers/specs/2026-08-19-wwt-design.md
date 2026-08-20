@@ -210,6 +210,14 @@ events arrive as messages on one `select!`. There are no locks around the frame,
 a hung page cannot freeze the UI — the statusline marks that tab stalled while other
 tabs stay usable.
 
+**Amended in M3.** "The core" is two things with a seam between them, because one
+module holding both left every rule in the browser untestable. `Session` owns the
+state and decides: `on(Event) -> Vec<Effect>`, `compose() -> Frame`, reaching no page,
+no socket and no terminal. `Core` is the adapter around it — tokio in, spawns out —
+and decides nothing. Events are what arrives on the `select!`; effects are what the
+loop does. The properties above are unchanged; what changed is that they can now be
+asserted without a browser.
+
 **Rendering is diffed.** `wwt-page` produces a new `Frame`; the renderer diffs it
 against the last presented frame and emits escape sequences only for changed cells.
 A page where one counter ticks costs a handful of bytes per update.
@@ -317,9 +325,18 @@ degrades to stale-but-labeled, never to empty.
   real headless Chromium, with the resulting cell grid asserted against a checked-in
   text snapshot. These snapshots are ASCII art of the rendered page; they diff well in
   review and are the tests that catch pages rendering wrong.
-- **Input: fake transport.** `wwt-cdp` sits behind a trait; a recording fake asserts
-  that a hint label produces the right `dispatchMouseEvent` coordinates and that the
-  keymap emits a coherent quad across a table of keys.
+- **Input: the effect vocabulary, not a fake transport.** The original plan put
+  `wwt-cdp` behind a trait and recorded calls against a fake. M3 put the seam a layer
+  higher instead: `Session::on` returns `Vec<Effect>`, so "this key produced this
+  click at these coordinates" is a plain equality assertion and there is no second
+  implementation of a browser to keep honest. There is only ever Chromium; abstracting
+  it would buy a fake and cost a lie.
+- **The injected script: its arithmetic, directly.** `window.__wwt.__pure` exposes the
+  line splitting, the offset search and the caret attribution, which take data and
+  return data. These are the functions whose mistakes a rendered frame hides — a caret
+  two characters along still looks like a caret — so they are asserted on as data.
+- **One browser per test binary.** Handed out a test at a time, because
+  `Input.dispatchMouseEvent` is answered by the target the browser has in front.
 - **End-to-end: a handful, over a PTY.** Spawn the real binary against fixtures, send
   keystrokes, assert screen contents. Only for modal flows — enough to catch wiring
   breakage, not a second test suite.

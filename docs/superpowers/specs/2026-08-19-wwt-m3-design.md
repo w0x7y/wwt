@@ -33,9 +33,14 @@ context menu.
 
 ## 2. Architecture
 
-The loop is unchanged. `Core` still owns all state, still mutates it alone, and still
-spawns page operations rather than awaiting them inline. M3 adds two things to that
-shape: a wider `Mode` enum, and an ordered input pump.
+The loop is unchanged. All state is still owned in one place, still mutated from one
+place, and page operations are still spawned rather than awaited inline. M3 adds two
+things to that shape: a wider `Mode` enum, and an ordered input pump.
+
+**Amended late in M3.** That one place is now `Session` rather than `Core`, with
+`Core` reduced to the adapter around it. See the parent design §5: the properties this
+document relies on are unchanged, but "`Core` does X" below should be read as
+"`Session` decides X and `Core` performs it".
 
 ### The input pump
 
@@ -108,7 +113,8 @@ pub enum Mode {
 }
 ```
 
-`Core` routes each key by mode and nothing else:
+A key is routed by mode and nothing else. `keymap::action_for(mode, key, vp)` answers
+for every row of this table, so it is one function rather than one branch per mode:
 
 | Mode | Keys |
 |---|---|

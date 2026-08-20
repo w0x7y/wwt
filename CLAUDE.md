@@ -14,7 +14,7 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 158 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 222 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -27,7 +27,13 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
 
 Unit tests in `src/` must run without Chromium; anything needing a browser goes in
-`tests/`. Each `tests/` test launches its own Chromium instance.
+`tests/`. Each test *binary* launches one Chromium and hands it out a test at a time
+(`wwt-page/tests/common`), because `Input.dispatchMouseEvent` is answered by whichever
+target the browser has in front. `wwt-cdp/tests/browser.rs` launches its own, since
+launching is what it tests.
+
+`CONTEXT.md` is the glossary: what a run, an extraction, a dirty signal, an effect and
+a mirror are, and which type each one names.
 
 ## The coordinate model
 
@@ -51,17 +57,31 @@ one-to-one onto cells. Everything follows:
 ## Data flow
 
 ```
-terminal keys ──┐
-CDP events ─────┼──> Core::run select! ──> spawned page ops ──CDP──> Chromium
-job results ────┘         │                       │
-resize timer ───┘         └──> compose Frame ──> Renderer (diff) ──> stdout
+terminal keys ──┐                        ┌──> Effect ──> spawned page op ──CDP──> Chromium
+CDP events ─────┼──> Core::run select! ──┤                                            │
+job results ────┘      (decides nothing) └──> compose Frame ──> Renderer ──> stdout   │
+resize timer ───┘              ▲                                                      │
+                               └──────────── Job ─────────────────────────────────────┘
 ```
 
-`Core` (`crates/wwt/src/core.rs`) owns all state and is the only thing that
-mutates it. Consequences to preserve when adding features:
+There is a seam across the middle. `Session` (`crates/wwt/src/session.rs`) owns all
+state, is the only thing that mutates it, and reaches nothing: `on(Event) ->
+Vec<Effect>` and `compose() -> Frame`, both pure enough to test with no browser and no
+tty. `Core` (`crates/wwt/src/core.rs`) is the adapter that turns tokio into events and
+effects into spawns, and decides nothing at all.
+
+**Put new rules in `Session` and new machinery in `Core`.** A decision that needs a
+browser to exercise is a decision nobody will test.
+
+Consequences to preserve when adding features:
 
 - **Nothing blocks the loop.** Page operations spawn and report back as a `Job` on one
-  channel. A thirty-second load still leaves keys responsive.
+  channel. A thirty-second load still leaves keys responsive. `Core::spawn` is the
+  only place anything is spawned; each effect says what its failure means by choosing
+  the `Job` it reports, or reporting none.
+- **Nothing in a `select!` arm touches `self`.** An arm produces an `Event` and
+  nothing else. Borrowing `self` in one while the other futures are alive is what used
+  to force a whole spawned task to merge two channels into one.
 - **Re-extraction is event-driven, never polled.** `bootstrap.js` calls the
   `__wwt_dirty` binding from a debounced `MutationObserver`, scroll listener,
   `load`, and the four field-state events (`input`, `selectionchange`, `focusin`,
@@ -82,10 +102,10 @@ mutates it. Consequences to preserve when adding features:
 |---|---|---|
 | `wwt-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
 | `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
-| `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | |
+| `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | `eval` is behind `test-support`. |
 | `wwt-term` | `TIOCGWINSZ` probe, diffing renderer | |
 | `wwt-ui` | Modes, chrome, `:` commands, hint labels | Depends on `wwt-frame` only. No pages, no CDP, no terminal. |
-| `wwt` | Binary: core loop, keymap, key table, input pump | |
+| `wwt` | Binary: the `Session` state machine, the core loop, keymap, key table, input pump | |
 
 `Frame` is the single output type every rendering mode produces, so text mode, and
 later pixel and reader modes, cannot diverge in how they reach the screen.
@@ -98,6 +118,17 @@ returns runs *plus* title, URL, and scroll geometry in one `Runtime.evaluate` ro
 trip — the statusline costs no extra call. Line splitting uses `getClientRects` plus a
 binary search over character offsets (`O(lines · log chars)` forced layouts); this is
 scroll latency, so keep it cheap.
+
+Both of the script's searches are `firstWhere(lo, hi, past)`, with the DOM half passed
+in: `splitLines(rects, text, topOf)` and `offsetPast` are the callers that supply one.
+`window.__wwt.__pure` exposes that arithmetic — `firstWhere`, `splitLines`, `caretIn` —
+and `tests/geometry.rs` asserts on it with data. **Anything sharp enough to be worth
+getting right belongs on that side of the line**, where its test costs no page.
+
+`Page::eval` is `#[cfg(feature = "test-support")]`, turned on by a dev-dependency on
+the crate itself. Tests use it to *arrange* a fixture and to reach `__pure`; what they
+assert on is what `Extraction` returns, so a change that leaves the DOM right and the
+extraction wrong still fails.
 
 ## Input
 
@@ -114,7 +145,9 @@ Three rules carry M3:
   arrive as `acb`. Everything else about the loop is unchanged: nothing
   blocks it.
 
-`keys.rs` maps a crossterm event to the quad `Input.dispatchKeyEvent` needs.
+`keymap.rs` answers `(mode, key) -> Action` for *every* mode, so what a key does is
+one table rather than four files. `Session` interprets actions; it never re-reads a
+key. `keys.rs` maps a crossterm event to the quad `Input.dispatchKeyEvent` needs.
 It lives in the binary because its output type belongs to `wwt-page` and its
 input type to crossterm, so either other home would point a dependency edge
 backwards. Ctrl and Meta suppress the inserted text, or a page's `Ctrl-S`
