@@ -8,7 +8,13 @@ wwt-cdp = { path = "../wwt-cdp" }
 wwt-frame = { path = "../wwt-frame" }
 wwt-page = { path = "../wwt-page" }
 wwt-term = { path = "../wwt-term" }
+wwt-ui = { path = "../wwt-ui" }
 anyhow.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# The `eval` hatch, so the tests here can arrange a fixture. The binary
+# itself never sees it.
+wwt-page = { path = "../wwt-page", features = ["test-support"] }

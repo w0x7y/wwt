@@ -2,13 +2,15 @@ use std::io::{Write, stdout};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{cursor, execute};
 use wwt_cdp::{Chromium, Client};
 use wwt_page::Page;
-use wwt::command::normalize_url;
+use wwt_ui::command::normalize_url;
+
 use wwt::core::Core;
 
 #[tokio::main]
@@ -28,18 +30,28 @@ async fn main() -> Result<()> {
             .await
             .context("connect to chromium")?,
     );
-    let vp = wwt::core::page_viewport(grid, cell);
+    let vp = wwt::session::page_viewport(grid, cell);
     let page = Arc::new(Page::open(Arc::clone(&client), &url, vp).await?);
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
+    // Its own call, because a terminal that refuses mouse capture is still a
+    // terminal you can read with. Bundling it with the alternate screen
+    // would make one refusal cost the whole session.
+    let mouse = execute!(stdout(), EnableMouseCapture).is_ok();
 
     let mut core = Core::new(page, client, grid, cell);
+    if !mouse {
+        core.notice("mouse unavailable");
+    }
     let mut out = stdout();
     let result = core.run(&mut out).await;
     let _ = out.flush();
 
-    execute!(stdout(), cursor::Show, LeaveAlternateScreen)?;
+    // The renderer sets the cursor to a bar while a field is focused, so
+    // hand the terminal back the shape it had.
+    write!(stdout(), "\x1b[0 q")?;
+    execute!(stdout(), cursor::Show, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result
 }

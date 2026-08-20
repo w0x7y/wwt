@@ -3,6 +3,12 @@ name = "wwt-page"
 edition.workspace = true
 version.workspace = true
 
+[features]
+# The `eval` hatch, for tests only. A `dev-dependency` on this crate itself
+# is how its own integration tests turn it on: they are compiled against the
+# crate the same way any other caller is, and a caller does not get this.
+test-support = []
+
 [dependencies]
 wwt-cdp = { path = "../wwt-cdp" }
 wwt-frame = { path = "../wwt-frame" }
@@ -10,3 +16,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+wwt-page = { path = ".", features = ["test-support"] }

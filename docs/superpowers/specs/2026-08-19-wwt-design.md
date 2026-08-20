@@ -159,17 +159,35 @@ survives navigation. Responsibilities:
 
 1. Walk text nodes, collecting `Range.getClientRects()` and computed style
    (color, weight, size, stacking depth) per run
-2. Collect interactive elements (`a`, `button`, `input`, `select`, `textarea`,
-   `[role=button]`, `[tabindex]`, `[onclick]`) with their client rects
-3. Collect replaced-content boxes (`img`, `canvas`, `video`, `svg`) as block
+2. Read the text of form controls, which point 1 cannot reach. A control's value
+   is not in the DOM: `input.childNodes` is empty however much you type into it,
+   because the browser paints the value from element state rather than from a
+   text node. Without this pass you cannot see what you are typing. The pass
+   also covers placeholders, a `select`'s chosen option, and passwords, which
+   are reported as bullets: the frame shows what the browser shows.
+3. Collect interactive elements (`a`, `button`, `input`, `select`, `textarea`,
+   `[role=button]`, `[tabindex]`, `[onclick]`) with their client rects, on demand
+   rather than per extraction (section 6)
+4. Collect replaced-content boxes (`img`, `canvas`, `video`, `svg`) as block
    placeholders
-4. Signal dirtiness through `Runtime.addBinding` from a debounced `MutationObserver`
-   plus scroll and resize listeners
-5. Report focus changes via a `focusin` listener, so mode tracking follows the page
+5. Signal dirtiness through `Runtime.addBinding` from a debounced `MutationObserver`
+   plus scroll and resize listeners, and from `input`, `selectionchange`, `focusin`
+   and `focusout`, which are what point 2 changing looks like
 
-Point 4 is what makes the system event-driven rather than polling: we re-extract only
+Point 5 is what makes the system event-driven rather than polling: we re-extract only
 when the page changes, so an idle page costs no CPU. This is the difference between a
 browser you leave open and one you close.
+
+The second half of point 5 exists because a form control's value and selection are
+element state rather than DOM: nothing mutates when you type into an `input` or walk
+the insertion point through it, so the observer sees none of it and the pass in point
+2 reads state nothing signals. Without those four listeners what you typed, and where
+the caret sits, stay on screen as they were until something unrelated changes the page.
+
+The `focusin` listener signals dirtiness and nothing else. An earlier draft had one
+that mode followed, so that the page could put us in insert mode; section 6 says why
+*that* is gone. Repainting a page that already looks different is not the same thing
+as letting it take the keyboard.
 
 Extraction returns one flat, sorted array per pass through a single `Runtime.evaluate`
 round trip, never thousands of individual `DOM.getBoxModel` calls. On a heavy page
@@ -191,6 +209,14 @@ The core owns all state and is the only thing that mutates it. Input events and 
 events arrive as messages on one `select!`. There are no locks around the frame, and
 a hung page cannot freeze the UI — the statusline marks that tab stalled while other
 tabs stay usable.
+
+**Amended in M3.** "The core" is two things with a seam between them, because one
+module holding both left every rule in the browser untestable. `Session` owns the
+state and decides: `on(Event) -> Vec<Effect>`, `compose() -> Frame`, reaching no page,
+no socket and no terminal. `Core` is the adapter around it — tokio in, spawns out —
+and decides nothing. Events are what arrives on the `select!`; effects are what the
+loop does. The properties above are unchanged; what changed is that they can now be
+asserted without a browser.
 
 **Rendering is diffed.** `wwt-page` produces a new `Frame`; the renderer diffs it
 against the last presented frame and emits escape sequences only for changed cells.
@@ -215,11 +241,16 @@ special handling.
 - **Normal** — keys are browser commands: `j`/`k` scroll, `f` hints, `o` open,
   `:` command palette, `gt`/`gT` tab switching, `p` toggles pixel mode, `r` toggles
   reader mode.
-- **Insert** — every keystroke forwards to the page. Entered by hinting or clicking a
-  text field, exited with `Esc`.
+- **Insert** — every keystroke forwards to the page. Entered with `i` or by hinting a
+  text field, exited with `Esc`, which is never forwarded. `Ctrl-]` sends the page a
+  literal Escape, since a terminal cannot distinguish `Ctrl-[` from `Esc`.
 - **Hint** — `f` overlays labels on every interactive box; typing a label clicks it.
-  Because boxes are already in cell coordinates from the same extraction, this is
-  nearly free: assign labels, paint over the frame, filter on keypress.
+  The boxes come from their own query, run when `f` is pressed and cached until the
+  page next says it changed. Extraction knows only about text nodes, and adding an
+  element sweep with a hit test per candidate to a path that runs on every scroll
+  frame would buy nothing: hints are pressed occasionally, and a query made at the
+  moment you press `f` describes the page as it is now. Filtering is then local:
+  assign labels, paint over the frame, filter on keypress.
 - **Command** — a `:` line for `:open`, `:tabclose`, `:set zoom`, and similar.
 
 ### Reader mode
@@ -235,9 +266,12 @@ so hints within it address reflowed positions, and switching back to text mode r
 the page's true layout at the scroll position we entered from. It is a distinct view,
 not a third mode of the same view, and the statusline says so.
 
-Mode tracks the page's reality, not only keystrokes: the injected script's `focusin`
-listener means a site that autofocuses its search box on load puts us in insert mode
-automatically, and clicking away drops out of it.
+Mode changes only in response to a keystroke. A page that autofocuses its search box
+does not take the keyboard, and a mouse click does not either: `i` hands it over and
+`Esc` takes it back. Tracking the page's own focus was considered and rejected. It
+reads as convenient until a page uses it to swallow `j`, and a browser whose keyboard
+belongs to whatever site you happened to open is not one you can trust with a
+single-key quit.
 
 ## 7. Sessions and tabs
 
@@ -291,9 +325,18 @@ degrades to stale-but-labeled, never to empty.
   real headless Chromium, with the resulting cell grid asserted against a checked-in
   text snapshot. These snapshots are ASCII art of the rendered page; they diff well in
   review and are the tests that catch pages rendering wrong.
-- **Input: fake transport.** `wwt-cdp` sits behind a trait; a recording fake asserts
-  that a hint label produces the right `dispatchMouseEvent` coordinates and that the
-  keymap emits a coherent quad across a table of keys.
+- **Input: the effect vocabulary, not a fake transport.** The original plan put
+  `wwt-cdp` behind a trait and recorded calls against a fake. M3 put the seam a layer
+  higher instead: `Session::on` returns `Vec<Effect>`, so "this key produced this
+  click at these coordinates" is a plain equality assertion and there is no second
+  implementation of a browser to keep honest. There is only ever Chromium; abstracting
+  it would buy a fake and cost a lie.
+- **The injected script: its arithmetic, directly.** `window.__wwt.__pure` exposes the
+  line splitting, the offset search and the caret attribution, which take data and
+  return data. These are the functions whose mistakes a rendered frame hides — a caret
+  two characters along still looks like a caret — so they are asserted on as data.
+- **One browser per test binary.** Handed out a test at a time, because
+  `Input.dispatchMouseEvent` is answered by the target the browser has in front.
 - **End-to-end: a handful, over a PTY.** Spawn the real binary against fixtures, send
   keystrokes, assert screen contents. Only for modal flows — enough to catch wiring
   breakage, not a second test suite.
@@ -323,9 +366,9 @@ slowest and most careful about — everything later assumes it is right.
 **M2 — Navigation and reading.** Scroll, `:open`, history, the diffing renderer, the
 `MutationObserver` dirty-signal loop. At this point it is a usable read-only browser.
 
-**M3 — Interaction.** The keymap table, mouse dispatch, hint mode, insert mode, and
-page-driven focus tracking. Forms work. This is the milestone that makes it a browser
-rather than a viewer.
+**M3 — Interaction.** The keymap table, mouse dispatch, hint mode, and insert mode,
+with the four-mode state machine and the chrome moving into `wwt-ui`. Forms work. This
+is the milestone that makes it a browser rather than a viewer.
 
 **M4 — Tabs and sessions.** Multiple targets, the persistent profile, session
 serialization and restore, background-tab idling and eviction. Logins survive

@@ -4,12 +4,21 @@
 /// host and given `https://`.
 const SCHEMES: &[&str] = &["http://", "https://", "file://", "about:", "data:"];
 
+/// Something you can turn on or off from the `:` line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Setting {
+    /// Terminal mouse capture. Off hands text selection back to terminals
+    /// that do not give it to you with shift held.
+    Mouse(bool),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Open(String),
     Back,
     Forward,
     Reload,
+    Set(Setting),
     Quit,
 }
 
@@ -32,6 +41,18 @@ pub fn parse(line: &str) -> Result<Command, String> {
         "back" | "b" => Ok(Command::Back),
         "forward" | "f" => Ok(Command::Forward),
         "reload" => Ok(Command::Reload),
+        "set" => {
+            let (setting, value) = match rest.split_once(char::is_whitespace) {
+                Some((setting, value)) => (setting, value.trim()),
+                None => (rest, ""),
+            };
+            match (setting, value) {
+                ("mouse", "on") => Ok(Command::Set(Setting::Mouse(true))),
+                ("mouse", "off") => Ok(Command::Set(Setting::Mouse(false))),
+                ("mouse", other) => Err(format!("set mouse takes on or off, not {other:?}")),
+                (other, _) => Err(format!("unknown setting: {other}")),
+            }
+        }
         "quit" | "q" => Ok(Command::Quit),
         other => Err(format!("unknown command: {other}")),
     }
@@ -126,4 +147,16 @@ mod tests {
     fn an_empty_line_is_an_error() {
         assert!(parse("   ").is_err());
     }
+    #[test]
+    fn set_mouse_takes_on_and_off() {
+        assert_eq!(parse("set mouse on"), Ok(Command::Set(Setting::Mouse(true))));
+        assert_eq!(parse("set mouse off"), Ok(Command::Set(Setting::Mouse(false))));
+    }
+
+    #[test]
+    fn a_setting_that_does_not_exist_names_itself() {
+        assert_eq!(parse("set zoom 2"), Err("unknown setting: zoom".to_string()));
+        assert!(parse("set mouse maybe").is_err());
+    }
+
 }

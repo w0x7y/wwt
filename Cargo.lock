@@ -717,6 +717,7 @@ dependencies = [
  "wwt-frame",
  "wwt-page",
  "wwt-term",
+ "wwt-ui",
 ]
 
 [[package]]
@@ -746,6 +747,7 @@ dependencies = [
  "tokio",
  "wwt-cdp",
  "wwt-frame",
+ "wwt-page",
 ]
 
 [[package]]
@@ -755,6 +757,13 @@ dependencies = [
  "anyhow",
  "crossterm",
  "rustix",
+ "wwt-frame",
+]
+
+[[package]]
+name = "wwt-ui"
+version = "0.1.0"
+dependencies = [
  "wwt-frame",
 ]
 

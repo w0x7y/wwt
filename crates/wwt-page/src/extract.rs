@@ -8,9 +8,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use wwt_cdp::{Client, Event};
-use wwt_frame::{CssRect, Style, TextRun, Viewport};
+use wwt_frame::{Caret, CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
+use crate::input::{Input, KeyInput, MouseAction, MouseInput};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,6 +24,7 @@ pub const DIRTY_BINDING: &str = "__wwt_dirty";
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
+    caret: Option<RawCaret>,
     title: String,
     url: String,
     #[serde(rename = "scrollY")]
@@ -33,11 +35,21 @@ struct RawExtraction {
     inner_height: f64,
 }
 
+/// The insertion point, as the injected script measured it.
+#[derive(Debug, Deserialize)]
+struct RawCaret {
+    x: f64,
+    baseline: f64,
+    offset: usize,
+}
+
 /// One pass of the extraction script: everything the renderer and the
 /// statusline need, from one round trip.
 #[derive(Debug, Clone)]
 pub struct Extraction {
     pub runs: Vec<TextRun>,
+    /// Where typing would land, when a form control has focus.
+    pub caret: Option<Caret>,
     pub title: String,
     pub url: String,
     pub scroll_y: f64,
@@ -68,6 +80,16 @@ struct RawRun {
     color: String,
     bold: bool,
     z: i32,
+}
+
+/// The shape one entry of `__wwt.hints()` returns.
+#[derive(Debug, Deserialize)]
+struct RawTarget {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    editable: bool,
 }
 
 pub struct Page {
@@ -126,6 +148,17 @@ impl Page {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Whether a CDP event is this page's dirty signal.
+    ///
+    /// One browser serves several pages, and every one of them reports on
+    /// the same subscription, so the session id is half the question. This
+    /// lives here because the binding name does.
+    pub fn is_dirty(&self, event: &Event) -> bool {
+        event.session_id.as_deref() == Some(self.session_id.as_str())
+            && event.method == "Runtime.bindingCalled"
+            && event.params["name"] == DIRTY_BINDING
     }
 
     /// Install the page-side script for every document this target loads,
@@ -259,24 +292,13 @@ impl Page {
     /// Chromium performs the scroll: sticky headers stick, infinite scroll
     /// loads, and virtualized lists virtualize, all with no help from us.
     pub async fn scroll_by(&self, dy: f64, vp: Viewport) -> Result<()> {
-        self.client
-            .call_on(
-                &self.session_id,
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": "mouseWheel",
-                    "x": f64::from(vp.css_width()) / 2.0,
-                    "y": f64::from(vp.css_height()) / 2.0,
-                    "deltaX": 0.0,
-                    "deltaY": dy,
-                    "button": "none",
-                    "clickCount": 0,
-                    "modifiers": 0,
-                }),
-            )
-            .await
-            .context("dispatch a wheel event")?;
-        Ok(())
+        // Aimed at the middle of the viewport, because a keyboard scroll has
+        // no pointer to aim with.
+        let at = CssPoint {
+            x: f64::from(vp.css_width()) / 2.0,
+            y: f64::from(vp.css_height()) / 2.0,
+        };
+        self.dispatch_mouse(&MouseInput::wheel(at, dy)).await
     }
 
     pub async fn scroll_to_top(&self) -> Result<()> {
@@ -311,25 +333,11 @@ impl Page {
 
     /// Run the extraction script and convert its output.
     pub async fn extract(&self) -> Result<Extraction> {
-        let result = self
-            .client
-            .call_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({
-                    "expression": "window.__wwt.extract()",
-                    "returnByValue": true,
-                    "awaitPromise": false,
-                }),
-            )
+        let value = self
+            .js("window.__wwt.extract()")
             .await
             .context("run the extraction script")?;
-
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("the extraction script threw: {details}");
-        }
-
-        let raw: RawExtraction = serde_json::from_value(result["result"]["value"].clone())
+        let raw: RawExtraction = serde_json::from_value(value)
             .context("the extraction script returned an unexpected shape")?;
 
         Ok(Extraction {
@@ -348,11 +356,170 @@ impl Page {
                     z: r.z,
                 })
                 .collect(),
+            caret: raw
+                .caret
+                .map(|c| Caret { x: c.x, baseline: c.baseline, offset: c.offset }),
             title: raw.title,
             url: raw.url,
             scroll_y: raw.scroll_y,
             scroll_height: raw.scroll_height,
             viewport_height: raw.inner_height,
         })
+    }
+    /// Run JavaScript in the page, for a test.
+    ///
+    /// Gated, because it has no business in what a caller must know: a
+    /// caller who can run arbitrary JavaScript can read the page any way it
+    /// likes, and `extract` exists so that there is exactly one way. Nothing
+    /// in the browser calls this.
+    ///
+    /// Tests use it to *arrange* — focus a field, set a value, move the
+    /// insertion point — and to reach `__wwt.__pure`. What they assert on is
+    /// what this crate returns, so a change that keeps the DOM right and the
+    /// `Extraction` wrong still fails.
+    #[cfg(feature = "test-support")]
+    pub async fn eval(&self, expression: &str) -> Result<serde_json::Value> {
+        self.js(expression).await
+    }
+
+    /// Evaluate an expression in the page and return its value.
+    ///
+    /// Deliberately not how anything reads the page: that is `extract`,
+    /// once, in one round trip. The two callers here are commands this crate
+    /// issues rather than reads it performs.
+    async fn js(&self, expression: &str) -> Result<serde_json::Value> {
+        let result = self
+            .client
+            .call_on(
+                &self.session_id,
+                "Runtime.evaluate",
+                json!({ "expression": expression, "returnByValue": true }),
+            )
+            .await
+            .with_context(|| format!("evaluate {expression}"))?;
+
+        if let Some(details) = result.get("exceptionDetails") {
+            bail!("{expression} threw: {details}");
+        }
+        Ok(result["result"]["value"].clone())
+    }
+
+    /// Send one input to the page.
+    ///
+    /// The two kinds go to different CDP commands, and which one is this
+    /// crate's business rather than its caller's.
+    pub async fn dispatch(&self, input: &Input) -> Result<()> {
+        match input {
+            Input::Key(key) => self.dispatch_key(key).await,
+            Input::Mouse(mouse) => self.dispatch_mouse(mouse).await,
+        }
+    }
+
+    /// Send one key to the page.
+    ///
+    /// A key that inserts text dispatches `keyDown`, which Chromium turns
+    /// into a character insertion. A key that inserts nothing dispatches
+    /// `rawKeyDown`, which stays a bare key event. Sending the wrong one
+    /// either loses your typing or types your shortcuts.
+    pub async fn dispatch_key(&self, key: &KeyInput) -> Result<()> {
+        // The same key, going down and coming back up. Describing it twice
+        // is how the two come to disagree.
+        let key_fields = json!({
+            "key": key.key,
+            "code": key.code,
+            "windowsVirtualKeyCode": key.windows_virtual_key_code,
+            "nativeVirtualKeyCode": key.windows_virtual_key_code,
+            "modifiers": key.modifiers,
+        });
+
+        let mut down = key_fields.clone();
+        down["type"] = json!(if key.text.is_empty() { "rawKeyDown" } else { "keyDown" });
+        if !key.text.is_empty() {
+            down["text"] = json!(key.text);
+            down["unmodifiedText"] = json!(key.text);
+        }
+
+        let mut up = key_fields;
+        up["type"] = json!("keyUp");
+
+        self.client
+            .call_on(&self.session_id, "Input.dispatchKeyEvent", down)
+            .await
+            .context("dispatch a key down")?;
+        self.client
+            .call_on(&self.session_id, "Input.dispatchKeyEvent", up)
+            .await
+            .context("dispatch a key up")?;
+        Ok(())
+    }
+
+    /// Take focus off whatever has it.
+    ///
+    /// Leaving insert mode has to be local: if this fails, the mode changes
+    /// anyway. Taking the keyboard back must not depend on the page.
+    pub async fn blur(&self) -> Result<()> {
+        self.js("document.activeElement && document.activeElement.blur()")
+            .await?;
+        Ok(())
+    }
+    /// Send one mouse event to the page.
+    ///
+    /// The point is the page's, not the terminal's: the caller converts
+    /// through `Viewport`, which is the only place a cell becomes a pixel.
+    pub async fn dispatch_mouse(&self, mouse: &MouseInput) -> Result<()> {
+        let params = match mouse.action {
+            MouseAction::Press => json!({
+                "type": "mousePressed",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "button": "left",
+                "buttons": 1,
+                "clickCount": 1,
+                "modifiers": 0,
+            }),
+            MouseAction::Release => json!({
+                "type": "mouseReleased",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "button": "left",
+                "buttons": 0,
+                "clickCount": 1,
+                "modifiers": 0,
+            }),
+            MouseAction::Wheel(dy) => json!({
+                "type": "mouseWheel",
+                "x": mouse.at.x,
+                "y": mouse.at.y,
+                "deltaX": 0.0,
+                "deltaY": dy,
+                "button": "none",
+                "clickCount": 0,
+                "modifiers": 0,
+            }),
+        };
+
+        self.client
+            .call_on(&self.session_id, "Input.dispatchMouseEvent", params)
+            .await
+            .context("dispatch a mouse event")?;
+        Ok(())
+    }
+    /// Every interactive box on screen, in document order.
+    ///
+    /// Run when hint mode opens rather than during extraction: it sweeps the
+    /// document and hit-tests each candidate, which is too much to pay on
+    /// every scroll frame for something pressed occasionally.
+    pub async fn hints(&self) -> Result<Vec<HintTarget>> {
+        let value = self.js("window.__wwt.hints()").await.context("run the hint query")?;
+        let raw: Vec<RawTarget> = serde_json::from_value(value)
+            .context("the hint query returned an unexpected shape")?;
+
+        Ok(raw
+            .into_iter()
+            .map(|t| HintTarget {
+                rect: CssRect { x: t.x, y: t.y, w: t.w, h: t.h },
+                kind: if t.editable { TargetKind::Editable } else { TargetKind::Clickable },
+            })
+            .collect())
     }
 }

@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Links Fixture</title>
+<style>body { margin: 0; font: 16px/20px sans-serif; width: 720px; }</style>
+<script>
+  let html = "";
+  for (let i = 0; i < 1500; i++) {
+    html += `<p><a href="#${i}">link number ${i}</a> and some trailing text</p>`;
+  }
+  document.write(html);
+</script>
