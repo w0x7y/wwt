@@ -369,12 +369,28 @@ impl Page {
             viewport_height: raw.inner_height,
         })
     }
+    /// Run JavaScript in the page, for a test.
+    ///
+    /// Gated, because it has no business in what a caller must know: a
+    /// caller who can run arbitrary JavaScript can read the page any way it
+    /// likes, and `extract` exists so that there is exactly one way. Nothing
+    /// in the browser calls this.
+    ///
+    /// Tests use it to *arrange* — focus a field, set a value, move the
+    /// insertion point — and to reach `__wwt.__pure`. What they assert on is
+    /// what this crate returns, so a change that keeps the DOM right and the
+    /// `Extraction` wrong still fails.
+    #[cfg(feature = "test-support")]
+    pub async fn eval(&self, expression: &str) -> Result<serde_json::Value> {
+        self.js(expression).await
+    }
+
     /// Evaluate an expression in the page and return its value.
     ///
-    /// This is the escape hatch the tests use to see what a keystroke did.
-    /// It is deliberately not how anything in the browser reads the page:
-    /// that is `extract`, once, in one round trip.
-    pub async fn eval(&self, expression: &str) -> Result<serde_json::Value> {
+    /// Deliberately not how anything reads the page: that is `extract`,
+    /// once, in one round trip. The two callers here are commands this crate
+    /// issues rather than reads it performs.
+    async fn js(&self, expression: &str) -> Result<serde_json::Value> {
         let result = self
             .client
             .call_on(
@@ -438,7 +454,7 @@ impl Page {
     /// Leaving insert mode has to be local: if this fails, the mode changes
     /// anyway. Taking the keyboard back must not depend on the page.
     pub async fn blur(&self) -> Result<()> {
-        self.eval("document.activeElement && document.activeElement.blur()")
+        self.js("document.activeElement && document.activeElement.blur()")
             .await?;
         Ok(())
     }
@@ -490,7 +506,7 @@ impl Page {
     /// document and hit-tests each candidate, which is too much to pay on
     /// every scroll frame for something pressed occasionally.
     pub async fn hints(&self) -> Result<Vec<HintTarget>> {
-        let value = self.eval("window.__wwt.hints()").await.context("run the hint query")?;
+        let value = self.js("window.__wwt.hints()").await.context("run the hint query")?;
         let raw: Vec<RawTarget> = serde_json::from_value(value)
             .context("the hint query returned an unexpected shape")?;
 

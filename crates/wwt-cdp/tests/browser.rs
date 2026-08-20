@@ -1,5 +1,6 @@
-//! These tests launch a real Chromium. They are the only tests in the
-//! workspace that need one.
+//! These tests launch a real Chromium of their own, because launching and
+//! connecting is what they are testing. Everything else that needs a
+//! browser shares one; see `wwt-page/tests/common`.
 
 use serde_json::json;
 use wwt_cdp::{Chromium, Client};

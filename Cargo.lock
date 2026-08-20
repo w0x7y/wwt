@@ -747,6 +747,7 @@ dependencies = [
  "tokio",
  "wwt-cdp",
  "wwt-frame",
+ "wwt-page",
 ]
 
 [[package]]

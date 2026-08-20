@@ -92,18 +92,28 @@
     return fallback;
   }
 
-  // Split a text node into one entry per line box.
+  // The first offset in [lo, hi) for which `past` is true.
   //
-  // getClientRects gives us the line boxes directly, so the only unknown is
-  // where in the string each line begins. Character tops increase
-  // monotonically through the string, so each boundary is a binary search
-  // rather than a scan.
-  function linesOf(range, node) {
-    const text = node.nodeValue;
-    range.selectNodeContents(node);
-    const rects = Array.from(range.getClientRects()).filter(
-      (r) => r.width > 0 || r.height > 0
-    );
+  // Both searches this script does are this one: character positions
+  // increase monotonically down a wrapped string and along a line, so
+  // finding where one crosses an edge is a bisection rather than a scan.
+  // Pure, and the only part of either search that can be wrong on its own.
+  function firstWhere(lo, hi, past) {
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (past(mid)) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  }
+
+  // Split a string into one entry per line box.
+  //
+  // The line boxes come from getClientRects, so the only unknown is where in
+  // the string each line begins. `topOf(index, fallback)` answers where a
+  // character sits vertically; everything else here is arithmetic, which is
+  // why the two are separated.
+  function splitLines(rects, text, topOf) {
     if (rects.length === 0) return [];
     if (rects.length === 1) {
       return [{ rect: rects[0], text, start: 0, end: text.length }];
@@ -114,18 +124,19 @@
     for (let i = 1; i < rects.length; i++) {
       // The first offset that has moved down to line i.
       const threshold = rects[i].top - 0.5;
-      let lo = start;
-      let hi = text.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (topAt(range, node, mid, rects[i - 1].top) >= threshold) {
-          hi = mid;
-        } else {
-          lo = mid + 1;
-        }
-      }
-      lines.push({ rect: rects[i - 1], text: text.slice(start, lo), start, end: lo });
-      start = lo;
+      const previous = rects[i - 1].top;
+      const boundary = firstWhere(
+        start,
+        text.length,
+        (k) => topOf(k, previous) >= threshold
+      );
+      lines.push({
+        rect: rects[i - 1],
+        text: text.slice(start, boundary),
+        start,
+        end: boundary,
+      });
+      start = boundary;
     }
     lines.push({
       rect: rects[rects.length - 1],
@@ -134,6 +145,18 @@
       end: text.length,
     });
     return lines;
+  }
+
+  // Split a text node into one entry per line box.
+  function linesOf(range, node) {
+    const text = node.nodeValue;
+    range.selectNodeContents(node);
+    const rects = Array.from(range.getClientRects()).filter(
+      (r) => r.width > 0 || r.height > 0
+    );
+    return splitLines(rects, text, (index, fallback) =>
+      topAt(range, node, index, fallback)
+    );
   }
 
   function extract() {
@@ -262,18 +285,12 @@
   }
 
   // The first offset in [lo, hi) whose character reaches past `x`.
-  //
-  // Character positions increase monotonically along a line, so this is a
-  // binary search rather than a scan, the same trick linesOf uses vertically.
   function offsetPast(range, node, lo, hi, x) {
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
+    return firstWhere(lo, hi, (mid) => {
       range.setStart(node, mid);
       range.setEnd(node, mid + 1);
-      if (range.getBoundingClientRect().right > x) hi = mid;
-      else lo = mid + 1;
-    }
-    return lo;
+      return range.getBoundingClientRect().right > x;
+    });
   }
 
   // The insertion point, as a line and a count of characters into it.
@@ -572,5 +589,11 @@
     return out;
   }
 
-  window.__wwt = { extract, hints };
+  // The arithmetic half, exposed so it can be asserted on directly.
+  //
+  // These are the sharpest functions here and the ones whose mistakes are
+  // invisible from a rendered frame: an offset that is two too far still
+  // looks like a caret in roughly the right place. Reaching them needs no
+  // page, only data, so their tests cost data.
+  window.__wwt = { extract, hints, __pure: { firstWhere, splitLines, caretIn } };
 })()

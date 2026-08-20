@@ -50,8 +50,8 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
     );
     page.eval("document.querySelector('#name').focus()").await.expect("focus");
 
-    let (errors_tx, mut errors_rx) = mpsc::unbounded_channel();
-    let pump = InputPump::spawn(Arc::clone(&page), errors_tx);
+    let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
+    let pump = InputPump::spawn(Arc::clone(&page), jobs_tx);
 
     let typed = "the quick brown fox";
     for c in typed.chars() {
@@ -59,22 +59,26 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
         pump.send(Input::Key(if c == ' ' { space() } else { letter(c) }));
     }
 
+    // What the field holds is read the way the browser reads it, so an
+    // ordering bug that somehow left the DOM right and the frame wrong is
+    // still a failure here.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut value = String::new();
+    let mut shown = String::new();
     while Instant::now() < deadline {
-        value = page
-            .eval("document.querySelector('#name').value")
-            .await
-            .expect("read the field")
-            .as_str()
+        let extraction = page.extract().await.expect("extract");
+        shown = extraction
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .find(|text| text.len() == typed.len())
             .unwrap_or_default()
             .to_string();
-        if value.len() == typed.len() {
+        if shown == typed {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    assert_eq!(value, typed);
-    assert!(errors_rx.try_recv().is_err(), "the pump reported an error");
+    assert_eq!(shown, typed);
+    assert!(jobs_rx.try_recv().is_err(), "the pump reported a failure");
 }
