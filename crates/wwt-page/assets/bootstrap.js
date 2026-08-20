@@ -75,6 +75,30 @@
 
   window.addEventListener("load", signal);
 
+  // Whether an element is painted at all. Every pass over the document asks
+  // this, and a pass that asked it differently would put text on screen that
+  // the page does not show.
+  function isVisible(cs) {
+    return (
+      cs.visibility !== "hidden" && cs.display !== "none" && cs.opacity !== "0"
+    );
+  }
+
+  // Whether a box overlaps the viewport. The dimensions are passed in rather
+  // than read here: they are a layout read, and every caller is in a loop.
+  function onScreen(r, vw, vh) {
+    return r.bottom >= 0 && r.top <= vh && r.right >= 0 && r.left <= vw;
+  }
+
+  // The descender is roughly a fifth of the font size. Close enough to put a
+  // baseline in the right cell row, and the one number that decides which row
+  // any text lands on, so it is stated once.
+  const DESCENDER = 0.21;
+
+  function baselineOf(bottom, fontSize) {
+    return bottom - fontSize * DESCENDER;
+  }
+
   // How far to scan forward past characters with no box (collapsed
   // whitespace) before giving up and using the caller's fallback.
   const EMPTY_SCAN_LIMIT = 8;
@@ -181,9 +205,7 @@
       if (!parent) continue;
 
       const cs = window.getComputedStyle(parent);
-      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
-        continue;
-      }
+      if (!isVisible(cs)) continue;
       if (parent.tagName === "SCRIPT" || parent.tagName === "STYLE") continue;
 
       const fontSize = parseFloat(cs.fontSize) || 16;
@@ -195,7 +217,7 @@
 
         const r = line.rect;
         // Cull runs entirely outside the viewport.
-        if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+        if (!onScreen(r, vw, vh)) continue;
 
         runs.push({
           text: content,
@@ -203,9 +225,7 @@
           y: r.top,
           w: r.width,
           h: r.height,
-          // The descender is roughly a fifth of the font size; close enough to
-          // put the baseline in the right cell row.
-          baseline: r.bottom - fontSize * 0.21,
+          baseline: baselineOf(r.bottom, fontSize),
           color: cs.color,
           bold: weight >= 600,
           z: 0,
@@ -410,13 +430,11 @@
 
     for (const el of document.querySelectorAll("input, textarea, select")) {
       const cs = window.getComputedStyle(el);
-      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
-        continue;
-      }
+      if (!isVisible(cs)) continue;
 
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) continue;
-      if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+      if (!onScreen(r, vw, vh)) continue;
 
       const shown = fieldText(el);
       const focused =
@@ -453,31 +471,16 @@
       const needsMirror =
         measurable && (multiline || overflowing || scrolled || focused);
 
-      if (!needsMirror) {
-        if (shown) {
-          const y = top + centring;
-          runs.push({
-            text: shown,
-            x: left,
-            y,
-            w: width,
-            h: lineHeight,
-            baseline: y + lineHeight - fontSize * 0.21,
-            color,
-            bold,
-            z: 0,
-          });
-        }
-        // A field with nothing to measure still has an insertion point, at
-        // the start of whatever it shows.
-        if (focused) {
-          const y = top + centring;
-          caret = { x: left, baseline: y + lineHeight - fontSize * 0.21, offset: 0 };
-        }
-        continue;
-      }
-
-      const measured = measureField(el, shown, multiline, width, focused);
+      // A control that needs no mirror is a control whose value is one line
+      // at the origin of its content box, with its insertion point at the
+      // start of it. That is the shape a measured control comes back in, so
+      // saying it here is what lets one emit path below serve both.
+      const measured = needsMirror
+        ? measureField(el, shown, multiline, width, focused)
+        : {
+            lines: [{ text: shown, x: 0, y: 0, start: 0 }],
+            caret: focused ? { x: 0, y: 0, offset: 0 } : null,
+          };
 
       for (const line of measured.lines) {
         if (!line.text) continue;
@@ -491,7 +494,7 @@
           y,
           w: Math.max(0, width - line.x),
           h: lineHeight,
-          baseline: y + lineHeight - fontSize * 0.21,
+          baseline: baselineOf(y + lineHeight, fontSize),
           color,
           bold,
           z: 0,
@@ -505,7 +508,7 @@
         const y = top + centring + measured.caret.y;
         caret = {
           x: left + measured.caret.x,
-          baseline: y + lineHeight - fontSize * 0.21,
+          baseline: baselineOf(y + lineHeight, fontSize),
           offset: measured.caret.offset,
         };
       }
@@ -561,13 +564,11 @@
       if (el.disabled) continue;
 
       const cs = window.getComputedStyle(el);
-      if (cs.visibility === "hidden" || cs.display === "none" || cs.opacity === "0") {
-        continue;
-      }
+      if (!isVisible(cs)) continue;
 
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) continue;
-      if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+      if (!onScreen(r, vw, vh)) continue;
 
       // The point a click would land on. If something else is on top of it,
       // a label here would lie about what pressing it does.
