@@ -14,8 +14,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 use wwt_cdp::Client;
 use wwt_frame::{
-    CellPos, CellSize, CssPoint, CssRect, Frame, GridSize, HintTarget, Style, TargetKind, TextRun,
-    Viewport,
+    Caret, CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport,
 };
 use wwt_page::{DIRTY_BINDING, Extraction, MouseInput, Page};
 use wwt_term::Renderer;
@@ -69,14 +68,6 @@ pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
     (column < grid.cols && row < grid.rows).then_some(CellPos { col: column, row })
 }
 
-/// The cell the insertion point sits in, or `None` when it is off the page.
-///
-/// Measured at the middle of the caret's line rather than its top edge, so a
-/// caret straddling a row boundary lands on the row its text is on.
-pub fn caret_cell(vp: &Viewport, caret: &CssRect) -> Option<CellPos> {
-    vp.to_cell(CssPoint { x: caret.x, y: caret.y + caret.h / 2.0 })
-}
-
 pub struct Core {
     page: Arc<Page>,
     client: Arc<Client>,
@@ -92,7 +83,7 @@ pub struct Core {
     progress: f64,
     runs: Vec<TextRun>,
     /// Where typing would land, when the page has a field focused.
-    caret: Option<CssRect>,
+    caret: Option<Caret>,
 
     /// The page says it changed and we have not caught up yet.
     dirty: bool,
@@ -170,7 +161,7 @@ impl Core {
         // and a caret there would promise that your typing lands in it when
         // in normal mode it does not.
         if self.mode == Mode::Insert {
-            self.paint_caret(&mut frame);
+            frame.set_cursor(self.caret_cell());
         }
 
         // After the page and before the chrome: labels cover the text they
@@ -190,21 +181,14 @@ impl Core {
         frame
     }
 
-    /// Invert the cell the insertion point is in.
+    /// The cell the terminal's cursor belongs on, if the page has a field
+    /// focused and the insertion point is on screen.
     ///
-    /// Inverting rather than overwriting keeps the character underneath
-    /// readable: the caret shows the cell you are about to type over.
-    fn paint_caret(&self, frame: &mut Frame) {
-        let Some(caret) = &self.caret else { return };
-        let Some(cell) = caret_cell(&self.vp, caret) else { return };
-        let Some(under) = frame.cell(cell) else { return };
-
-        let (ch, style) = (under.ch, under.style);
-        frame.paint_text(
-            cell,
-            &ch.to_string(),
-            Style { reverse: !style.reverse, ..style },
-        );
+    /// The caret is the terminal's own cursor rather than something painted
+    /// into a cell: a painted one is a character wide, which reads as a
+    /// selected character rather than as a gap between two of them.
+    fn caret_cell(&self) -> Option<CellPos> {
+        self.caret?.cell(&self.vp)
     }
 
     pub async fn run(&mut self, out: &mut impl Write) -> Result<()> {
@@ -689,20 +673,4 @@ mod tests {
         let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
         assert_eq!(page_cell(&vp, 5, 23), None);
     }
-
-    #[test]
-    fn the_caret_lands_on_the_row_its_line_is_on() {
-        let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
-        // A caret on the line starting at y 40, one line high: row 2.
-        let caret = CssRect { x: 90.0, y: 40.0, w: 0.0, h: 20.0 };
-        assert_eq!(caret_cell(&vp, &caret), Some(CellPos { col: 10, row: 2 }));
-    }
-
-    #[test]
-    fn a_caret_scrolled_off_the_page_has_no_cell() {
-        let vp = page_viewport(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
-        let caret = CssRect { x: 90.0, y: -100.0, w: 0.0, h: 20.0 };
-        assert_eq!(caret_cell(&vp, &caret), None, "nothing above the viewport has a cell");
-    }
-
 }

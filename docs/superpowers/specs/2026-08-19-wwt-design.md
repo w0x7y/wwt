@@ -171,14 +171,23 @@ survives navigation. Responsibilities:
 4. Collect replaced-content boxes (`img`, `canvas`, `video`, `svg`) as block
    placeholders
 5. Signal dirtiness through `Runtime.addBinding` from a debounced `MutationObserver`
-   plus scroll and resize listeners
+   plus scroll and resize listeners, and from `input`, `selectionchange`, `focusin`
+   and `focusout`, which are what point 2 changing looks like
 
 Point 5 is what makes the system event-driven rather than polling: we re-extract only
 when the page changes, so an idle page costs no CPU. This is the difference between a
 browser you leave open and one you close.
 
-There is deliberately no `focusin` listener. An earlier draft had one, so that mode
-could follow the page's own focus; section 6 says why it is gone.
+The second half of point 5 exists because a form control's value and selection are
+element state rather than DOM: nothing mutates when you type into an `input` or walk
+the insertion point through it, so the observer sees none of it and the pass in point
+2 reads state nothing signals. Without those four listeners what you typed, and where
+the caret sits, stay on screen as they were until something unrelated changes the page.
+
+The `focusin` listener signals dirtiness and nothing else. An earlier draft had one
+that mode followed, so that the page could put us in insert mode; section 6 says why
+*that* is gone. Repainting a page that already looks different is not the same thing
+as letting it take the keyboard.
 
 Extraction returns one flat, sorted array per pass through a single `Runtime.evaluate`
 round trip, never thousands of individual `DOM.getBoxModel` calls. On a heavy page

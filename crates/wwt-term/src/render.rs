@@ -38,6 +38,25 @@ pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
     out.flush()
 }
 
+/// A steady vertical bar (DECSCUSR 6): a caret between two characters
+/// rather than one covering a character. Terminals that do not understand
+/// it leave their own cursor shape alone, which is still a cursor in the
+/// right cell.
+const BAR_CURSOR: &str = "\x1b[6 q";
+
+/// Put the terminal's own cursor where the frame wants it, or take it off
+/// the screen. Terminal coordinates are 1-based.
+///
+/// This is the caret. Inverting a cell would make it as wide as a
+/// character, and would hide whether the insertion point is before or after
+/// the character it lands on.
+fn place_cursor(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
+    match frame.cursor() {
+        Some(pos) => write!(out, "\x1b[{};{}H{BAR_CURSOR}\x1b[?25h", pos.row + 1, pos.col + 1),
+        None => write!(out, "\x1b[?25l"),
+    }
+}
+
 fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
     // Reset first so that clearing bold does not need a separate sequence.
     write!(out, "\x1b[0m")?;
@@ -82,18 +101,28 @@ impl Renderer {
             .as_ref()
             .is_some_and(|prev| prev.grid() == frame.grid());
 
-        if reusable {
-            self.diff(frame, out)?;
+        let wrote = if reusable {
+            self.diff(frame, out)?
         } else {
             // A diff against a frame of different dimensions is meaningless.
             render(frame, out)?;
+            true
+        };
+
+        // Writing cells leaves the terminal's cursor wherever the last cell
+        // went, so anything painted has to be followed by putting it back.
+        let moved = self.last.as_ref().map(Frame::cursor) != Some(frame.cursor());
+        if wrote || moved {
+            place_cursor(frame, out)?;
+            out.flush()?;
         }
 
         self.last = Some(frame.clone());
         Ok(())
     }
 
-    fn diff(&self, frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
+    /// Emit the cells that changed. Returns whether anything was written.
+    fn diff(&self, frame: &Frame, out: &mut impl Write) -> std::io::Result<bool> {
         let prev = self.last.as_ref().expect("diff runs only with a cached frame");
         let grid = frame.grid();
         let mut wrote = false;
@@ -131,10 +160,7 @@ impl Renderer {
             }
         }
 
-        if wrote {
-            out.flush()?;
-        }
-        Ok(())
+        Ok(wrote)
     }
 }
 
@@ -274,5 +300,43 @@ mod tests {
         let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bold: false, reverse: true };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[7m"), "output was {out:?}");
+    }
+
+    #[test]
+    fn the_renderer_puts_the_terminal_cursor_on_the_caret_cell() {
+        let mut r = Renderer::new();
+        let mut f = painted("hi", Style::default());
+        f.set_cursor(Some(CellPos { col: 2, row: 0 }));
+        let out = diff_to_string(&mut r, &f);
+        // Row 1, column 3 in 1-based terminal coordinates, then a bar.
+        assert!(out.contains("\x1b[1;3H\x1b[6 q\x1b[?25h"), "output was {out:?}");
+    }
+
+    #[test]
+    fn the_renderer_hides_the_cursor_when_the_frame_has_no_caret() {
+        let mut r = Renderer::new();
+        let out = diff_to_string(&mut r, &painted("hi", Style::default()));
+        assert!(out.contains("\x1b[?25l"), "output was {out:?}");
+    }
+
+    #[test]
+    fn a_caret_that_moved_is_emitted_though_no_cell_changed() {
+        let mut r = Renderer::new();
+        let mut f = painted("hi", Style::default());
+        f.set_cursor(Some(CellPos { col: 0, row: 0 }));
+        diff_to_string(&mut r, &f);
+
+        f.set_cursor(Some(CellPos { col: 1, row: 0 }));
+        let out = diff_to_string(&mut r, &f);
+        assert!(out.contains("\x1b[1;2H"), "output was {out:?}");
+    }
+
+    #[test]
+    fn a_caret_that_stayed_put_costs_nothing() {
+        let mut r = Renderer::new();
+        let mut f = painted("hi", Style::default());
+        f.set_cursor(Some(CellPos { col: 1, row: 0 }));
+        diff_to_string(&mut r, &f);
+        assert_eq!(diff_to_string(&mut r, &f), "");
     }
 }

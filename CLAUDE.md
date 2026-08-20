@@ -63,9 +63,10 @@ mutates it. Consequences to preserve when adding features:
 - **Nothing blocks the loop.** Page operations spawn and report back as a `Job` on one
   channel. A thirty-second load still leaves keys responsive.
 - **Re-extraction is event-driven, never polled.** `bootstrap.js` calls the
-  `__wwt_dirty` binding from a debounced `MutationObserver`, scroll listener, and
-  `load`; the core keeps at most one extraction in flight and re-runs if the flag is
-  still set. An idle page must cost ~zero CPU — do not add a tick loop.
+  `__wwt_dirty` binding from a debounced `MutationObserver`, scroll listener,
+  `load`, and the four field-state events (`input`, `selectionchange`, `focusin`,
+  `focusout`); the core keeps at most one extraction in flight and re-runs if the
+  flag is still set. An idle page must cost ~zero CPU — do not add a tick loop.
 - **Never blank the frame you are looking at** (spec §8). Every failure path degrades
   to stale-but-labeled: the old frame stays, only `State` in the statusline changes.
 - **Rendering is diffed.** `Renderer` holds the last presented frame; call
@@ -132,8 +133,20 @@ mutation and the dirty observer watches the document**, so the pass disconnects
 the observer, measures, and re-observes after `takeRecords`: without that, every
 extraction signals dirty and an idle page spins forever. A mirror costs a layout,
 so only controls that need one get one (multiline, overflowing, scrolled, or
-focused). `Extraction::caret` is painted by inverting one cell, in insert mode
-only, because a page can focus a field without being asked.
+focused).
+
+A control's value and its selection are element state, not DOM, so no mutation
+accompanies typing or moving the insertion point: `input`, `selectionchange` and
+the focus events are the dirty source for this pass, and without them the caret
+sits still until something unrelated changes the page. The focus listener signals
+a repaint and never a mode; the rule above still holds.
+
+`Extraction::caret` is a line (x, baseline) plus a character offset into it,
+never a pixel position: `paint_run` gives every character one cell, so a caret
+placed by CSS x drifts left of the character it belongs beside. It becomes
+`Frame::cursor`, and the renderer puts the terminal's own cursor there as a bar
+rather than painting a cell. Set in insert mode only, because a page can focus a
+field without being asked.
 
 Hint targets come from `__wwt.hints()`, queried on `f` and cached until the
 next dirty signal. They are deliberately not part of extraction: that path

@@ -13,6 +13,9 @@
   // fires per frame and must not outrun a single extraction.
   const MUTATION_DEBOUNCE_MS = 50;
   const SCROLL_DEBOUNCE_MS = 16;
+  // Field state changes at typing speed, and a caret that lags behind the
+  // keystroke that moved it is worse than no caret at all.
+  const FIELD_DEBOUNCE_MS = 16;
 
   function signal() {
     // The binding may not be installed yet on the very first document.
@@ -38,6 +41,7 @@
 
   const onMutation = debounce(signal, MUTATION_DEBOUNCE_MS);
   const onScroll = debounce(signal, SCROLL_DEBOUNCE_MS);
+  const onField = debounce(signal, FIELD_DEBOUNCE_MS);
 
   const OBSERVER_OPTIONS = {
     subtree: true,
@@ -53,6 +57,22 @@
 
   // Capture, because scrolling inside a nested scroller does not bubble.
   window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+  // A form control's value and selection are element state rather than DOM:
+  // nothing mutates when you type into an `input` or walk the insertion
+  // point through it, so the observer above sees none of it. The second
+  // extraction pass reads exactly that state, and these are its dirty
+  // source; without them what you typed and where the caret sits stay on
+  // screen as they were until something unrelated changed the page.
+  //
+  // Focus is on the list because it decides whether a control has an
+  // insertion point at all. This does not let the page drive the mode: it
+  // repaints what the page already looks like, and only a keystroke ever
+  // changes what mode we are in.
+  document.addEventListener("input", onField, true);
+  document.addEventListener("selectionchange", onField, true);
+  document.addEventListener("focusin", onField, true);
+  document.addEventListener("focusout", onField, true);
+
   window.addEventListener("load", signal);
 
   // How far to scan forward past characters with no box (collapsed
@@ -256,6 +276,31 @@
     return lo;
   }
 
+  // The insertion point, as a line and a count of characters into it.
+  //
+  // Deliberately not a pixel position. The frame paints a run one character
+  // per cell from the column its box starts in, so a caret placed by CSS
+  // pixels drifts away from the character it belongs beside as soon as the
+  // font is not exactly one cell wide. Counting characters is what the
+  // painting does, so counting characters is what the caret does.
+  function caretIn(lines, selection) {
+    if (lines.length === 0) return null;
+
+    // The last line that starts at or before the selection. A soft wrap
+    // leaves one offset belonging to two lines; the browser puts the caret
+    // at the start of the second, so we do too.
+    let index = 0;
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].start <= selection) index = i;
+    }
+
+    const line = lines[index];
+    // Clamped: the offset can sit in the space a line was broken at, which
+    // is not painted, and it can sit left of a scrolled window.
+    const offset = Math.min(Math.max(selection - line.start, 0), line.text.length);
+    return { x: line.x, y: line.y, offset };
+  }
+
   // Where the lines and the insertion point of one control are, relative to
   // the top left of its content box.
   function measureField(el, shown, multiline, width, focused) {
@@ -274,11 +319,12 @@
       for (const line of linesOf(range, node)) {
         let text = line.text;
         let x = line.rect.left - origin.left;
+        let cut = line.start;
 
         // A control scrolled sideways shows a window into its value, not the
         // head of it.
         if (scrollLeft > 0) {
-          const cut = offsetPast(range, node, line.start, line.end, origin.left + scrollLeft);
+          cut = offsetPast(range, node, line.start, line.end, origin.left + scrollLeft);
           if (cut >= line.end) continue;
           range.setStart(node, cut);
           range.setEnd(node, line.end);
@@ -291,30 +337,13 @@
           text: text.replace(/\s+$/, ""),
           x: x - scrollLeft,
           y: line.rect.top - origin.top - scrollTop,
+          // Where this line's first painted character sits in the value,
+          // which is what turns the insertion point into a column.
+          start: cut,
         });
       }
 
-      let caret = null;
-      if (focused) {
-        // Measured from a real character rather than from a collapsed range,
-        // which browsers are inconsistent about at the end of a line.
-        const offset = el.selectionStart;
-        if (node.nodeValue.length === 0) {
-          caret = { x: 0, y: 0 };
-        } else if (offset > 0) {
-          range.setStart(node, offset - 1);
-          range.setEnd(node, offset);
-          const rect = range.getBoundingClientRect();
-          caret = { x: rect.right - origin.left - scrollLeft, y: rect.top - origin.top - scrollTop };
-        } else {
-          range.setStart(node, 0);
-          range.setEnd(node, 1);
-          const rect = range.getBoundingClientRect();
-          caret = { x: rect.left - origin.left - scrollLeft, y: rect.top - origin.top - scrollTop };
-        }
-      }
-
-      return { lines, caret };
+      return { lines, caret: focused ? caretIn(lines, el.selectionStart) : null };
     });
   }
 
@@ -422,9 +451,11 @@
             z: 0,
           });
         }
-        // An empty field still has an insertion point, at the start of it.
+        // A field with nothing to measure still has an insertion point, at
+        // the start of whatever it shows.
         if (focused) {
-          caret = { x: left, y: top + centring, w: 0, h: lineHeight };
+          const y = top + centring;
+          caret = { x: left, baseline: y + lineHeight - fontSize * 0.21, offset: 0 };
         }
         continue;
       }
@@ -451,11 +482,14 @@
       }
 
       if (measured.caret) {
+        // The same x and baseline the run for that line was given, so the
+        // caret counts cells from the cell that line's first character
+        // landed in.
+        const y = top + centring + measured.caret.y;
         caret = {
           x: left + measured.caret.x,
-          y: top + centring + measured.caret.y,
-          w: 0,
-          h: lineHeight,
+          baseline: y + lineHeight - fontSize * 0.21,
+          offset: measured.caret.offset,
         };
       }
     }

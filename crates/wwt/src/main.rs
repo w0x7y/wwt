@@ -48,6 +48,9 @@ async fn main() -> Result<()> {
     let result = core.run(&mut out).await;
     let _ = out.flush();
 
+    // The renderer sets the cursor to a bar while a field is focused, so
+    // hand the terminal back the shape it had.
+    write!(stdout(), "\x1b[0 q")?;
     execute!(stdout(), cursor::Show, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result

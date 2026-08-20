@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wwt_cdp::{Chromium, Client};
+use tokio::sync::mpsc;
+use wwt_cdp::{Chromium, Client, Event};
 use wwt_frame::{CellSize, CssPoint, GridSize, TargetKind, Viewport};
 use wwt_page::{DIRTY_BINDING, KeyInput, MouseInput, Page};
 
@@ -383,7 +384,7 @@ async fn the_caret_follows_the_insertion_point() {
         .await
         .expect("set up the field");
 
-    let mut xs = Vec::new();
+    let mut carets = Vec::new();
     for offset in [0, 5, 11] {
         page.eval(&format!(
             "document.querySelector('#typed').setSelectionRange({offset}, {offset})"
@@ -391,13 +392,20 @@ async fn the_caret_follows_the_insertion_point() {
         .await
         .expect("move the insertion point");
         let extraction = page.extract().await.expect("extract");
-        let caret = extraction.caret.expect("a focused field has an insertion point");
-        xs.push(caret.x);
+        carets.push(extraction.caret.expect("a focused field has an insertion point"));
     }
 
+    // The value is one unwrapped line, so every caret sits on it and the
+    // offset is what moves. Counted in characters, not pixels: the frame
+    // gives each character a cell whatever the font's advance was.
+    assert_eq!(
+        carets.iter().map(|c| c.offset).collect::<Vec<_>>(),
+        vec![0, 5, 11],
+        "the caret counts characters into the line"
+    );
     assert!(
-        xs[0] < xs[1] && xs[1] < xs[2],
-        "the caret moves right as the offset grows: {xs:?}"
+        carets.iter().all(|c| c.x == carets[0].x && c.baseline == carets[0].baseline),
+        "the line itself did not move: {carets:?}"
     );
 
     let edge = page
@@ -411,10 +419,39 @@ async fn the_caret_follows_the_insertion_point() {
         .as_f64()
         .expect("a number");
     assert!(
-        (xs[0] - edge).abs() < 3.0,
-        "at offset 0 the caret sits at the left edge of the box: caret {}, edge {edge}",
-        xs[0]
+        (carets[0].x - edge).abs() < 3.0,
+        "the caret's line starts at the left edge of the box: caret {}, edge {edge}",
+        carets[0].x
     );
+}
+
+#[tokio::test]
+async fn the_caret_counts_from_the_start_of_its_own_wrapped_line() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    // A textarea wide enough for a handful of words per line, so the
+    // insertion point below is on neither the first line nor the last.
+    page.eval(
+        "const el = document.querySelector('#wrapped'); el.focus(); \
+         el.setSelectionRange(30, 30);",
+    )
+    .await
+    .expect("set up the field");
+
+    let caret = page
+        .extract()
+        .await
+        .expect("extract")
+        .caret
+        .expect("a focused field has an insertion point");
+
+    // Character 30 of the value, but the line it is on does not start at
+    // character 0, so the offset has to be smaller than 30.
+    assert!(
+        caret.offset < 30,
+        "the offset is into the line, not into the value: {caret:?}"
+    );
+    assert!(caret.baseline > 0.0, "on one of the wrapped lines: {caret:?}");
 }
 
 #[tokio::test]
@@ -441,21 +478,124 @@ async fn extracting_a_field_does_not_signal_the_page_dirty() {
     )
     .await
     .expect("set up the field");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    while events.try_recv().is_ok() {}
+    drain(&mut events).await;
 
     page.extract().await.expect("extract");
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Measuring a field puts a mirror of it into the document. If our own
     // MutationObserver sees that, the page reports itself dirty, the core
     // re-extracts, and an idle page spins forever.
+    assert_eq!(
+        count_signals(&mut events).await,
+        0,
+        "extraction made the page call itself dirty"
+    );
+}
+
+/// How long a page has to stay silent before we call it settled.
+const QUIET: Duration = Duration::from_millis(300);
+
+/// Throw away everything the page has said, and everything it says until it
+/// has been quiet for `QUIET`.
+///
+/// Draining once is not enough: the setup a test does before it starts
+/// counting can itself signal, and under a loaded machine that signal can
+/// arrive after a fixed sleep has expired.
+async fn drain(events: &mut mpsc::UnboundedReceiver<Event>) {
+    loop {
+        let mut seen = false;
+        while events.try_recv().is_ok() {
+            seen = true;
+        }
+        tokio::time::sleep(QUIET).await;
+        if !seen && events.is_empty() {
+            return;
+        }
+    }
+}
+
+/// Count the dirty signals that arrive before the page goes quiet.
+async fn count_signals(events: &mut mpsc::UnboundedReceiver<Event>) -> usize {
     let mut signals = 0;
+    tokio::time::sleep(QUIET).await;
     while let Ok(event) = events.try_recv() {
         if event.method == "Runtime.bindingCalled" && event.params["name"] == DIRTY_BINDING {
             signals += 1;
         }
     }
-    assert_eq!(signals, 0, "extraction made the page call itself dirty");
+    signals
 }
 
+/// Run `act`, then count the dirty signals it produced.
+///
+/// The subscription is opened and drained before acting, because focusing a
+/// field can scroll it and the signal that causes is not the one under test.
+async fn signals_from<F, Fut>(h: &Harness, act: F) -> usize
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut events = h.client.subscribe();
+    drain(&mut events).await;
+    act().await;
+    count_signals(&mut events).await
+}
+
+fn arrow_left() -> KeyInput {
+    KeyInput {
+        key: "ArrowLeft".to_string(),
+        code: "ArrowLeft".to_string(),
+        windows_virtual_key_code: 37,
+        text: String::new(),
+        modifiers: 0,
+    }
+}
+
+#[tokio::test]
+async fn typing_into_a_field_signals_the_page_dirty() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    page.eval("document.querySelector('#typed').focus()").await.expect("focus");
+
+    // A control's value is element state, not a text node, so no mutation
+    // the observer can see accompanies it.
+    let signals = signals_from(&h, || async {
+        for c in "hi".chars() {
+            page.dispatch_key(&letter(c)).await.expect("dispatch a key");
+        }
+    })
+    .await;
+
+    assert!(signals > 0, "typing left the frame showing the old value");
+}
+
+#[tokio::test]
+async fn moving_the_insertion_point_signals_the_page_dirty() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+    page.eval("const el = document.querySelector('#typed'); el.value = 'hello'; el.focus();")
+        .await
+        .expect("set up the field");
+
+    let signals = signals_from(&h, || async {
+        page.dispatch_key(&arrow_left()).await.expect("dispatch an arrow");
+    })
+    .await;
+
+    assert!(signals > 0, "the caret would stay where it was until something else moved");
+}
+
+#[tokio::test]
+async fn focusing_a_field_signals_the_page_dirty() {
+    let h = harness().await;
+    let page = open(&h, "fields.html").await;
+
+    // Whether a control is focused decides whether it has a caret at all,
+    // and focus changes nothing else in the document.
+    let signals = signals_from(&h, || async {
+        page.eval("document.querySelector('#typed').focus()").await.expect("focus");
+    })
+    .await;
+
+    assert!(signals > 0, "a field clicked into would have no caret until it changed");
+}

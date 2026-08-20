@@ -294,18 +294,64 @@ styles already read.
 
 ### The caret
 
-`Extraction` carries `caret: Option<CssRect>`, a zero-width box on the line the
-insertion point is on, measured from the character beside `selectionStart`
-rather than from a collapsed range, which browsers treat inconsistently at the
-end of a line.
+`Extraction` carries `caret: Option<Caret>`: the left edge and baseline of the
+line the insertion point is on, plus **how many characters into that line** it
+sits.
 
-`Core` inverts that cell rather than overwriting it, so the character under the
-caret stays readable. It paints **only in insert mode**: a page can focus a
-field without being asked, and a caret in normal mode would promise that your
-typing lands there when it does not.
+Characters rather than pixels, because that is the unit the frame paints in.
+`Frame::paint_run` starts a run at the column containing its box's left edge and
+then advances one cell per character, whatever the font's real advance was: a
+13px proportional word painted into 9px cells is wider on screen than it is in
+the page. A caret placed by its CSS x therefore drifts left of the character it
+belongs beside, by more the further into the line it is — five characters in a
+default `input` font already put it two cells adrift, in the middle of the word
+you are typing. Counting characters is what painting does, so counting
+characters is what the caret does, and `caret.cell()` is `col_of(line.x) +
+offset`.
+
+The script attributes `selectionStart` to a line by taking the last line that
+starts at or before it, then clamps the offset into that line's painted text: a
+soft wrap leaves one offset belonging to two lines, and the browser puts the
+caret at the start of the second.
+
+`Core` turns that into a cell and hands it to the frame as
+`Frame::cursor`; the renderer puts the *terminal's own* cursor there, as a
+steady bar (DECSCUSR 6), and hides it when a frame carries none. A caret
+painted into a cell can only be a character wide, which reads as a selected
+character rather than as the gap between two of them, and it would have to
+overwrite or invert whatever it lands on. The terminal's cursor is the only
+thin line available and only the terminal can place it, so the frame carries
+the position and the renderer draws it. A terminal that does not understand
+DECSCUSR keeps its own cursor shape, which is still a cursor in the right cell.
+
+Because the cursor is terminal state rather than cell state, the diffing
+renderer emits it when cells changed (writing a cell moves the physical cursor)
+or when the caret itself moved. A frame identical to the last one, caret
+included, still costs nothing.
+
+It appears **only in insert mode**: a page can focus a field without being
+asked, and a caret in normal mode would promise that your typing lands there
+when it does not. `wwt` restores the terminal's default cursor shape on the way
+out.
 
 The caret does not blink. Blinking needs a timer, and an idle page must cost
 nothing.
+
+### Keeping the caret where the insertion point is
+
+Everything above measures state the `MutationObserver` cannot see, so nothing in
+the dirty-signal design as M2 left it would ever ask for it again. Typing and
+arrow keys mutate no DOM: the caret would sit where it was first painted until
+some unrelated change dirtied the page, and then teleport. `bootstrap.js`
+therefore signals dirtiness from `input`, `selectionchange`, `focusin` and
+`focusout` as well, debounced 16ms like scroll, because a caret that lags the
+keystroke that moved it is worse than no caret at all. Focus is on that list
+because it decides whether a control has an insertion point at all: a field you
+have just hinted into has changed nothing else about the document.
+
+None of the four fires during extraction: the mirror uses `Range`, which is not
+the document's selection, and it neither focuses nor types. The existing test
+that extraction produces no dirty signal covers this.
 
 Still uncovered: the caret in a `contenteditable`, which needs the Selection API
 rather than a mirror. Its *text* already renders, because that content is real

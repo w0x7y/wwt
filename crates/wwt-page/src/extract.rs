@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use wwt_cdp::{Client, Event};
-use wwt_frame::{CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
+use wwt_frame::{Caret, CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 use crate::input::{KeyInput, MouseAction, MouseInput};
@@ -39,9 +39,8 @@ struct RawExtraction {
 #[derive(Debug, Deserialize)]
 struct RawCaret {
     x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+    baseline: f64,
+    offset: usize,
 }
 
 /// One pass of the extraction script: everything the renderer and the
@@ -49,9 +48,8 @@ struct RawCaret {
 #[derive(Debug, Clone)]
 pub struct Extraction {
     pub runs: Vec<TextRun>,
-    /// Where typing would land, when a form control has focus. A zero-width
-    /// box on the line the insertion point sits on.
-    pub caret: Option<CssRect>,
+    /// Where typing would land, when a form control has focus.
+    pub caret: Option<Caret>,
     pub title: String,
     pub url: String,
     pub scroll_y: f64,
@@ -361,7 +359,9 @@ impl Page {
                     z: r.z,
                 })
                 .collect(),
-            caret: raw.caret.map(|c| CssRect { x: c.x, y: c.y, w: c.w, h: c.h }),
+            caret: raw
+                .caret
+                .map(|c| Caret { x: c.x, baseline: c.baseline, offset: c.offset }),
             title: raw.title,
             url: raw.url,
             scroll_y: raw.scroll_y,

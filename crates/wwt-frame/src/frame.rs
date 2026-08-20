@@ -15,6 +15,7 @@ const EDGE_EPSILON: f64 = 1e-6;
 pub struct Frame {
     grid: GridSize,
     cells: Vec<Cell>,
+    cursor: Option<CellPos>,
 }
 
 impl Frame {
@@ -23,11 +24,27 @@ impl Frame {
         Self {
             grid,
             cells: vec![Cell::default(); len],
+            cursor: None,
         }
     }
 
     pub fn grid(&self) -> GridSize {
         self.grid
+    }
+
+    /// Where the terminal's own cursor belongs, if anywhere.
+    ///
+    /// A frame carries this rather than painting it, because a caret drawn
+    /// into a cell can only be as wide as a cell: the terminal's cursor is
+    /// the only thin line available, and only the terminal can place it.
+    pub fn cursor(&self) -> Option<CellPos> {
+        self.cursor
+    }
+
+    /// Put the cursor on a cell, or take it off the screen with `None`. A
+    /// cell outside the grid is no cell at all.
+    pub fn set_cursor(&mut self, pos: Option<CellPos>) {
+        self.cursor = pos.filter(|&pos| self.index(pos).is_some());
     }
 
     fn index(&self, pos: CellPos) -> Option<usize> {
@@ -343,4 +360,23 @@ mod tests {
         f.paint_text(CellPos { col: 0, row: 0 }, "ab", Style::default());
         assert_eq!(f.row_text(0), "ab");
     }
+    #[test]
+    fn a_new_frame_has_no_cursor() {
+        assert_eq!(Frame::new(GridSize { cols: 20, rows: 5 }).cursor(), None);
+    }
+
+    #[test]
+    fn the_cursor_is_kept_where_it_was_put() {
+        let mut f = Frame::new(GridSize { cols: 20, rows: 5 });
+        f.set_cursor(Some(CellPos { col: 3, row: 2 }));
+        assert_eq!(f.cursor(), Some(CellPos { col: 3, row: 2 }));
+    }
+
+    #[test]
+    fn a_cursor_off_the_grid_is_no_cursor() {
+        let mut f = Frame::new(GridSize { cols: 20, rows: 5 });
+        f.set_cursor(Some(CellPos { col: 20, row: 0 }));
+        assert_eq!(f.cursor(), None, "there is nothing at column 20 to sit on");
+    }
+
 }
