@@ -107,14 +107,19 @@ impl Core {
                 }
             };
 
+            // Only what the session saw can have changed what it looks
+            // like. An arm that produced no event — a key release, a CDP
+            // message that was not our dirty signal, the first edge of a
+            // resize — left every field untouched, so composing again would
+            // build the same frame and diff it against itself. A page that
+            // chatters on the console would pay for a repaint per line.
             if let Some(event) = event {
                 let effects = self.session.on(event);
                 if self.apply(effects, out)? {
                     return Ok(());
                 }
+                self.present(out)?;
             }
-
-            self.present(out)?;
         }
     }
 

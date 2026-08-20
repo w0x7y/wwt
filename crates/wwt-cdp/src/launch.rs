@@ -62,6 +62,13 @@ impl Chromium {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-gpu")
+            // Headless still paces frame production at the display's rate,
+            // and a scroll is not visible to the page until the frame it
+            // lands on. That cap was two thirds of the latency between
+            // pressing `j` and having the text: 32ms to 21ms without it,
+            // and to 5ms once the scroll signal stopped trailing too. An
+            // idle page produces no frames, so it costs nothing to uncap.
+            .arg("--disable-frame-rate-limit")
             .arg("about:blank")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

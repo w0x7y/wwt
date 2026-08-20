@@ -198,6 +198,33 @@ fn scrolling_moves_the_page_and_changes_the_runs() {
 }
 
 #[test]
+fn a_text_node_taller_than_the_viewport_keeps_the_lines_on_screen() {
+    // Extraction culls a text node it can see is off screen rather than
+    // splitting it into lines first. One node several viewports tall is
+    // where that goes wrong if the question is asked about the wrong box:
+    // its visible lines are in its middle, so neither end is on screen.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "straddling.html").await;
+
+        page.eval("window.scrollTo(0, 1500)").await.expect("scroll");
+        await_scroll_past(&page, 0.0).await;
+
+        let runs = page.extract().await.expect("extract").runs;
+        assert!(
+            runs.len() > 15,
+            "a screenful of the middle of the node, not {} runs",
+            runs.len()
+        );
+        let first = &runs.first().expect("a run").text;
+        assert!(
+            !first.starts_with("w0 "),
+            "the head of the node is scrolled off, but the runs start at it: {first:?}"
+        );
+    });
+}
+
+#[test]
 fn scroll_to_end_reaches_the_bottom() {
     let h = harness();
     runtime().block_on(async {

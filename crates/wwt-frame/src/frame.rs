@@ -90,15 +90,17 @@ impl Frame {
             return;
         }
 
-        let chars: Vec<char> = run.text.chars().collect();
-        if chars.is_empty() {
+        // Counted rather than collected: this runs for every run of every
+        // frame, and a `Vec<char>` per run is an allocation per run.
+        let total = run.text.chars().count();
+        if total == 0 {
             return;
         }
 
         // Drop the leading characters that fall left of the grid, so a run
         // scrolled partly off-screen still shows its visible tail in place.
         let skip = if start_col < 0 { (-start_col) as usize } else { 0 };
-        if skip >= chars.len() {
+        if skip >= total {
             return;
         }
         let first_col = (start_col + skip as i64) as u16;
@@ -115,23 +117,17 @@ impl Frame {
             return;
         }
 
-        let visible = &chars[skip..];
-        let mut out: Vec<char> = Vec::with_capacity(budget);
-        if visible.len() <= budget {
-            out.extend_from_slice(visible);
-        } else if budget == 1 {
-            out.push('…');
-        } else {
-            out.extend_from_slice(&visible[..budget - 1]);
-            out.push('…');
-        }
+        // What does not fit gives up its last cell to the ellipsis, and a
+        // one-cell budget is all ellipsis.
+        let visible = total - skip;
+        let elided = visible > budget;
+        let taken = if elided { budget - 1 } else { visible };
+        let painted = run.text.chars().skip(skip).take(taken).chain(elided.then_some('…'));
 
-        for (i, ch) in out.into_iter().enumerate() {
-            let pos = CellPos {
-                col: first_col + i as u16,
-                row,
-            };
-            let Some(idx) = self.index(pos) else { break };
+        for (i, ch) in painted.enumerate() {
+            let Ok(offset) = u16::try_from(i) else { break };
+            let Some(col) = first_col.checked_add(offset) else { break };
+            let Some(idx) = self.index(CellPos { col, row }) else { break };
             // Painter's algorithm: a run may take a cell only from something
             // at or below its own stacking depth. Equal depth means the later
             // run wins, which matches paint order inside a stacking context.

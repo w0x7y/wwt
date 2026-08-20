@@ -9,10 +9,13 @@
 (() => {
   if (window.__wwt) return;
 
-  // Trailing debounces. Mutations are bursty and cheap to coalesce; scroll
-  // fires per frame and must not outrun a single extraction.
+  // Mutations are bursty and cheap to coalesce, so they trail: a window that
+  // starts over on every record turns a page building itself into one
+  // extraction rather than fifty.
   const MUTATION_DEBOUNCE_MS = 50;
-  const SCROLL_DEBOUNCE_MS = 16;
+  // Scroll leads instead, and the window only rate-limits what follows. See
+  // `throttle`.
+  const SCROLL_WINDOW_MS = 16;
   // Field state changes at typing speed, and a caret that lags behind the
   // keystroke that moved it is worse than no caret at all.
   const FIELD_DEBOUNCE_MS = 16;
@@ -39,8 +42,53 @@
     };
   }
 
+  // Run now, then at most once per window, and once more at the end of a
+  // window that something arrived during.
+  //
+  // Scrolling wants this and not a debounce, because a keypress produces
+  // exactly one scroll event: there is nothing to coalesce, and trailing
+  // meant waiting out the whole window before admitting the page had moved.
+  // That was sixteen of the twenty-two milliseconds between pressing `j` and
+  // having the new text. Leading costs the same number of extractions and
+  // arrives a frame sooner.
+  //
+  // The window still earns its place above the leading edge: a page that
+  // scrolls itself every frame would otherwise signal every frame. The
+  // window stays shut for as long as events keep arriving, so a fling is one
+  // signal per window and a last one when it stops.
+  //
+  // `schedule` is `setTimeout` in the browser and the test's own clock in
+  // `interaction.rs`, because a call pattern asserted against a real timer
+  // is a race.
+  function throttle(fn, ms, schedule) {
+    const wait = schedule || setTimeout;
+    let open = true;
+    let missed = false;
+
+    const expire = () => {
+      if (!missed) {
+        // Quiet: let the next event straight through.
+        open = true;
+        return;
+      }
+      missed = false;
+      fn();
+      wait(expire, ms);
+    };
+
+    return () => {
+      if (!open) {
+        missed = true;
+        return;
+      }
+      open = false;
+      fn();
+      wait(expire, ms);
+    };
+  }
+
   const onMutation = debounce(signal, MUTATION_DEBOUNCE_MS);
-  const onScroll = debounce(signal, SCROLL_DEBOUNCE_MS);
+  const onScroll = throttle(signal, SCROLL_WINDOW_MS);
   const onField = debounce(signal, FIELD_DEBOUNCE_MS);
 
   const OBSERVER_OPTIONS = {
@@ -94,6 +142,10 @@
   // baseline in the right cell row, and the one number that decides which row
   // any text lands on, so it is stated once.
   const DESCENDER = 0.21;
+
+  // Whether a string has anything in it worth painting. A regex rather than
+  // `trim()`, which allocates a copy of every text node in the document.
+  const NON_SPACE = /\S/;
 
   function baselineOf(bottom, fontSize) {
     return bottom - fontSize * DESCENDER;
@@ -171,14 +223,34 @@
     return lines;
   }
 
-  // Split a text node into one entry per line box.
-  function linesOf(range, node) {
-    const text = node.nodeValue;
+  // A text node's line boxes, in document order. One layout read, and the
+  // only thing about a node that can be known without measuring characters.
+  function boxesOf(range, node) {
     range.selectNodeContents(node);
-    const rects = Array.from(range.getClientRects()).filter(
-      (r) => r.width > 0 || r.height > 0
-    );
-    return splitLines(rects, text, (index, fallback) =>
+    return range.getClientRects();
+  }
+
+  // Whether any of those boxes reaches the viewport.
+  //
+  // Asked before a node is split, because splitting one costs a binary
+  // search per line it has and on a long page almost every node is off
+  // screen: a fifteen-hundred-paragraph document has a dozen nodes worth
+  // splitting. The list is walked in place rather than filtered into an
+  // array, since this runs for every text node in the document.
+  function reachesViewport(boxes, vw, vh) {
+    for (const r of boxes) {
+      if ((r.width > 0 || r.height > 0) && onScreen(r, vw, vh)) return true;
+    }
+    return false;
+  }
+
+  // Split a text node into one entry per line box.
+  //
+  // The boxes are the caller's, because the caller has already asked for
+  // them to decide whether this node was worth splitting at all.
+  function linesOf(range, node, boxes) {
+    const rects = Array.from(boxes).filter((r) => r.width > 0 || r.height > 0);
+    return splitLines(rects, node.nodeValue, (index, fallback) =>
       topAt(range, node, index, fallback)
     );
   }
@@ -197,26 +269,32 @@
     const range = document.createRange();
     let node;
 
+    // Cheapest question first, all the way down: a string test, then a tag
+    // name, then one layout read, and only then the style and the character
+    // measuring that the surviving handful of nodes are worth.
     while ((node = walker.nextNode())) {
       const text = node.nodeValue;
-      if (!text || !text.trim()) continue;
+      if (!text || !NON_SPACE.test(text)) continue;
 
       const parent = node.parentElement;
       if (!parent) continue;
+      if (parent.tagName === "SCRIPT" || parent.tagName === "STYLE") continue;
+
+      const boxes = boxesOf(range, node);
+      if (!reachesViewport(boxes, vw, vh)) continue;
 
       const cs = window.getComputedStyle(parent);
       if (!isVisible(cs)) continue;
-      if (parent.tagName === "SCRIPT" || parent.tagName === "STYLE") continue;
 
       const fontSize = parseFloat(cs.fontSize) || 16;
       const weight = parseInt(cs.fontWeight, 10) || 400;
 
-      for (const line of linesOf(range, node)) {
+      for (const line of linesOf(range, node, boxes)) {
         const content = line.text.replace(/\s+/g, " ").trim();
         if (!content) continue;
 
         const r = line.rect;
-        // Cull runs entirely outside the viewport.
+        // A node that reaches the viewport still has lines that do not.
         if (!onScreen(r, vw, vh)) continue;
 
         runs.push({
@@ -353,7 +431,7 @@
       const scrollTop = el.scrollTop;
       const lines = [];
 
-      for (const line of linesOf(range, node)) {
+      for (const line of linesOf(range, node, boxesOf(range, node))) {
         let text = line.text;
         let x = line.rect.left - origin.left;
         let cut = line.start;
@@ -429,12 +507,15 @@
     let caret = null;
 
     for (const el of document.querySelectorAll("input, textarea, select")) {
-      const cs = window.getComputedStyle(el);
-      if (!isVisible(cs)) continue;
-
+      // The box before the style, as in the text walk: a control off screen
+      // is the common case on a long form, and a `display: none` one has no
+      // box at all, so the cheap question answers most of them.
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) continue;
       if (!onScreen(r, vw, vh)) continue;
+
+      const cs = window.getComputedStyle(el);
+      if (!isVisible(cs)) continue;
 
       const shown = fieldText(el);
       const focused =
@@ -563,12 +644,12 @@
     for (const el of document.querySelectorAll(HINT_SELECTOR)) {
       if (el.disabled) continue;
 
-      const cs = window.getComputedStyle(el);
-      if (!isVisible(cs)) continue;
-
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) continue;
       if (!onScreen(r, vw, vh)) continue;
+
+      const cs = window.getComputedStyle(el);
+      if (!isVisible(cs)) continue;
 
       // The point a click would land on. If something else is on top of it,
       // a label here would lie about what pressing it does.
@@ -596,5 +677,9 @@
   // invisible from a rendered frame: an offset that is two too far still
   // looks like a caret in roughly the right place. Reaching them needs no
   // page, only data, so their tests cost data.
-  window.__wwt = { extract, hints, __pure: { firstWhere, splitLines, caretIn } };
+  window.__wwt = {
+    extract,
+    hints,
+    __pure: { firstWhere, splitLines, caretIn, throttle },
+  };
 })()

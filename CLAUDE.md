@@ -8,13 +8,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 a hand-rolled CDP client, with its layout painted into the terminal cell grid.
 Chromium does layout and JavaScript; this codebase never reimplements either.
 
+The goal is to be a first alternative to qutebrowser rather than a text-mode
+curiosity, so **latency is a feature, not a finishing touch**. Read the performance
+section below before touching the extraction path, which is what a scroll costs.
+
 Currently at **M3** (interaction). Milestones M1–M7 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 222 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 233 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -202,6 +206,71 @@ only if the mode is still normal. A round trip is long enough to have typed
 half a `:` command, and labels must not land on top of it. `Job::Hints` carries
 a `Result` rather than splitting into two variants, so there is one place that
 can forget to note the query is over.
+
+## Performance
+
+The goal above is a latency goal, and the numbers that back it are in the tests
+rather than in anybody's head:
+
+    cargo test -p wwt-page --test extraction measure_extraction -- --nocapture
+    cargo test -p wwt-page --test interaction measure_hints -- --nocapture
+
+    cargo test -p wwt-page --test interaction measure_scroll_latency -- --nocapture
+
+`heavy.html` is fifteen hundred paragraphs of which a dozen are on screen. Extracting
+it costs ~4ms, and cost 18ms until the walk learned to stop measuring what nobody can
+see. A scroll keystroke reaches new text in ~5ms, and took 36ms. The rules that keep
+them there:
+
+- **Ask the cheap question first.** Every pass over the document orders its tests by
+  what they cost: a string test, then a tag name, then one layout read, and only then
+  `getComputedStyle` and the character measuring. The text walk, `fieldRuns` and
+  `hints` all do this, and all three would be equally correct in any order, only
+  slower.
+- **Cull a node before splitting it.** `reachesViewport` answers from the line boxes
+  alone. Splitting a node costs a binary search per line it has, so splitting one
+  nobody can see is the whole difference between 4ms and 18ms. The question is asked
+  per *node* and never per line: a text node taller than the viewport has its visible
+  lines in the middle of it, and
+  `a_text_node_taller_than_the_viewport_keeps_the_lines_on_screen` is what holds that
+  down.
+- **The mirror measures everything.** `measureField` passes its own boxes and no
+  viewport, because its lines are laid out off screen on purpose.
+- **Nothing repaints without an event.** `Core::run` composes only when a `select!`
+  arm produced an `Event`. An arm that produced none left the session untouched, so
+  the frame would be identical; without this a page chattering on the console costs a
+  full repaint per line it logs.
+- **Output is buffered.** `stdout()` is a `LineWriter`, so the `\r\n` a full repaint
+  puts between rows is a write syscall per row. `main` wraps it, which is forty
+  syscalls a frame down to three.
+- **Scroll leads, mutations trail.** `throttle` signals on the first scroll event and
+  rate-limits what follows; `debounce` waits out the burst. A keypress produces
+  exactly one scroll event, so trailing it coalesced nothing and cost 16ms. Mutations
+  are genuinely bursty and still trail. Do not unify these two.
+- **The frame rate is uncapped.** `--disable-frame-rate-limit`, because headless
+  otherwise paces frames at the display's rate and a scroll is not visible to the
+  page until the frame it lands on. It was two thirds of the scroll latency. An idle
+  page produces no frames, so this costs nothing at idle, and that was measured. It
+  is worth re-measuring when M5 puts `Page.startScreencast` on the same viewport,
+  since an uncapped compositor is free only while nobody is asking it for frames.
+- **Nothing deep-copies a payload.** An extraction is every run on screen;
+  `Client::send` and `Page::js` take their `Value` rather than clone it, or the whole
+  of it is copied twice on the way to the caller.
+
+The frame pipeline is not where the time goes and is not worth tuning: composing 300
+runs into a 120x40 grid and diffing it against the last one is ~40µs against a ~4ms
+extraction. Spend the effort on the page side.
+
+Neither the frame cap nor the scroll window shows up if you change one and measure:
+each hides the other, and changing only one moves the median not at all. Measure the
+grid, not the diagonal.
+
+Two things that look like easy wins and are not. Disabling images
+(`--blink-settings=imagesEnabled=false`) would save every decode, but pixel mode is
+`Page.startScreencast` over this same viewport (spec section 3), so it would cost M5
+its reason to exist. And headless does not throttle our timers: the page reports
+`visibilityState: "visible"` and a 16ms `setTimeout` fires at 16.1ms, so the usual
+`--disable-background-timer-throttling` family of flags buys nothing here.
 
 ## Working in this repo
 

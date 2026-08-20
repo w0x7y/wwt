@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Straddling Fixture</title>
+<style>body { margin: 0; font: 16px/20px monospace; width: 720px; }</style>
+<p id="p"></p>
+<script>
+  // One text node several viewports tall, so the lines on screen sit in the
+  // middle of it rather than at either end. A cull that asks whether a node
+  // is on screen must answer yes for this one.
+  const words = [];
+  for (let i = 0; i < 2000; i++) words.push("w" + i);
+  document.getElementById("p").textContent = words.join(" ");
+</script>

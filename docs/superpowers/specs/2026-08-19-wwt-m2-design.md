@@ -132,6 +132,11 @@ text node yields its line boxes directly, and a binary search over character off
 finds where the text splits between them. `O(lines · log chars)` forced layouts
 instead of `O(chars)`.
 
+That bound is per node, and a long document is almost entirely nodes nobody can see,
+so the walk asks each node's line boxes whether any of them reaches the viewport
+before it splits anything. The document costs one layout read per text node; only the
+handful on screen cost a search.
+
 This is a distinct step with a before-and-after measurement on a heavy page, not a
 change folded into another task. If it does not measurably help, it does not land.
 
@@ -174,6 +179,23 @@ reason the parent spec chose this over `window.scrollBy`.
 page scrolls, the scroll listener fires the binding, extraction runs, the renderer
 diffs, and changed cells paint. Nothing appears on screen until it reflects the
 page's real state.
+
+Waiting for the truth is not the same as waiting longer than the truth takes, and
+measuring the pipeline hop by hop found most of it was neither Chromium's work nor
+ours. Two things were paying for nothing:
+
+- **Headless paces frame production at the display's rate**, and a scroll is not
+  visible to the page until the frame it lands on. `--disable-frame-rate-limit`
+  removes that cap. An idle page produces no frames, so it costs nothing to idle
+  CPU, which was measured rather than assumed.
+- **The scroll signal trailed.** One keypress produces exactly one scroll event, so
+  a trailing window coalesced nothing and delayed everything. It leads now, and the
+  window rate-limits only what follows it, which is what a page that scrolls itself
+  every frame needs.
+
+Together: 36ms to 5ms from wheel dispatch to new runs in hand, on the heavy fixture.
+Neither change alone gets there, because the frame cap hides the window and the
+window hides the frame cap. `measure_scroll_latency` keeps the number honest.
 
 The alternative — shifting the frame locally and correcting when the extraction
 lands — was rejected. It creates two sources of truth for the same pixels, blanks the

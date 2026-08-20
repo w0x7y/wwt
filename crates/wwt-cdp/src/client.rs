@@ -111,7 +111,7 @@ impl Client {
             .send(msg.to_string())
             .map_err(|_| anyhow!("the CDP connection is closed"))?;
 
-        let response = match timeout(CALL_TIMEOUT, rx).await {
+        let mut response = match timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(v)) => v,
             Ok(Err(_)) => {
                 return Err(anyhow!("the CDP connection closed while awaiting {method}"));
@@ -128,9 +128,12 @@ impl Client {
             return Err(anyhow!("{method} failed: {message} {data}").context(method.to_string()));
         }
 
+        // Taken rather than cloned: an extraction's result is every run on
+        // screen, and this is the first of two places that used to deep-copy
+        // the whole of it on the way to the caller.
         Ok(response
-            .get("result")
-            .cloned()
+            .get_mut("result")
+            .map(Value::take)
             .unwrap_or_else(|| json!({})))
     }
 }

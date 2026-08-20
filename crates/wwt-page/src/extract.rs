@@ -388,7 +388,7 @@ impl Page {
     /// once, in one round trip. The two callers here are commands this crate
     /// issues rather than reads it performs.
     async fn js(&self, expression: &str) -> Result<serde_json::Value> {
-        let result = self
+        let mut result = self
             .client
             .call_on(
                 &self.session_id,
@@ -401,7 +401,7 @@ impl Page {
         if let Some(details) = result.get("exceptionDetails") {
             bail!("{expression} threw: {details}");
         }
-        Ok(result["result"]["value"].clone())
+        Ok(result["result"]["value"].take())
     }
 
     /// Send one input to the page.

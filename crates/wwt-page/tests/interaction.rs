@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Harness, harness, open, runtime};
+use common::{Harness, harness, open, runtime, viewport};
 use tokio::sync::mpsc;
 use wwt_cdp::Event;
 use wwt_frame::{CssPoint, TargetKind};
@@ -585,6 +585,132 @@ where
     drain(&mut events).await;
     act().await;
     count_signals(&mut events, page).await
+}
+
+/// Drive the scroll throttle with a clock the test owns.
+///
+/// `signal()` is one scroll event and `fire()` is the window expiring, so
+/// the call pattern below is a fact rather than a race. The throttle is the
+/// one piece of this script whose mistakes are invisible from a frame: too
+/// eager only looks like extra work, and too lazy only looks like lag.
+async fn throttle_log(page: &Page, actions: &str) -> Vec<String> {
+    let script = format!(
+        r#"(() => {{
+            const log = [];
+            let due = null;
+            const schedule = (fn) => {{ due = fn; }};
+            const fire = () => {{ const f = due; due = null; if (f) f(); }};
+            const signal = window.__wwt.__pure.throttle(
+                () => log.push("out"), 16, schedule
+            );
+            {actions}
+            return JSON.stringify(log);
+        }})()"#
+    );
+    let raw = page.eval(&script).await.expect("drive the throttle");
+    serde_json::from_str(raw.as_str().expect("a JSON string")).expect("a log")
+}
+
+#[test]
+fn one_scroll_signals_at_once_and_never_again() {
+    // The whole point of the leading edge. A keypress produces exactly one
+    // scroll event, so waiting out a window before saying so was sixteen
+    // milliseconds of latency buying nothing.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "simple.html").await;
+
+        assert_eq!(
+            throttle_log(&page, "signal();").await,
+            ["out"],
+            "the first event goes out without waiting for anything"
+        );
+        assert_eq!(
+            throttle_log(&page, "signal(); fire();").await,
+            ["out"],
+            "nothing arrived during the window, so there is nothing to say at the end of it"
+        );
+    });
+}
+
+#[test]
+fn a_burst_of_scrolls_is_coalesced_into_one_more_signal() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "simple.html").await;
+
+        assert_eq!(
+            throttle_log(&page, "signal(); signal(); fire();").await,
+            ["out", "out"],
+            "the second event waits out the window rather than being lost"
+        );
+        assert_eq!(
+            throttle_log(&page, "signal(); signal(); signal(); signal(); fire();").await,
+            ["out", "out"],
+            "three events during one window are one signal, not three"
+        );
+    });
+}
+
+#[test]
+fn a_scroll_that_keeps_going_signals_once_per_window() {
+    // A page still scrolling when the window expires must not be allowed to
+    // reopen the leading edge, or a fling would signal per frame.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "simple.html").await;
+
+        assert_eq!(
+            throttle_log(&page, "signal(); signal(); fire(); signal(); fire(); fire();").await,
+            ["out", "out", "out"],
+            "one per window while it keeps arriving, and one last one when it stops"
+        );
+    });
+}
+
+#[test]
+fn a_scroll_after_the_page_settles_signals_at_once_again() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "simple.html").await;
+
+        assert_eq!(
+            throttle_log(&page, "signal(); fire(); signal();").await,
+            ["out", "out"],
+            "a quiet window leaves the next scroll to go out immediately"
+        );
+    });
+}
+
+#[test]
+fn measure_scroll_latency() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "heavy.html").await;
+        page.extract().await.expect("warm");
+
+        let mut events = h.client.subscribe();
+        drain(&mut events).await;
+
+        let start = Instant::now();
+        page.scroll_by(20.0, viewport()).await.expect("scroll");
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("the page should say it scrolled")
+                .expect("the connection stays open");
+            if page.is_dirty(&event) {
+                break;
+            }
+        }
+        let signalled = start.elapsed();
+        let runs = page.extract().await.expect("extract").runs.len();
+        let total = start.elapsed();
+
+        println!(
+            "heavy.html: wheel to dirty signal {signalled:?}, {runs} new runs in hand {total:?}"
+        );
+    });
 }
 
 fn arrow_left() -> KeyInput {

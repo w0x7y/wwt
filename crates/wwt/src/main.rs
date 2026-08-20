@@ -1,4 +1,4 @@
-use std::io::{Write, stdout};
+use std::io::{BufWriter, Write, stdout};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +12,10 @@ use wwt_page::Page;
 use wwt_ui::command::normalize_url;
 
 use wwt::core::Core;
+
+/// Room for a frame of a large terminal without the buffer filling mid-paint.
+/// Overrunning it is only an extra syscall, never a wrong frame.
+const FRAME_BUFFER: usize = 256 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,7 +48,10 @@ async fn main() -> Result<()> {
     if !mouse {
         core.notice("mouse unavailable");
     }
-    let mut out = stdout();
+    // `stdout()` is a `LineWriter`, so a full repaint's `\r\n` between rows
+    // costs a write syscall each: forty on a forty-row terminal, for one
+    // frame. Buffered, the same frame is three.
+    let mut out = BufWriter::with_capacity(FRAME_BUFFER, stdout());
     let result = core.run(&mut out).await;
     let _ = out.flush();
 
