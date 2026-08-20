@@ -4,6 +4,7 @@ pub mod core;
 pub mod input;
 pub mod keys;
 pub mod keymap;
+pub mod session;
 
 use std::sync::Arc;
 

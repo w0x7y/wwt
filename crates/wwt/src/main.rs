@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
             .await
             .context("connect to chromium")?,
     );
-    let vp = wwt::core::page_viewport(grid, cell);
+    let vp = wwt::session::page_viewport(grid, cell);
     let page = Arc::new(Page::open(Arc::clone(&client), &url, vp).await?);
 
     enable_raw_mode()?;

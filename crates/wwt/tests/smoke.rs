@@ -1,4 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use wwt::input::Input;
+use wwt::session::{Effect, Event, Navigation, Session};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_ui::Mode;
 
@@ -44,67 +46,62 @@ async fn text_lands_in_the_top_left_of_an_unstyled_page() {
 }
 
 /// Drive the modal flow without a browser or a terminal: `:` opens the
-/// command line, typing fills it, and what it holds parses to a navigation.
+/// command line, typing fills it, and Enter turns it into a navigation the
+/// loop would perform. The session is the thing under test, not a
+/// hand-rolled imitation of it.
 #[test]
 fn the_command_line_opens_fills_and_closes() {
-    // The keymap decides that `:` opens an empty command line.
-    let vp = wwt_frame::Viewport::new(
-        wwt_frame::GridSize { cols: 80, rows: 24 },
-        wwt_frame::CellSize { w: 9, h: 20 },
-    );
-    let action = wwt::keymap::action_for(
-        KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
-        vp,
-    );
-    let Some(wwt::keymap::Action::EnterCommand(prefill)) = action else {
-        panic!("`:` should open the command line, got {action:?}");
-    };
-    let mut mode = Mode::Command(prefill);
+    let mut session = Session::new(GridSize { cols: 40, rows: 3 }, CellSize { w: 9, h: 20 });
+    session.begin();
 
-    // Typing accumulates, and the chrome row shows it.
-    if let Mode::Command(buffer) = &mut mode {
-        for c in "open example.com".chars() {
-            buffer.push(c);
-        }
-    }
-    let mut frame = wwt_frame::Frame::new(wwt_frame::GridSize { cols: 40, rows: 3 });
-    wwt_ui::chrome::paint(&mut frame, &mode, &wwt_ui::chrome::State::Ready, "", "", 0.0);
+    type_into(&mut session, ":open example.com");
+    assert!(matches!(session.mode(), Mode::Command(buffer) if buffer == "open example.com"));
+
+    // The chrome row shows what has been typed, caret and all.
+    let frame = session.compose();
     assert!(
         frame.row_text(2).starts_with(":open example.com"),
         "row 2 was {:?}",
         frame.row_text(2)
     );
 
-    // And the command it holds parses to the navigation we expect.
-    if let Mode::Command(buffer) = &mode {
-        assert_eq!(
-            wwt_ui::command::parse(buffer),
-            Ok(wwt_ui::command::Command::Open("https://example.com".to_string()))
-        );
-    }
+    let effects = session.on(Event::Key(code(KeyCode::Enter)));
+    assert_eq!(
+        effects,
+        vec![Effect::Navigate(Navigation::Open("https://example.com".to_string()))]
+    );
+    assert_eq!(session.mode(), &Mode::Normal, "Enter closes the line it ran");
 }
 
 /// The same physical key means two different things depending on the mode,
 /// which is the whole point of having modes. Normal mode's `q` quits; insert
-/// mode's `q` is a letter.
+/// mode's `q` is a letter on its way to the page.
 #[test]
 fn a_letter_is_a_command_in_normal_mode_and_a_keystroke_in_insert_mode() {
-    let vp = wwt_frame::Viewport::new(
-        wwt_frame::GridSize { cols: 80, rows: 24 },
-        wwt_frame::CellSize { w: 9, h: 20 },
-    );
-    let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+    let mut normal = Session::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+    assert_eq!(normal.on(Event::Key(key('q'))), vec![Effect::Quit]);
 
-    assert_eq!(wwt::keymap::action_for(q, vp), Some(wwt::keymap::Action::Quit));
-    assert_eq!(
-        wwt::keys::describe(q).expect("q is a key we can send").text,
-        "q"
-    );
+    let mut insert = Session::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
+    insert.on(Event::Key(key('i')));
+    assert_eq!(insert.mode(), &Mode::Insert, "`i` is what makes q a letter");
 
-    let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
-    assert_eq!(
-        wwt::keymap::action_for(i, vp),
-        Some(wwt::keymap::Action::Insert),
-        "`i` is what puts you in the mode where q is a letter"
-    );
+    let effects = insert.on(Event::Key(key('q')));
+    let [Effect::Send(Input::Key(sent))] = effects.as_slice() else {
+        panic!("insert mode should send the key, got {effects:?}");
+    };
+    assert_eq!(sent.text, "q");
+}
+
+fn key(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+fn code(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn type_into(session: &mut Session, text: &str) {
+    for c in text.chars() {
+        session.on(Event::Key(key(c)));
+    }
 }

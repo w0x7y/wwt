@@ -12,8 +12,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use wwt_page::{KeyInput, MouseInput, Page};
 
+use crate::session::Job;
+
 /// One thing to send to the page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     Key(KeyInput),
     Mouse(MouseInput),
@@ -27,9 +29,11 @@ pub struct InputPump {
 impl InputPump {
     /// Start the pump for a page.
     ///
-    /// Failures are reported on `errors` rather than returned: by the time a
-    /// keystroke fails, whoever typed it has typed three more.
-    pub fn spawn(page: Arc<Page>, errors: mpsc::UnboundedSender<String>) -> Self {
+    /// Failures are reported as a `Job` rather than returned: by the time a
+    /// keystroke fails, whoever typed it has typed three more. They go on
+    /// the channel every other finished page operation goes on, so the loop
+    /// has one thing to select on rather than two.
+    pub fn spawn(page: Arc<Page>, jobs: mpsc::UnboundedSender<Job>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
 
         tokio::spawn(async move {
@@ -39,7 +43,7 @@ impl InputPump {
                     Input::Mouse(mouse) => page.dispatch_mouse(mouse).await,
                 };
                 if let Err(error) = result {
-                    let _ = errors.send(error.to_string());
+                    let _ = jobs.send(Job::InputFailed(error.to_string()));
                 }
             }
         });
