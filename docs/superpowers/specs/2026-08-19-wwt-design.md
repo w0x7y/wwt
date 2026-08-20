@@ -23,6 +23,7 @@ position, focus, and link hints exactly.
 - Forms and text input that work in real web apps
 - Vim-style link hinting
 - Idle pages cost approximately zero CPU
+- Best preformence possible
 
 ### Non-goals
 
