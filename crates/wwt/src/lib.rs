@@ -25,8 +25,6 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
 
     let extraction = page.extract().await?;
     let mut frame = Frame::new(vp.grid());
-    for run in &extraction.runs {
-        frame.paint_run(&vp, run);
-    }
+    frame.paint_runs(&vp, &extraction.runs);
     Ok(frame)
 }

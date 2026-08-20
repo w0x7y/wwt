@@ -102,14 +102,23 @@ pub fn paint(
     progress: f64,
 ) {
     let GridSize { cols, rows } = frame.grid();
-    if rows == 0 {
+    if rows == 0 || cols == 0 {
         return;
     }
+    let row = rows - 1;
     let text = match mode {
-        Mode::Command(buffer) => command_line(buffer, cols),
+        Mode::Command(buffer) => {
+            // The `:` line is a field you are typing into, so it gets the
+            // same caret an insert-mode field gets. Past the right edge it
+            // stops at the last column, beside the last character the
+            // truncated line actually shows.
+            let typed = u16::try_from(buffer.chars().count()).unwrap_or(u16::MAX);
+            frame.set_cursor(Some(CellPos { col: typed.saturating_add(1).min(cols - 1), row }));
+            command_line(buffer, cols)
+        }
         _ => statusline(mode, state, url, title, progress, cols),
     };
-    frame.paint_text(CellPos { col: 0, row: rows - 1 }, &text, chrome_style());
+    frame.paint_text(CellPos { col: 0, row }, &text, chrome_style());
 }
 
 #[cfg(test)]
@@ -219,4 +228,26 @@ mod tests {
         assert!(!line.contains("error"), "line was {line:?}");
     }
 
+    #[test]
+    fn the_command_line_puts_the_cursor_after_what_you_typed() {
+        let mut frame = Frame::new(GridSize { cols: 40, rows: 5 });
+        paint(&mut frame, &Mode::Command("open ex".to_string()), &State::Ready, "", "", 0.0);
+        // Column 0 is the `:` itself, so seven typed characters put the
+        // cursor on column 8.
+        assert_eq!(frame.cursor(), Some(CellPos { col: 8, row: 4 }));
+    }
+
+    #[test]
+    fn an_overlong_command_keeps_its_cursor_on_screen() {
+        let mut frame = Frame::new(GridSize { cols: 10, rows: 3 });
+        paint(&mut frame, &Mode::Command("x".repeat(50)), &State::Ready, "", "", 0.0);
+        assert_eq!(frame.cursor(), Some(CellPos { col: 9, row: 2 }));
+    }
+
+    #[test]
+    fn the_statusline_leaves_the_cursor_alone() {
+        let mut frame = Frame::new(GridSize { cols: 40, rows: 5 });
+        paint(&mut frame, &Mode::Normal, &State::Ready, "https://example.com", "", 0.0);
+        assert_eq!(frame.cursor(), None, "nothing on the statusline is being typed into");
+    }
 }

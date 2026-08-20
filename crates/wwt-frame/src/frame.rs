@@ -58,6 +58,16 @@ impl Frame {
         self.index(pos).map(|i| &self.cells[i])
     }
 
+    /// Paint a page's runs into the grid.
+    ///
+    /// Every mode that shows a page reaches the screen through here, so
+    /// there is one place that knows how a list of runs becomes cells.
+    pub fn paint_runs(&mut self, vp: &Viewport, runs: &[TextRun]) {
+        for run in runs {
+            self.paint_run(vp, run);
+        }
+    }
+
     /// Paint one text run into the grid.
     ///
     /// The run occupies the row containing its baseline, starting at the
@@ -379,4 +389,19 @@ mod tests {
         assert_eq!(f.cursor(), None, "there is nothing at column 20 to sit on");
     }
 
+    #[test]
+    fn painting_a_list_of_runs_matches_painting_them_one_by_one() {
+        let vp = Viewport::new(GridSize { cols: 20, rows: 5 }, CellSize { w: 10, h: 20 });
+        let runs = vec![run("ab", 0.0, 16.0, 20.0), run("cd", 0.0, 36.0, 20.0)];
+
+        let mut one = Frame::new(vp.grid());
+        for r in &runs {
+            one.paint_run(&vp, r);
+        }
+        let mut many = Frame::new(vp.grid());
+        many.paint_runs(&vp, &runs);
+
+        let rows = |f: &Frame| (0..5).map(|r| f.row_text(r)).collect::<Vec<_>>();
+        assert_eq!(rows(&one), rows(&many));
+    }
 }
