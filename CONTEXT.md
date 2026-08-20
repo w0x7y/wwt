@@ -28,7 +28,9 @@ nothing.
 **Hint target** — one interactive box the page reported, with its rect and
 whether activating it is a click or the beginning of typing. Queried on `f`
 and cached until the next dirty signal, deliberately *not* part of
-extraction. `wwt_frame::HintTarget`.
+extraction. The query is the one effect whose answer changes the mode, so the
+session knows while it is away: a second `f` asks nothing, and a late answer
+opens hint mode only if the mode is still normal. `wwt_frame::HintTarget`.
 
 **Caret** — where typing would land: a line's left edge, that line's
 baseline, and a count of characters into it. Never a pixel position, because
@@ -86,9 +88,13 @@ back in as an event.
 **Core** — the adapter. Turns tokio into events and effects into spawns, and
 decides nothing. `wwt::core::Core`.
 
-**Input pump** — the one task that delivers keys and clicks in order.
-Everything else about a page is idempotent or self-cancelling and is allowed
-to race; three keys as three tasks would sometimes type `acb`.
+**Input** — one key or one click, as a thing to send. The vocabulary, so it
+lives beside the shapes it wraps in `wwt_page`, not beside the pump.
+`wwt_page::Input`.
+
+**Input pump** — the one task that delivers them in order. Everything else
+about a page is idempotent or self-cancelling and is allowed to race; three
+keys as three tasks would sometimes type `acb`.
 
 ## The browser we drive
 

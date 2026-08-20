@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use wwt::input::Input;
-use wwt::session::{Effect, Event, Navigation, Session};
+use wwt::effect::{Effect, Navigation};
+use wwt::event::Event;
+use wwt::session::Session;
 use wwt_frame::{CellSize, GridSize, Viewport};
+use wwt_page::Input;
 use wwt_ui::Mode;
 
 fn fixture_url(name: &str) -> String {

@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Harness, harness, is_dirty, open, runtime};
+use common::{Harness, harness, open, runtime};
 use tokio::sync::mpsc;
 use wwt_cdp::Event;
 use wwt_frame::{CssPoint, TargetKind};
@@ -565,7 +565,7 @@ async fn count_signals(events: &mut mpsc::UnboundedReceiver<Event>, page: &Page)
     let mut signals = 0;
     tokio::time::sleep(QUIET).await;
     while let Ok(event) = events.try_recv() {
-        if is_dirty(&event, page) {
+        if page.is_dirty(&event) {
             signals += 1;
         }
     }

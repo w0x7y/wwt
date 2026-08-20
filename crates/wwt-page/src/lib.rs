@@ -3,4 +3,4 @@ pub mod extract;
 pub mod input;
 
 pub use extract::{DIRTY_BINDING, Extraction, Page};
-pub use input::{KeyInput, MouseAction, MouseInput};
+pub use input::{Input, KeyInput, MouseAction, MouseInput};

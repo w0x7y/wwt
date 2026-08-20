@@ -44,12 +44,6 @@ pub enum Action {
 
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
-    /// Forward an Escape to the page.
-    ///
-    /// A terminal transmits `Ctrl-[` as 0x1B, which *is* Escape, so the two
-    /// are one keystroke on the wire and `Esc` has to stay ours. The page's
-    /// Escape lives on `Ctrl-]`, which is 0x1D.
-    SendEscape,
 }
 
 /// The distance one `space` moves: a screenful, less two rows kept for
@@ -130,8 +124,11 @@ fn insert(key: KeyEvent) -> Option<Action> {
         // Never forwarded. A page cannot trap the keyboard, which is what
         // makes handing it over safe.
         KeyCode::Esc => Some(Action::Leave),
+        // A terminal transmits `Ctrl-[` as 0x1B, which *is* Escape, so the
+        // two are one keystroke on the wire and `Esc` has to stay ours. The
+        // page's Escape lives on `Ctrl-]`, which is 0x1D.
         KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::SendEscape)
+            Some(Action::Send(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
         }
         _ => Some(Action::Send(key)),
     }
@@ -295,7 +292,6 @@ mod tests {
     fn escape_is_never_forwarded_from_any_mode() {
         for mode in [normal_mode(), command_mode(), hint_mode(), Mode::Insert] {
             let action = action_for(&mode, code(KeyCode::Esc), vp());
-            assert_ne!(action, Some(Action::SendEscape), "in {mode:?}");
             assert!(
                 !matches!(action, Some(Action::Send(_))),
                 "Esc reached the page from {mode:?}"
@@ -306,6 +302,9 @@ mod tests {
 
     #[test]
     fn ctrl_bracket_is_how_the_page_hears_an_escape() {
-        assert_eq!(action_for(&Mode::Insert, ctrl(']'), vp()), Some(Action::SendEscape));
+        assert_eq!(
+            action_for(&Mode::Insert, ctrl(']'), vp()),
+            Some(Action::Send(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+        );
     }
 }

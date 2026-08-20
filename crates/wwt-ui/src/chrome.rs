@@ -74,6 +74,23 @@ pub fn statusline(
     format!("{}{}{}", fit(&left, room), " ", percent)
 }
 
+/// Where the cursor belongs on the `:` line.
+///
+/// The `:` line is a field you are typing into, so it gets the same caret an
+/// insert-mode field gets. Past the right edge it stops at the last column,
+/// beside the last character the truncated line actually shows.
+///
+/// Reported rather than placed: the chrome paints cells, and one caller
+/// decides where the one cursor goes.
+pub fn command_caret(buffer: &str, grid: GridSize) -> Option<CellPos> {
+    let GridSize { cols, rows } = grid;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let typed = u16::try_from(buffer.chars().count()).unwrap_or(u16::MAX);
+    Some(CellPos { col: typed.saturating_add(1).min(cols - 1), row: rows - 1 })
+}
+
 /// The `:` line, padded or truncated to exactly `cols` characters.
 pub fn command_line(buffer: &str, cols: u16) -> String {
     fit(&format!(":{buffer}"), usize::from(cols))
@@ -107,15 +124,7 @@ pub fn paint(
     }
     let row = rows - 1;
     let text = match mode {
-        Mode::Command(buffer) => {
-            // The `:` line is a field you are typing into, so it gets the
-            // same caret an insert-mode field gets. Past the right edge it
-            // stops at the last column, beside the last character the
-            // truncated line actually shows.
-            let typed = u16::try_from(buffer.chars().count()).unwrap_or(u16::MAX);
-            frame.set_cursor(Some(CellPos { col: typed.saturating_add(1).min(cols - 1), row }));
-            command_line(buffer, cols)
-        }
+        Mode::Command(buffer) => command_line(buffer, cols),
         _ => statusline(mode, state, url, title, progress, cols),
     };
     frame.paint_text(CellPos { col: 0, row }, &text, chrome_style());
@@ -230,24 +239,34 @@ mod tests {
 
     #[test]
     fn the_command_line_puts_the_cursor_after_what_you_typed() {
-        let mut frame = Frame::new(GridSize { cols: 40, rows: 5 });
-        paint(&mut frame, &Mode::Command("open ex".to_string()), &State::Ready, "", "", 0.0);
         // Column 0 is the `:` itself, so seven typed characters put the
-        // cursor on column 8.
-        assert_eq!(frame.cursor(), Some(CellPos { col: 8, row: 4 }));
+        // cursor on column 8, on the row the chrome owns.
+        assert_eq!(
+            command_caret("open ex", GridSize { cols: 40, rows: 5 }),
+            Some(CellPos { col: 8, row: 4 })
+        );
     }
 
     #[test]
     fn an_overlong_command_keeps_its_cursor_on_screen() {
-        let mut frame = Frame::new(GridSize { cols: 10, rows: 3 });
-        paint(&mut frame, &Mode::Command("x".repeat(50)), &State::Ready, "", "", 0.0);
-        assert_eq!(frame.cursor(), Some(CellPos { col: 9, row: 2 }));
+        assert_eq!(
+            command_caret(&"x".repeat(50), GridSize { cols: 10, rows: 3 }),
+            Some(CellPos { col: 9, row: 2 })
+        );
     }
 
     #[test]
-    fn the_statusline_leaves_the_cursor_alone() {
+    fn a_grid_with_no_row_to_spare_has_nowhere_to_put_a_cursor() {
+        assert_eq!(command_caret("open", GridSize { cols: 0, rows: 0 }), None);
+    }
+
+    #[test]
+    fn painting_the_chrome_never_moves_the_cursor() {
+        // The chrome paints cells and says where its caret would go. Placing
+        // the one cursor is the composer's, because two modes want it and
+        // only the composer can see both.
         let mut frame = Frame::new(GridSize { cols: 40, rows: 5 });
-        paint(&mut frame, &Mode::Normal, &State::Ready, "https://example.com", "", 0.0);
-        assert_eq!(frame.cursor(), None, "nothing on the statusline is being typed into");
+        paint(&mut frame, &Mode::Command("open".to_string()), &State::Ready, "", "", 0.0);
+        assert_eq!(frame.cursor(), None);
     }
 }

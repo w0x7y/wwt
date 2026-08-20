@@ -19,11 +19,13 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 use wwt_cdp::Client;
 use wwt_frame::{CellSize, GridSize, Viewport};
-use wwt_page::{DIRTY_BINDING, Page};
+use wwt_page::Page;
 use wwt_term::Renderer;
 
+use crate::effect::{Effect, Navigation, Scroll};
+use crate::event::{Event, Job};
 use crate::input::InputPump;
-use crate::session::{Effect, Event, Job, Navigation, Scroll, Session};
+use crate::session::Session;
 
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
@@ -92,13 +94,7 @@ impl Core {
                     _ => None,
                 },
 
-                Some(event) = cdp.recv() => {
-                    let ours = event.session_id.as_deref() == Some(self.page.session_id());
-                    let dirty = ours
-                        && event.method == "Runtime.bindingCalled"
-                        && event.params["name"] == DIRTY_BINDING;
-                    dirty.then_some(Event::Dirty)
-                }
+                Some(event) = cdp.recv() => self.page.is_dirty(&event).then_some(Event::Dirty),
 
                 Some(job) = self.jobs_rx.recv() => Some(Event::Done(job)),
 
@@ -145,14 +141,14 @@ impl Core {
                     })
                 }),
 
+                // Always a `Job::Hints`, however it went. A failure is not a
+                // `Job::Failed`: that one clears the extraction and
+                // navigation flags, and a hint query has finished neither of
+                // those. Nor can it go unreported, or the session would
+                // believe a query was still in flight and `f` would be dead
+                // for the rest of the run.
                 Effect::Hints => self.spawn(|page| async move {
-                    Some(match page.hints().await {
-                        Ok(targets) => Job::Hints(targets),
-                        // Not a `Job::Failed`: that one clears the extraction
-                        // and navigation flags, and a failed hint query has
-                        // finished neither of those.
-                        Err(error) => Job::InputFailed(error.to_string()),
-                    })
+                    Some(Job::Hints(page.hints().await.map_err(|e| e.to_string())))
                 }),
 
                 Effect::Blur => self.spawn(|page| async move {

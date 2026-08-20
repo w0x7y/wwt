@@ -30,9 +30,9 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use tokio::runtime::Runtime;
-use wwt_cdp::{Chromium, Client, Event};
+use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, GridSize, Viewport};
-use wwt_page::{DIRTY_BINDING, Page};
+use wwt_page::Page;
 
 pub struct Harness {
     _browser: Chromium,
@@ -108,15 +108,4 @@ pub async fn open(h: &Harness, fixture: &str) -> Page {
     Page::open(Arc::clone(&h.client), &fixture_url(fixture), viewport())
         .await
         .expect("open the fixture")
-}
-
-/// Whether an event is this page's dirty signal.
-///
-/// The session id matters now that one browser serves every test: pages from
-/// earlier tests are still open and still reporting on the same
-/// subscription. The core filters the same way.
-pub fn is_dirty(event: &Event, page: &Page) -> bool {
-    event.session_id.as_deref() == Some(page.session_id())
-        && event.method == "Runtime.bindingCalled"
-        && event.params["name"] == DIRTY_BINDING
 }

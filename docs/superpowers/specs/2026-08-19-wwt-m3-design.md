@@ -217,6 +217,21 @@ any dirty signal discards them. On a live page that means most `f` presses pay a
 trip, which is the right trade: the labels are then guaranteed to describe the page as
 it is now.
 
+Because it is a round trip, the query is the one effect whose *answer* changes the
+mode, so the session tracks it while it is away. Two consequences:
+
+- **`f` pressed again before the answer lands asks nothing.** One question, not two.
+- **An answer only opens hint mode if the mode is still normal.** The keystroke that
+  asked was normal mode's, and a round trip is long enough to have typed half a `:`
+  command since. Landing labels on top of that would take the command line out from
+  under you mid-word. The targets are still cached either way, so the `f` that follows
+  is free.
+
+A query that fails clears the same state and reports into the statusline. It is not a
+general failure: it has finished neither an extraction nor a navigation, and those
+flags must not move. But it cannot go unreported either, or the session would go on
+believing a query was in flight and `f` would be dead for the rest of the run.
+
 A dirty signal arriving *while* labels are on screen does not disturb them. Labels
 must not move under the keys you are typing. They may go stale, and `Esc` followed by
 `f` is the fix.
@@ -320,7 +335,7 @@ starts at or before it, then clamps the offset into that line's painted text: a
 soft wrap leaves one offset belonging to two lines, and the browser puts the
 caret at the start of the second.
 
-`Core` turns that into a cell and hands it to the frame as
+`Session::compose` turns that into a cell and hands it to the frame as
 `Frame::cursor`; the renderer puts the *terminal's own* cursor there, as a
 steady bar (DECSCUSR 6), and hides it when a frame carries none. A caret
 painted into a cell can only be a character wide, which reads as a selected
@@ -339,6 +354,13 @@ It appears **only in insert mode**: a page can focus a field without being
 asked, and a caret in normal mode would promise that your typing lands there
 when it does not. `wwt` restores the terminal's default cursor shape on the way
 out.
+
+There is a second insertion point, on the `:` line, and a frame has one cursor.
+`Session::compose` is therefore the only caller of `Frame::set_cursor`, choosing
+on the mode: the page's caret in insert, `chrome::command_caret` in command, and
+nothing in normal or hint. The chrome reports where its caret would go and never
+places it. Splitting that between the composer and the chrome would leave the two
+modes exclusive only by accident of paint order.
 
 The caret does not blink. Blinking needs a timer, and an idle page must cost
 nothing.

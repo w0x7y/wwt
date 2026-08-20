@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use wwt::input::{Input, InputPump};
+use wwt::input::InputPump;
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, GridSize, Viewport};
-use wwt_page::{KeyInput, Page};
+use wwt_page::{Input, KeyInput, Page};
 
 fn fixture_url(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -70,6 +70,11 @@ Vec<Effect>` and `compose() -> Frame`, both pure enough to test with no browser 
 tty. `Core` (`crates/wwt/src/core.rs`) is the adapter that turns tokio into events and
 effects into spawns, and decides nothing at all.
 
+The vocabulary the two share is its own: `event.rs` holds `Event` and `Job`, what
+arrives; `effect.rs` holds `Effect`, `Scroll` and `Navigation`, what is asked for.
+Both sides name them and neither owns them, so `Core` does not import the state
+machine to describe a spawn.
+
 **Put new rules in `Session` and new machinery in `Core`.** A decision that needs a
 browser to exercise is a decision nobody will test.
 
@@ -181,10 +186,22 @@ placed by CSS x drifts left of the character it belongs beside. It becomes
 rather than painting a cell. Set in insert mode only, because a page can focus a
 field without being asked.
 
+A frame has one cursor and two modes want it, so **`Session::compose` is the
+only caller of `set_cursor`**: the page's caret in insert, `chrome::command_caret`
+in command, nothing in normal or hint. The chrome says where its caret would go
+and never places it, or the two would be exclusive only by paint order.
+
 Hint targets come from `__wwt.hints()`, queried on `f` and cached until the
 next dirty signal. They are deliberately not part of extraction: that path
 runs on every scroll frame. Labels are of uniform length, which makes the set
 prefix-free, so activation needs no timeout.
+
+It is the one effect whose *answer* changes the mode, so the session knows
+while it is in flight: a second `f` asks nothing, and an answer opens hint mode
+only if the mode is still normal. A round trip is long enough to have typed
+half a `:` command, and labels must not land on top of it. `Job::Hints` carries
+a `Result` rather than splitting into two variants, so there is one place that
+can forget to note the query is over.
 
 ## Working in this repo
 

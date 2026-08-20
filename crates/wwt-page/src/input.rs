@@ -12,6 +12,17 @@ pub const CTRL: u32 = 2;
 pub const META: u32 = 4;
 pub const SHIFT: u32 = 8;
 
+/// One thing to send to the page.
+///
+/// The vocabulary rather than the machinery: what a keystroke or a click
+/// *is*, with nothing about how it gets delivered. That is why it sits
+/// beside the two shapes it wraps rather than beside whatever pumps it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Input {
+    Key(KeyInput),
+    Mouse(MouseInput),
+}
+
 /// One key press, described four ways.
 ///
 /// `key`, `code`, `windows_virtual_key_code` and `text` must agree with each

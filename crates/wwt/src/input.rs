@@ -10,16 +10,9 @@
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use wwt_page::{KeyInput, MouseInput, Page};
+use wwt_page::{Input, Page};
 
-use crate::session::Job;
-
-/// One thing to send to the page.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Input {
-    Key(KeyInput),
-    Mouse(MouseInput),
-}
+use crate::event::Job;
 
 /// The sending half of the pump. The core holds one.
 pub struct InputPump {
@@ -38,11 +31,7 @@ impl InputPump {
 
         tokio::spawn(async move {
             while let Some(input) = rx.recv().await {
-                let result = match &input {
-                    Input::Key(key) => page.dispatch_key(key).await,
-                    Input::Mouse(mouse) => page.dispatch_mouse(mouse).await,
-                };
-                if let Err(error) = result {
+                if let Err(error) = page.dispatch(&input).await {
                     let _ = jobs.send(Job::InputFailed(error.to_string()));
                 }
             }

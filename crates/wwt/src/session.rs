@@ -9,18 +9,23 @@
 //! extraction may start, what a key means in each mode, what a finished job
 //! does to the statusline — and rules you cannot run are rules you cannot
 //! trust. Everything in this file is testable with no browser and no tty.
+//!
+//! The words the seam is written in are next door: `event` for what arrives,
+//! `effect` for what is asked for. Both sides name them, so neither owns
+//! them.
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_frame::{
     Caret, CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport,
 };
-use wwt_page::{Extraction, MouseInput};
+use wwt_page::{Input, MouseInput};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
-use crate::input::Input;
+use crate::effect::{Effect, Navigation, Scroll};
+use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
 
@@ -30,76 +35,6 @@ const WHEEL_ROWS: f64 = 3.0;
 
 /// What Chromium navigates to when it cannot reach a host.
 const CHROME_ERROR_SCHEME: &str = "chrome-error://";
-
-/// Something that happened. Everything that can move the browser arrives
-/// as one of these.
-#[derive(Debug, Clone)]
-pub enum Event {
-    Key(KeyEvent),
-    Mouse(MouseEvent),
-    /// The terminal has been re-measured after a resize.
-    Resized(GridSize, CellSize),
-    /// The page says it changed under us.
-    Dirty,
-    /// Something that ran off the loop's thread finished.
-    Done(Job),
-}
-
-/// The result of something that ran off the loop's thread.
-#[derive(Debug, Clone)]
-pub enum Job {
-    Extracted(Box<Extraction>),
-    Failed(String),
-    /// A navigation, history move, or reload finished.
-    Settled,
-    /// A key, a click, or a blur failed after the loop had moved on.
-    InputFailed(String),
-    /// The page reported its interactive boxes.
-    Hints(Vec<HintTarget>),
-    /// The page has been told the window changed size.
-    Resized,
-}
-
-/// Something the session wants done to the world.
-///
-/// One vocabulary for every page operation, so the loop has one place that
-/// spawns rather than one per feature, and so a test can read what a
-/// keystroke asked for without anything having to happen.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Effect {
-    /// Read the page.
-    Extract,
-    /// Ask the page for its interactive boxes.
-    Hints,
-    Scroll(Scroll),
-    Navigate(Navigation),
-    /// Send one key or click to the page, in order with the others.
-    Send(Input),
-    /// Take focus off whatever has it.
-    Blur,
-    /// Tell the page the window is this size. The terminal has already
-    /// changed; this is the page catching up.
-    SetViewport(Viewport),
-    /// Turn terminal mouse reporting on or off.
-    MouseCapture(bool),
-    Quit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Scroll {
-    /// By a distance in CSS pixels, positive being downward.
-    By(f64),
-    Top,
-    End,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Navigation {
-    Open(String),
-    Back,
-    Forward,
-    Reload,
-}
 
 pub struct Session {
     grid: GridSize,
@@ -124,6 +59,10 @@ pub struct Session {
     /// The last hint query's targets, held so that pressing `f` twice on a
     /// page that has not moved costs one round trip rather than two.
     hints: Option<Vec<HintTarget>>,
+    /// A hint query is in flight. Every other effect answers to itself, but
+    /// this one comes back and changes the mode, so it needs to be known
+    /// about while it is away.
+    hinting: bool,
 }
 
 /// The page viewport: the terminal grid, less the row chrome occupies.
@@ -161,6 +100,7 @@ impl Session {
             extracting: false,
             navigating: false,
             hints: None,
+            hinting: false,
         }
     }
 
@@ -193,13 +133,6 @@ impl Session {
         let mut frame = Frame::new(self.grid);
         frame.paint_runs(&self.vp, &self.runs);
 
-        // Only in insert mode. A page can focus a field without your asking,
-        // and a caret there would promise that your typing lands in it when
-        // in normal mode it does not.
-        if self.mode == Mode::Insert {
-            frame.set_cursor(self.caret.and_then(|caret| caret.cell(&self.vp)));
-        }
-
         // After the page and before the chrome: labels cover the text they
         // point at, which is what makes them readable, and the chrome still
         // owns its row.
@@ -214,6 +147,18 @@ impl Session {
             &self.title,
             self.progress,
         );
+
+        // One place decides where the cursor goes, though two modes have an
+        // insertion point. Splitting that between here and the chrome would
+        // leave the two exclusive only by accident of paint order.
+        frame.set_cursor(match &self.mode {
+            // A page can focus a field without your asking, and a caret
+            // there would promise that your typing lands in it when in
+            // normal mode it does not.
+            Mode::Insert => self.caret.and_then(|caret| caret.cell(&self.vp)),
+            Mode::Command(buffer) => chrome::command_caret(buffer, self.grid),
+            Mode::Normal | Mode::Hint(_) => None,
+        });
         frame
     }
 
@@ -247,7 +192,13 @@ impl Session {
             Action::Insert => self.mode = Mode::Insert,
             Action::Hints => match self.hints.clone() {
                 Some(targets) => self.enter_hints(targets),
-                None => effects.push(Effect::Hints),
+                // `f` pressed twice before the first answer comes back is
+                // one question, not two.
+                None if !self.hinting => {
+                    self.hinting = true;
+                    effects.push(Effect::Hints);
+                }
+                None => {}
             },
 
             // Scrolling does not settle the way a navigation does; the
@@ -309,13 +260,6 @@ impl Session {
             }
 
             Action::Send(key) => self.send_key(key, effects),
-            Action::SendEscape => self.send_key(
-                KeyEvent::new(
-                    crossterm::event::KeyCode::Esc,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-                effects,
-            ),
         }
     }
 
@@ -472,9 +416,22 @@ impl Session {
                 // The page may have changed again while we were extracting.
                 self.start_extract(effects);
             }
-            Job::Hints(targets) => {
-                self.hints = Some(targets.clone());
-                self.enter_hints(targets);
+            Job::Hints(result) => {
+                // However it went, the query is over and `f` must work again.
+                self.hinting = false;
+                match result {
+                    Ok(targets) => {
+                        self.hints = Some(targets.clone());
+                        // A query is a round trip, and the keystroke that
+                        // asked for it was normal mode's. Landing the answer
+                        // in whatever mode you have since entered would take
+                        // the command line out from under you mid-word.
+                        if self.mode == Mode::Normal {
+                            self.enter_hints(targets);
+                        }
+                    }
+                    Err(message) => self.state = State::Error(message),
+                }
             }
             Job::Settled => {
                 self.navigating = false;
@@ -507,6 +464,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::CssRect;
+    use wwt_page::Extraction;
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
     const CELL: CellSize = CellSize { w: 9, h: 20 };
@@ -549,6 +507,11 @@ mod tests {
 
     fn target(kind: TargetKind) -> HintTarget {
         HintTarget { rect: CssRect { x: 90.0, y: 40.0, w: 90.0, h: 20.0 }, kind }
+    }
+
+    /// The page answering a hint query.
+    fn hinted(targets: Vec<HintTarget>) -> Event {
+        Event::Done(Job::Hints(Ok(targets)))
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
@@ -769,7 +732,7 @@ mod tests {
         let mut session = ready();
         assert_eq!(session.on(key('f')), vec![Effect::Hints]);
 
-        session.on(Event::Done(Job::Hints(vec![target(TargetKind::Clickable)])));
+        session.on(hinted(vec![target(TargetKind::Clickable)]));
         assert!(matches!(session.mode(), Mode::Hint(_)));
 
         session.on(code(KeyCode::Esc));
@@ -781,7 +744,7 @@ mod tests {
     fn a_page_that_moved_has_no_hints_left_to_reuse() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(vec![target(TargetKind::Clickable)])));
+        session.on(hinted(vec![target(TargetKind::Clickable)]));
         session.on(code(KeyCode::Esc));
 
         session.on(Event::Dirty);
@@ -796,7 +759,7 @@ mod tests {
     fn a_page_with_nothing_to_hint_says_so_rather_than_opening_an_empty_mode() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(Vec::new())));
+        session.on(hinted(Vec::new()));
 
         assert_eq!(session.mode(), &Mode::Normal, "a mode with nothing in it only needs escaping");
         assert_eq!(session.state(), &State::Notice("no hints".to_string()));
@@ -806,7 +769,7 @@ mod tests {
     fn hinting_a_text_field_clicks_it_and_enters_insert() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(vec![target(TargetKind::Editable)])));
+        session.on(hinted(vec![target(TargetKind::Editable)]));
 
         // One target, so its label is one character: the first of the
         // alphabet, and typing it activates.
@@ -826,7 +789,7 @@ mod tests {
     fn hinting_a_link_leaves_you_where_you_were() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(vec![target(TargetKind::Clickable)])));
+        session.on(hinted(vec![target(TargetKind::Clickable)]));
 
         let effects = session.on(key('s'));
         let at = target(TargetKind::Clickable).center();
@@ -841,15 +804,73 @@ mod tests {
     }
 
     #[test]
+    fn a_query_still_in_flight_is_not_asked_again() {
+        let mut session = ready();
+        assert_eq!(session.on(key('f')), vec![Effect::Hints]);
+        assert_eq!(session.on(key('f')), vec![], "one question, not two");
+    }
+
+    #[test]
+    fn a_late_answer_does_not_take_the_mode_you_have_since_entered() {
+        let mut session = ready();
+        session.on(key('f'));
+
+        // A query is a round trip, and you have not stopped typing.
+        session.on(key(':'));
+        session.on(key('o'));
+        session.on(hinted(vec![target(TargetKind::Clickable)]));
+
+        assert_eq!(
+            session.mode(),
+            &Mode::Command("o".to_string()),
+            "the answer to `f` took the command line out from under you"
+        );
+        // The targets are still good geometry, so the next `f` is free.
+        session.on(code(KeyCode::Esc));
+        assert_eq!(session.on(key('f')), vec![]);
+        assert!(matches!(session.mode(), Mode::Hint(_)));
+    }
+
+    #[test]
+    fn a_query_that_failed_leaves_f_working() {
+        let mut session = ready();
+        session.on(key('f'));
+        session.on(Event::Done(Job::Hints(Err("the page went away".to_string()))));
+
+        assert_eq!(session.state(), &State::Error("the page went away".to_string()));
+        assert_eq!(
+            session.on(key('f')),
+            vec![Effect::Hints],
+            "a failed query that never cleared its flag would kill `f` for the session"
+        );
+    }
+
+    #[test]
     fn a_label_nothing_matches_leaves_hint_mode() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(vec![
+        session.on(hinted(vec![
             target(TargetKind::Clickable),
             target(TargetKind::Clickable),
-        ])));
+        ]));
         session.on(key('z'));
         assert_eq!(session.mode(), &Mode::Normal, "nothing left to type is nothing to wait for");
+    }
+
+    #[test]
+    fn the_cursor_follows_the_command_line_and_nothing_else() {
+        let mut session = ready();
+        assert_eq!(session.compose().cursor(), None, "normal mode has no insertion point");
+
+        typed(&mut session, ":open");
+        assert_eq!(
+            session.compose().cursor(),
+            // The `:` plus five characters, on the chrome row.
+            Some(CellPos { col: 5, row: GRID.rows - 1 })
+        );
+
+        session.on(code(KeyCode::Esc));
+        assert_eq!(session.compose().cursor(), None, "leaving takes the caret with it");
     }
 
     // The mouse, and the row the page does not know about.

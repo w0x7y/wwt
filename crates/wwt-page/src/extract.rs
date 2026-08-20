@@ -11,7 +11,7 @@ use wwt_cdp::{Client, Event};
 use wwt_frame::{Caret, CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
-use crate::input::{KeyInput, MouseAction, MouseInput};
+use crate::input::{Input, KeyInput, MouseAction, MouseInput};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -148,6 +148,17 @@ impl Page {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Whether a CDP event is this page's dirty signal.
+    ///
+    /// One browser serves several pages, and every one of them reports on
+    /// the same subscription, so the session id is half the question. This
+    /// lives here because the binding name does.
+    pub fn is_dirty(&self, event: &Event) -> bool {
+        event.session_id.as_deref() == Some(self.session_id.as_str())
+            && event.method == "Runtime.bindingCalled"
+            && event.params["name"] == DIRTY_BINDING
     }
 
     /// Install the page-side script for every document this target loads,
@@ -322,25 +333,11 @@ impl Page {
 
     /// Run the extraction script and convert its output.
     pub async fn extract(&self) -> Result<Extraction> {
-        let result = self
-            .client
-            .call_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({
-                    "expression": "window.__wwt.extract()",
-                    "returnByValue": true,
-                    "awaitPromise": false,
-                }),
-            )
+        let value = self
+            .js("window.__wwt.extract()")
             .await
             .context("run the extraction script")?;
-
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("the extraction script threw: {details}");
-        }
-
-        let raw: RawExtraction = serde_json::from_value(result["result"]["value"].clone())
+        let raw: RawExtraction = serde_json::from_value(value)
             .context("the extraction script returned an unexpected shape")?;
 
         Ok(Extraction {
@@ -407,6 +404,17 @@ impl Page {
         Ok(result["result"]["value"].clone())
     }
 
+    /// Send one input to the page.
+    ///
+    /// The two kinds go to different CDP commands, and which one is this
+    /// crate's business rather than its caller's.
+    pub async fn dispatch(&self, input: &Input) -> Result<()> {
+        match input {
+            Input::Key(key) => self.dispatch_key(key).await,
+            Input::Mouse(mouse) => self.dispatch_mouse(mouse).await,
+        }
+    }
+
     /// Send one key to the page.
     ///
     /// A key that inserts text dispatches `keyDown`, which Chromium turns
@@ -414,36 +422,32 @@ impl Page {
     /// `rawKeyDown`, which stays a bare key event. Sending the wrong one
     /// either loses your typing or types your shortcuts.
     pub async fn dispatch_key(&self, key: &KeyInput) -> Result<()> {
-        let mut down = json!({
-            "type": if key.text.is_empty() { "rawKeyDown" } else { "keyDown" },
+        // The same key, going down and coming back up. Describing it twice
+        // is how the two come to disagree.
+        let key_fields = json!({
             "key": key.key,
             "code": key.code,
             "windowsVirtualKeyCode": key.windows_virtual_key_code,
             "nativeVirtualKeyCode": key.windows_virtual_key_code,
             "modifiers": key.modifiers,
         });
+
+        let mut down = key_fields.clone();
+        down["type"] = json!(if key.text.is_empty() { "rawKeyDown" } else { "keyDown" });
         if !key.text.is_empty() {
             down["text"] = json!(key.text);
             down["unmodifiedText"] = json!(key.text);
         }
+
+        let mut up = key_fields;
+        up["type"] = json!("keyUp");
 
         self.client
             .call_on(&self.session_id, "Input.dispatchKeyEvent", down)
             .await
             .context("dispatch a key down")?;
         self.client
-            .call_on(
-                &self.session_id,
-                "Input.dispatchKeyEvent",
-                json!({
-                    "type": "keyUp",
-                    "key": key.key,
-                    "code": key.code,
-                    "windowsVirtualKeyCode": key.windows_virtual_key_code,
-                    "nativeVirtualKeyCode": key.windows_virtual_key_code,
-                    "modifiers": key.modifiers,
-                }),
-            )
+            .call_on(&self.session_id, "Input.dispatchKeyEvent", up)
             .await
             .context("dispatch a key up")?;
         Ok(())
