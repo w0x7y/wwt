@@ -173,6 +173,34 @@ impl Session {
         self.start_extract(id, effects);
     }
 
+    /// Look at another tab.
+    ///
+    /// The cached runs are painted the moment this returns, so a switch is a
+    /// repaint; the extraction only refreshes what is already on screen. That
+    /// is what a background tab keeps its runs for.
+    fn focus_tab(&mut self, index: usize, effects: &mut Vec<Effect>) {
+        if index >= self.tabs.len() || index == self.focus {
+            return;
+        }
+        self.focus = index;
+        let id = self.focused_id();
+        // The browser's foreground and ours have to be the same target, or
+        // input lands on the page you just left.
+        effects.push(Effect::Activate(id));
+        // Spends the dirty flag this tab has been accumulating in the
+        // background, and does nothing if it has none.
+        self.start_extract(id, effects);
+    }
+
+    /// The tab `steps` along from the focused one, wrapping.
+    fn neighbour(&self, steps: isize) -> usize {
+        let count = self.tabs.len() as isize;
+        if count == 0 {
+            return 0;
+        }
+        (self.focus as isize + steps).rem_euclid(count) as usize
+    }
+
     /// The first read of a page nobody has looked at yet.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -339,6 +367,14 @@ impl Session {
                 let id = self.focused_id();
                 self.close_tab(id, effects);
             }
+            Action::TabNext => {
+                let index = self.neighbour(1);
+                self.focus_tab(index, effects);
+            }
+            Action::TabPrev => {
+                let index = self.neighbour(-1);
+                self.focus_tab(index, effects);
+            }
 
             Action::Send(key) => self.send_key(key, effects),
         }
@@ -364,6 +400,14 @@ impl Session {
             Command::TabClose => {
                 let id = self.focused_id();
                 self.close_tab(id, effects);
+            }
+            Command::TabNext => {
+                let index = self.neighbour(1);
+                self.focus_tab(index, effects);
+            }
+            Command::TabPrev => {
+                let index = self.neighbour(-1);
+                self.focus_tab(index, effects);
             }
             Command::Back => self.navigate(Navigation::Back, effects),
             Command::Forward => self.navigate(Navigation::Forward, effects),
@@ -533,21 +577,32 @@ impl Session {
                 self.start_extract(id, effects);
             }
             Job::Hints(_, result) => {
-                // However it went, the query is over and `f` must work again.
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.hinting = false;
+                // However it went, that tab's query is over and `f` must
+                // work on it again.
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.hinting = false;
+                }
                 match result {
                     Ok(targets) => {
-                        tab.hints = Some(targets.clone());
+                        if let Some(tab) = self.tab_mut(id) {
+                            tab.hints = Some(targets.clone());
+                        }
                         // A query is a round trip, and the keystroke that
-                        // asked for it was normal mode's. Landing the answer
-                        // in whatever mode you have since entered would take
-                        // the command line out from under you mid-word.
-                        if self.mode == Mode::Normal {
+                        // asked for it was normal mode's, on a tab that was
+                        // in front. Landing the answer in whatever mode you
+                        // have since entered would take the command line out
+                        // from under you mid-word, and landing it on another
+                        // tab would paint one page's labels over another's
+                        // text.
+                        if self.mode == Mode::Normal && self.focused_id() == id {
                             self.enter_hints(targets);
                         }
                     }
-                    Err(message) => tab.state = State::Error(message),
+                    Err(message) => {
+                        if let Some(tab) = self.tab_mut(id) {
+                            tab.state = State::Error(message);
+                        }
+                    }
                 }
             }
             Job::Settled(_) => {
@@ -595,7 +650,7 @@ impl Session {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
-    use wwt_frame::{Caret, CssRect};
+    use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
     use wwt_page::Extraction;
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
@@ -1208,7 +1263,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
         // Three tabs, focused on the middle one.
-        session.focus = 1;
+        session.on(key('K'));
         assert_eq!(session.focused().id, TabId(1));
 
         let effects = session.on(key('x'));
@@ -1244,5 +1299,103 @@ mod tests {
         let late = Job::Extracted(TabId(2), Box::new(extraction("https://gone.test")));
         assert_eq!(session.on(Event::Done(late)), vec![]);
         assert_eq!(session.tabs().len(), 2);
+    }
+
+    fn hinted_for(id: TabId, targets: Vec<HintTarget>) -> Event {
+        Event::Done(Job::Hints(id, Ok(targets)))
+    }
+
+    fn run(text: &str) -> TextRun {
+        TextRun {
+            text: text.to_string(),
+            rect: CssRect { x: 0.0, y: 0.0, w: 400.0, h: 20.0 },
+            baseline: 16.0,
+            style: Style { fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, bold: false, reverse: false },
+            z: 0,
+        }
+    }
+
+    // Switching.
+
+    #[test]
+    fn j_and_k_move_between_tabs_and_wrap() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        assert_eq!(session.focused().id, TabId(2));
+
+        session.on(key('J'));
+        assert_eq!(session.focused().id, tab0(), "past the last tab is the first");
+
+        session.on(key('K'));
+        assert_eq!(session.focused().id, TabId(2), "before the first is the last");
+    }
+
+    #[test]
+    fn switching_activates_the_tab_you_switched_to() {
+        // Input dispatch is answered by whichever target the browser has in
+        // front, so a switch that does not activate leaves clicks landing on
+        // the page you just left.
+        let mut session = ready();
+        open_two_more(&mut session);
+        let effects = session.on(key('J'));
+        assert!(effects.contains(&Effect::Activate(tab0())));
+    }
+
+    #[test]
+    fn a_switch_paints_the_page_you_switched_to_before_anyone_asks_the_browser() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("first tab")];
+        open_two_more(&mut session);
+
+        session.on(key('J'));
+        let frame = session.compose();
+        assert!(
+            (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
+            "the cached frame is what makes a switch a repaint rather than a round trip"
+        );
+    }
+
+    #[test]
+    fn a_background_tab_that_changed_is_not_read_until_you_look_at_it() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        // Tab 0 is in the background and its page says it moved.
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![],
+            "an idle background tab must cost what an idle foreground tab costs"
+        );
+
+        // Switching to it spends the flag.
+        let effects = session.on(key('J'));
+        assert!(effects.contains(&Effect::Extract(tab0())));
+    }
+
+    #[test]
+    fn switching_to_a_tab_that_did_not_change_costs_no_round_trip() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        session.on(key('J')); // to tab 0, spending its flag
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
+
+        let effects = session.on(key('K'));
+        assert_eq!(effects, vec![Effect::Activate(TabId(2))], "nothing to re-read");
+    }
+
+    #[test]
+    fn a_hint_answer_for_a_tab_you_have_left_does_not_put_labels_over_another_page() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        session.on(key('f'));
+        session.on(key('J'));
+        session.on(hinted_for(TabId(2), vec![target(TargetKind::Clickable)]));
+
+        assert_eq!(
+            session.mode(),
+            &Mode::Normal,
+            "labels measured against one page must not be painted over another"
+        );
     }
 }

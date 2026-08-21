@@ -17,6 +17,8 @@ pub enum Command {
     Open(String),
     TabOpen(String),
     TabClose,
+    TabNext,
+    TabPrev,
     Back,
     Forward,
     Reload,
@@ -47,6 +49,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Ok(Command::TabOpen(normalize_url(rest)?))
         }
         "tabclose" => Ok(Command::TabClose),
+        "tabnext" => Ok(Command::TabNext),
+        "tabprev" => Ok(Command::TabPrev),
         "back" | "b" => Ok(Command::Back),
         "forward" | "f" => Ok(Command::Forward),
         "reload" => Ok(Command::Reload),

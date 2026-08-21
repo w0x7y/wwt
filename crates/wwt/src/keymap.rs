@@ -44,6 +44,10 @@ pub enum Action {
 
     /// Close the tab you are looking at.
     TabClose,
+    /// Look at the tab to the right, or the first one past the last.
+    TabNext,
+    /// Look at the tab to the left, or the last one before the first.
+    TabPrev,
 
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
@@ -100,6 +104,10 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
         KeyCode::Char('t') => Some(Action::EnterCommand("tabopen ".to_string())),
         KeyCode::Char('x') => Some(Action::TabClose),
+        // qutebrowser's own bindings. vim's `gt` would mean a pending-prefix
+        // state and rebinding `g`, which is scroll-top, to buy nothing.
+        KeyCode::Char('J') => Some(Action::TabNext),
+        KeyCode::Char('K') => Some(Action::TabPrev),
         KeyCode::Char('q') => Some(Action::Quit),
         _ => None,
     }
