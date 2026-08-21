@@ -518,10 +518,15 @@ impl Session {
         self.grid = grid;
         self.cell = cell;
         self.vp = page_viewport(grid, cell);
-        // The page genuinely reflows: it is being told the window changed
-        // size. Extraction waits for `Job::Resized`, because reading the
-        // page before it has been resized reads the old layout.
-        effects.push(Effect::SetViewport(self.focused_id(), self.vp));
+        // Every tab, not just the one in front: a background tab laid out
+        // for the terminal you used to have would be wrong the moment you
+        // reached it, and reaching it is the one moment there is no time to
+        // fix it in. The page genuinely reflows; extraction waits for
+        // `Job::Resized`, because reading before the page has been resized
+        // reads the old layout.
+        for tab in &self.tabs {
+            effects.push(Effect::SetViewport(tab.id, self.vp));
+        }
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
@@ -1099,16 +1104,32 @@ mod tests {
     // Resize.
 
     #[test]
-    fn a_resize_tells_the_page_before_reading_it() {
+    fn a_resize_tells_every_tab_before_reading_any_of_them() {
         let mut session = ready();
+        open_two_more(&mut session);
         let grid = GridSize { cols: 100, rows: 30 };
-        let effects = session.on(Event::Resized(grid, CELL));
+        let vp = page_viewport(grid, CELL);
 
-        assert_eq!(effects, vec![Effect::SetViewport(tab0(), page_viewport(grid, CELL))]);
+        let effects = session.on(Event::Resized(grid, CELL));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetViewport(tab0(), vp),
+                Effect::SetViewport(TabId(1), vp),
+                Effect::SetViewport(TabId(2), vp),
+            ],
+            "a tab you switch to must already be the size of the terminal you have"
+        );
+
+        assert_eq!(
+            session.on(Event::Done(Job::Resized(TabId(2)))),
+            vec![Effect::Extract(TabId(2))],
+            "reading before the page has reflowed reads the old layout"
+        );
         assert_eq!(
             session.on(Event::Done(Job::Resized(tab0()))),
-            vec![Effect::Extract(tab0())],
-            "reading before the page has reflowed reads the old layout"
+            vec![],
+            "a background tab keeps the flag until you look at it"
         );
     }
 
