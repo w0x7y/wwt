@@ -98,6 +98,13 @@ a 20px cell does not divide evenly, so each line box snaps to the row containing
 **baseline**. Snapping by baseline rather than box top prevents drift in multi-column
 and mixed-font-size content.
 
+**The page does not start at the top of the screen.** The chrome occupies rows the
+page does not know about, so `Viewport` carries an origin row and the conversions above
+map CSS pixels to *frame* rows rather than page rows. The load-bearing property is
+unchanged in form and stronger in content: converting a cell to CSS and back is the
+identity, at every cell size **and at every origin**. The page's CSS size is unaffected,
+because where the page sits on our screen is not something the page is told.
+
 **Pixel mode is the same viewport.** `Page.startScreencast` at that exact size,
 blitted through the Kitty graphics protocol using unicode placeholders so images sit
 within the cell grid and scroll with it. Switching text/pixel changes nothing about
@@ -280,10 +287,23 @@ One Chromium process with a persistent `--user-data-dir` at
 `~/.local/share/wwt/profile`. This is what provides durable logins, and OAuth
 redirects work because it is a real browser with a real cookie jar.
 
+The chrome is two rows: the tab bar at the top and the statusline at the bottom, so the
+page viewport is the terminal grid less two. Both are unconditional, which is what
+keeps opening a tab from reflowing every page.
+
 Each tab is a CDP target. Only the foreground tab holds an active extraction
-subscription and screencast; background tabs keep their target alive but idle.
-Session state — open URLs and scroll positions — is serialized to disk on change so a
-crash restores.
+subscription and screencast; background tabs keep their target alive but idle. Idle
+has a precise meaning: a tab extracts once when it opens, so its title is real and the
+first switch to it is instant, and after that it re-extracts only while focused. A
+dirty signal for an unfocused tab sets a flag that is spent when focus arrives.
+
+A page that opens a tab for itself, through `target=_blank` or `window.open`, creates a
+target we did not ask for. It is adopted: the binding, the bootstrap and the viewport
+are installed before it is allowed to run, and it becomes a real tab.
+
+Session state, meaning open URLs, titles and scroll positions, is serialized to disk on
+change so a crash restores. The instance holding the profile owns that file; a second
+instance, which cannot have the profile, runs on a temporary one and writes nothing.
 
 ## 8. Failure modes
 
@@ -315,7 +335,10 @@ degrades to stale-but-labeled, never to empty.
   `~/.local/share/wwt/`. Never a silent download.
 - **Too many tabs.** Background targets beyond a configurable limit are closed while
   their URL and scroll offset remain in the session, and are transparently restored
-  on switch.
+  on switch. **Deferred from M4 to M7.** It introduces the one state the tab design
+  otherwise does not have, a tab that exists without a target, and every rule about
+  tabs needs a second reading once it can. Lazy restore at startup is the same
+  machinery pointed elsewhere and is deferred with it.
 
 ## 9. Testing
 
@@ -371,9 +394,10 @@ slowest and most careful about — everything later assumes it is right.
 with the four-mode state machine and the chrome moving into `wwt-ui`. Forms work. This
 is the milestone that makes it a browser rather than a viewer.
 
-**M4 — Tabs and sessions.** Multiple targets, the persistent profile, session
-serialization and restore, background-tab idling and eviction. Logins survive
-restarts.
+**M4 — Tabs and sessions.** Multiple targets, adoption of targets a page opens for
+itself, the persistent profile, session serialization and restore, and background-tab
+idling. Logins survive restarts. Adoption is part of the milestone because a browser
+with tabs that cannot follow a `target=_blank` link is not one.
 
 **M5 — Pixel mode.** `Page.startScreencast`, the Kitty graphics protocol with unicode
 placeholders, mode toggling, and the half-block degradation path.
@@ -388,7 +412,8 @@ accessibility tree it needs no reflow, becomes independent of reader mode, and c
 land considerably earlier.
 
 **M7 — Hardening.** The Chromium supervisor and restart path, per-command deadlines,
-and session recovery after a crash. Operational robustness, sharing nothing with M6
+session recovery after a crash, and the background-tab eviction and lazy restore
+deferred from M4. Operational robustness, sharing nothing with M6
 but the fact that both were once one milestone.
 
 Daily use realistically begins at M4. M1 through M3 are the foundation and should not
