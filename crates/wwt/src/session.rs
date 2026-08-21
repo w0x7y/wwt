@@ -768,10 +768,26 @@ impl Session {
             }
             Job::Opened(_, Err(message)) => {
                 // A tab with no page behind it is not a tab. Drop it and say
-                // why, without disturbing the one you were on. The target was
-                // never created, so there is nothing for `Core` to close.
-                self.close_tab(id, &mut Vec::new());
-                self.focused_mut().state = State::Error(message);
+                // why, without disturbing the one you were on.
+                //
+                // Through the caller's own effects, because closing decides
+                // more than that a tab is gone: it asks to quit when that was
+                // the last one, and hands the browser to the tab taking its
+                // place. Those decisions were being made into a vector nobody
+                // read, which left the browser in front of a page the session
+                // had let go of, and left `focused_mut` below indexing a tab
+                // list that closing had just emptied.
+                //
+                // `Effect::CloseTab` names a tab `Core` holds no page for and
+                // is a no-op there. A target the browser did manage to create
+                // is closed by `Core`, which is the only side that knows one
+                // exists.
+                self.close_tab(id, effects);
+                // Closing the last tab asks to quit, and there is then no
+                // statusline left to put the message on.
+                if !self.tabs.is_empty() {
+                    self.focused_mut().state = State::Error(message);
+                }
             }
             Job::Failed(_, message) => {
                 let tab = self.tab_mut(id).expect("resolved above");
@@ -1691,6 +1707,41 @@ mod tests {
         assert_eq!(session.tabs().len(), 1, "a tab with no page is not a tab");
         assert_eq!(session.focused().id, tab0());
         assert!(matches!(session.state(), State::Error(_)));
+    }
+
+    #[test]
+    fn the_only_tab_failing_to_open_asks_to_quit() {
+        // A browser with no page in it is not a state worth having, and one
+        // page that will not open is that state. The tab it would have been
+        // is gone, so there is nowhere left to say so and nothing to do but
+        // leave, which is the same rule closing the last tab follows.
+        let mut session = session();
+        session.begin();
+        let effects = session.on(Event::Done(Job::Opened(tab0(), Err("no target".to_string()))));
+
+        assert!(session.tabs().is_empty(), "the tab had no page behind it");
+        assert!(
+            effects.contains(&Effect::Quit),
+            "closing the last tab asks to quit, and asking is the whole \
+             point of handing closing the caller's effects: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_tab_that_could_not_be_opened_hands_its_neighbour_the_browser() {
+        // Closing decides more than that a tab is gone: the tab taking its
+        // place has to be brought to the front, because input dispatch is
+        // answered by whichever target the browser has in front.
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Err("no target".to_string()))));
+        assert!(
+            effects.contains(&Effect::Activate(tab0())),
+            "the tab you are left looking at is the one the browser must \
+             have in front: {effects:?}"
+        );
     }
 
     #[test]

@@ -247,6 +247,15 @@ same variant a tab we asked for reports through. `TargetId` is a CDP fact travel
 through the vocabulary the way `Input` and `Extraction` already do, which is what
 keeps the session from having to know what a target is.
 
+*Amended.* **A tab that could not be opened is closed through the caller's own
+effects.** It was closed into a discarded vector, on the reasoning that a tab with no
+page needs nothing done to it. Closing decides more than that: it hands the browser to
+the tab taking its place, and it asks to quit when there was no other tab. Discarding
+those left the browser in front of a page the session had already let go of, so clicks
+landed on it; and with one tab open it emptied the tab list and then read `focus` out
+of it, which panics inside raw mode and takes the terminal with it. The failure message
+now goes on the tab you are left looking at, and nowhere when there is none.
+
 `Job::InputFailed` is renamed `Job::Noted`. It always meant "this failed after the
 loop had moved on, so say so in the statusline and change nothing", and M4 gives it
 two users that are not input: a close that failed and a save that failed.
