@@ -416,7 +416,15 @@ impl Session {
                 Some(targets) => self.enter_hints(targets),
                 // `f` pressed twice before the first answer comes back is
                 // one question, not two.
-                None if !self.focused().hinting => {
+                //
+                // And a tab with no page behind it is not asked at all.
+                // `Core` drops an effect naming a page it does not hold,
+                // which is every effect between asking for a tab and being
+                // told it opened, and `Job::Hints` is the only thing that
+                // clears the flag below. Setting it for a query nobody can
+                // answer leaves `f` dead on that tab for the rest of the
+                // run. `Tab::opened` is what names that window.
+                None if !self.focused().hinting && self.focused().opened => {
                     let id = self.focused_id();
                     self.focused_mut().hinting = true;
                     effects.push(Effect::Hints(id));
@@ -1707,6 +1715,31 @@ mod tests {
         assert_eq!(session.tabs().len(), 1, "a tab with no page is not a tab");
         assert_eq!(session.focused().id, tab0());
         assert!(matches!(session.state(), State::Error(_)));
+    }
+
+    #[test]
+    fn a_tab_with_no_page_yet_is_not_asked_for_hints() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+        // Focus is on the new tab, which has been asked for and not yet
+        // opened. `Core` holds no page for it and would drop the query.
+        let effects = session.on(key('f'));
+        assert!(
+            !effects.iter().any(|effect| matches!(effect, Effect::Hints(_))),
+            "asked a tab with no page behind it: {effects:?}"
+        );
+
+        // And the asking is still there to be done once there is a page.
+        // `Job::Hints` is the only thing that clears the in-flight flag, so
+        // a query nobody could answer would have left `f` dead on this tab
+        // for the rest of the run.
+        session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        let effects = session.on(key('f'));
+        assert!(
+            effects.contains(&Effect::Hints(TabId(1))),
+            "f stopped working on the tab: {effects:?}"
+        );
     }
 
     #[test]

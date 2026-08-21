@@ -444,8 +444,12 @@ impl Core {
     /// `Job` it reports, or reporting none.
     ///
     /// An effect naming a page we do not hold is dropped. That is reachable
-    /// only between asking for a tab and being told it opened, where the tab
-    /// is marked loading and nothing could have expected to land.
+    /// only between asking for a tab and being told it opened.
+    ///
+    /// Dropped silently, so the session must not set an in-flight flag
+    /// beside an effect it emits in that window: the flag is cleared by the
+    /// answer, and there will not be one. `Tab::opened` is what names the
+    /// window on that side.
     fn spawn<F, Fut>(&self, id: TabId, make: F)
     where
         F: FnOnce(Arc<Page>) -> Fut + Send + 'static,

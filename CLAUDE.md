@@ -208,6 +208,16 @@ half a `:` command, and labels must not land on top of it. `Job::Hints` carries
 a `Result` rather than splitting into two variants, so there is one place that
 can forget to note the query is over.
 
+**An in-flight flag must not outlive the effect it was set beside.** `Core` drops
+any effect naming a page it does not hold, which is every effect between asking for
+a tab and being told it opened, and `Job::Hints` is the only thing that clears
+`hinting`. So `f` is not asked at all on a tab that has not opened: setting the flag
+for a query nobody can answer left `f` dead on that tab for the rest of the run.
+`Tab::opened` names that window, and it is the question to ask before setting any of
+the three flags beside an effect. `navigating` and `extracting` are safe today by
+accident rather than by rule: `open_tab` already sets `navigating`, and an extraction
+is only ever asked for by a dirty signal, which a page has to exist to send.
+
 ## Tabs and sessions
 
 `Session` holds `Vec<Tab>` and a focus index; `Tab` (`wwt/src/tab.rs`) holds
