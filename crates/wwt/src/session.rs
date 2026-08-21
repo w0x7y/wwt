@@ -65,22 +65,29 @@ pub struct Session {
     hinting: bool,
 }
 
-/// The page viewport: the terminal grid, less the row chrome occupies.
+/// The rows the page does not get: the tab bar above it and the statusline
+/// below. Unconditional, so opening a tab never reflows a page.
+pub const CHROME_ROWS: u16 = 2;
+
+/// The page viewport: the terminal grid, less the rows chrome occupies, and
+/// sitting below the tab bar.
 ///
 /// Chromium is told this is the whole window, so the page genuinely does not
-/// know the statusline exists.
+/// know either chrome row exists.
 pub fn page_viewport(grid: GridSize, cell: CellSize) -> Viewport {
-    let rows = grid.rows.saturating_sub(1).max(1);
-    Viewport::new(GridSize { cols: grid.cols, rows }, cell)
+    let rows = grid.rows.saturating_sub(CHROME_ROWS).max(1);
+    Viewport::with_origin(GridSize { cols: grid.cols, rows }, cell, 1)
 }
 
 /// The page cell a terminal cell refers to, or `None` when it is one of ours.
 ///
-/// The last row is chrome. The page does not know it exists, so a click there
-/// has no page coordinate to become.
+/// The first row is the tab bar and the last is the statusline. The page does
+/// not know either exists, so a click on one has no page coordinate to become.
 pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
     let grid = vp.grid();
-    (column < grid.cols && row < grid.rows).then_some(CellPos { col: column, row })
+    let top = vp.origin_row();
+    let below = top.checked_add(grid.rows)?;
+    (column < grid.cols && row >= top && row < below).then_some(CellPos { col: column, row })
 }
 
 impl Session {
@@ -139,6 +146,7 @@ impl Session {
         if let Mode::Hint(session) = &self.mode {
             session.paint(&mut frame, &self.vp);
         }
+        chrome::paint_tabs(&mut frame, std::slice::from_ref(&self.title), 0);
         chrome::paint(
             &mut frame,
             &self.mode,
@@ -893,8 +901,8 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_three_rows_a_notch() {
         let mut session = ready();
-        let effects = session.on(mouse(MouseEventKind::ScrollDown, 0, 0));
-        let at = session.viewport().to_css(CellPos { col: 0, row: 0 });
+        let effects = session.on(mouse(MouseEventKind::ScrollDown, 0, 1));
+        let at = session.viewport().to_css(CellPos { col: 0, row: 1 });
         assert_eq!(effects, vec![Effect::Send(Input::Mouse(MouseInput::wheel(at, 60.0)))]);
     }
 
@@ -943,21 +951,22 @@ mod tests {
         );
 
         session.on(key('i'));
-        assert_eq!(session.compose().cursor(), Some(CellPos { col: 12, row: 2 }));
+        assert_eq!(session.compose().cursor(), Some(CellPos { col: 12, row: 3 }));
     }
 
     #[test]
-    fn the_statusline_owns_the_last_row_and_the_page_does_not_know_it_exists() {
+    fn the_chrome_owns_a_row_at_each_end_and_the_page_knows_of_neither() {
         let session = ready();
-        assert_eq!(session.viewport().grid().rows, 23);
+        assert_eq!(session.viewport().grid().rows, 22);
+        assert_eq!(session.viewport().origin_row(), 1);
         assert_eq!(session.compose().grid().rows, 24);
     }
 
     #[test]
-    fn the_page_viewport_is_one_row_shorter_than_the_terminal() {
+    fn the_page_viewport_is_two_rows_shorter_than_the_terminal() {
         let vp = page_viewport(GRID, CELL);
-        assert_eq!(vp.grid(), GridSize { cols: 80, rows: 23 });
-        assert_eq!(vp.css_height(), 23 * 20);
+        assert_eq!(vp.grid(), GridSize { cols: 80, rows: 22 });
+        assert_eq!(vp.css_height(), 22 * 20);
     }
 
     #[test]
@@ -973,10 +982,12 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_chrome_row_belongs_to_no_page_cell() {
-        // Row 23 is the statusline. The page does not know that row exists,
-        // so there is nothing to convert a click there into.
+    fn a_click_on_the_tab_bar_belongs_to_no_page_cell() {
+        // Row 0 is the tab bar and row 23 is the statusline. The page does
+        // not know either exists, so there is nothing to convert a click
+        // there into.
         let vp = page_viewport(GRID, CELL);
+        assert_eq!(page_cell(&vp, 5, 0), None);
         assert_eq!(page_cell(&vp, 5, 23), None);
     }
 }
