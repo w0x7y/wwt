@@ -7,6 +7,7 @@ pub mod input;
 pub mod keys;
 pub mod keymap;
 pub mod session;
+pub mod store;
 
 use std::sync::Arc;
 
