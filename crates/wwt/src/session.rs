@@ -16,7 +16,7 @@
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_frame::{
-    Caret, CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport,
+    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
 };
 use wwt_page::{Input, MouseInput};
 use wwt_ui::Mode;
@@ -28,6 +28,7 @@ use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
+use crate::tab::{Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
@@ -42,27 +43,12 @@ pub struct Session {
     vp: Viewport,
 
     mode: Mode,
-    state: State,
-    url: String,
-    title: String,
-    progress: f64,
-    runs: Vec<TextRun>,
-    /// Where typing would land, when the page has a field focused.
-    caret: Option<Caret>,
 
-    /// The page says it changed and we have not caught up yet.
-    dirty: bool,
-    /// An extraction is in flight; a second would race it.
-    extracting: bool,
-    /// A navigation is in flight.
-    navigating: bool,
-    /// The last hint query's targets, held so that pressing `f` twice on a
-    /// page that has not moved costs one round trip rather than two.
-    hints: Option<Vec<HintTarget>>,
-    /// A hint query is in flight. Every other effect answers to itself, but
-    /// this one comes back and changes the mode, so it needs to be known
-    /// about while it is away.
-    hinting: bool,
+    tabs: Vec<Tab>,
+    focus: usize,
+    /// Never reused, which is what makes a job from a closed tab safe to
+    /// drop rather than plausible to paint.
+    next_id: u32,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -92,23 +78,39 @@ pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
 
 impl Session {
     pub fn new(grid: GridSize, cell: CellSize) -> Self {
-        Self {
+        let mut session = Self {
             grid,
             cell,
             vp: page_viewport(grid, cell),
             mode: Mode::Normal,
-            state: State::Loading,
-            url: String::new(),
-            title: String::new(),
-            progress: 0.0,
-            runs: Vec::new(),
-            caret: None,
-            dirty: true,
-            extracting: false,
-            navigating: false,
-            hints: None,
-            hinting: false,
-        }
+            tabs: Vec::new(),
+            focus: 0,
+            next_id: 0,
+        };
+        let id = session.mint();
+        session.tabs.push(Tab::new(id, String::new()));
+        session
+    }
+
+    /// The next unused tab id.
+    fn mint(&mut self) -> TabId {
+        let id = TabId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// The tab you are looking at. There is always one: closing the last tab
+    /// quits, so a session with no tabs never reaches a caller.
+    pub fn focused(&self) -> &Tab {
+        &self.tabs[self.focus]
+    }
+
+    fn focused_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.focus]
+    }
+
+    pub fn focused_id(&self) -> TabId {
+        self.focused().id
     }
 
     /// The first read of a page nobody has looked at yet.
@@ -120,7 +122,7 @@ impl Session {
 
     /// Say something in the statusline.
     pub fn notice(&mut self, message: &str) {
-        self.state = State::Notice(message.to_string());
+        self.focused_mut().state = State::Notice(message.to_string());
     }
 
     pub fn mode(&self) -> &Mode {
@@ -128,7 +130,7 @@ impl Session {
     }
 
     pub fn state(&self) -> &State {
-        &self.state
+        &self.focused().state
     }
 
     pub fn viewport(&self) -> Viewport {
@@ -138,22 +140,25 @@ impl Session {
     /// Paint the page and the chrome into one full-grid frame.
     pub fn compose(&self) -> Frame {
         let mut frame = Frame::new(self.grid);
-        frame.paint_runs(&self.vp, &self.runs);
+        let tab = self.focused();
+        frame.paint_runs(&self.vp, &tab.runs);
 
         // After the page and before the chrome: labels cover the text they
         // point at, which is what makes them readable, and the chrome still
-        // owns its row.
+        // owns its rows.
         if let Mode::Hint(session) = &self.mode {
             session.paint(&mut frame, &self.vp);
         }
-        chrome::paint_tabs(&mut frame, std::slice::from_ref(&self.title), 0);
+
+        let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
+        chrome::paint_tabs(&mut frame, &titles, self.focus);
         chrome::paint(
             &mut frame,
             &self.mode,
-            &self.state,
-            &self.url,
-            &self.title,
-            self.progress,
+            &tab.state,
+            &tab.url,
+            &tab.title,
+            tab.progress,
         );
 
         // One place decides where the cursor goes, though two modes have an
@@ -163,7 +168,7 @@ impl Session {
             // A page can focus a field without your asking, and a caret
             // there would promise that your typing lands in it when in
             // normal mode it does not.
-            Mode::Insert => self.caret.and_then(|caret| caret.cell(&self.vp)),
+            Mode::Insert => tab.caret.and_then(|caret| caret.cell(&self.vp)),
             Mode::Command(buffer) => chrome::command_caret(buffer, self.grid),
             Mode::Normal | Mode::Hint(_) => None,
         });
@@ -178,7 +183,7 @@ impl Session {
             Event::Mouse(mouse) => self.on_mouse(mouse, &mut effects),
             Event::Resized(grid, cell) => self.on_resize(grid, cell, &mut effects),
             Event::Dirty => {
-                self.mark_dirty();
+                self.focused_mut().mark_dirty();
                 self.start_extract(&mut effects);
             }
             Event::Done(job) => self.on_job(job, &mut effects),
@@ -198,12 +203,12 @@ impl Session {
             Action::Quit => effects.push(Effect::Quit),
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
-            Action::Hints => match self.hints.clone() {
+            Action::Hints => match self.focused().hints.clone() {
                 Some(targets) => self.enter_hints(targets),
                 // `f` pressed twice before the first answer comes back is
                 // one question, not two.
-                None if !self.hinting => {
-                    self.hinting = true;
+                None if !self.focused().hinting => {
+                    self.focused_mut().hinting = true;
                     effects.push(Effect::Hints);
                 }
                 None => {}
@@ -248,7 +253,7 @@ impl Session {
                 match command::parse(&line) {
                     Ok(Command::Quit) => effects.push(Effect::Quit),
                     Ok(command) => self.run_command(command, effects),
-                    Err(message) => self.state = State::Error(message),
+                    Err(message) => self.focused_mut().state = State::Error(message),
                 }
             }
 
@@ -284,7 +289,7 @@ impl Session {
     fn run_command(&mut self, command: Command, effects: &mut Vec<Effect>) {
         match command {
             Command::Open(url) => {
-                self.url = url.clone();
+                self.focused_mut().url = url.clone();
                 self.navigate(Navigation::Open(url), effects);
             }
             Command::Back => self.navigate(Navigation::Back, effects),
@@ -292,7 +297,8 @@ impl Session {
             Command::Reload => self.navigate(Navigation::Reload, effects),
             Command::Set(Setting::Mouse(on)) => {
                 effects.push(Effect::MouseCapture(on));
-                self.state = State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
+                self.focused_mut().state =
+                    State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
             }
             // Handled by the caller.
             Command::Quit => {}
@@ -304,11 +310,12 @@ impl Session {
     /// The previous page stays on screen, marked loading, until the new one
     /// has been extracted. Nothing a page does blanks the frame.
     fn navigate(&mut self, navigation: Navigation, effects: &mut Vec<Effect>) {
-        if self.navigating {
+        if self.focused().navigating {
             return;
         }
-        self.navigating = true;
-        self.state = State::Loading;
+        let tab = self.focused_mut();
+        tab.navigating = true;
+        tab.state = State::Loading;
         effects.push(Effect::Navigate(navigation));
     }
 
@@ -333,20 +340,13 @@ impl Session {
         effects.push(Effect::Send(Input::Mouse(mouse)));
     }
 
-    /// Note that the page has changed under us.
-    ///
-    /// Hint targets are geometry, so a page that moved has invalidated them.
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-        self.hints = None;
-    }
-
     fn start_extract(&mut self, effects: &mut Vec<Effect>) {
-        if self.extracting || !self.dirty {
+        let tab = self.focused_mut();
+        if tab.extracting || !tab.dirty {
             return;
         }
-        self.extracting = true;
-        self.dirty = false;
+        tab.extracting = true;
+        tab.dirty = false;
         effects.push(Effect::Extract);
     }
 
@@ -354,7 +354,7 @@ impl Session {
         let session = HintSession::new(targets);
         if session.is_empty() {
             // Entering a mode with nothing in it would only need escaping.
-            self.state = State::Notice("no hints".to_string());
+            self.focused_mut().state = State::Notice("no hints".to_string());
             return;
         }
         self.mode = Mode::Hint(session);
@@ -400,11 +400,14 @@ impl Session {
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
         match job {
             Job::Extracted(extraction) => {
-                self.extracting = false;
-                self.progress = extraction.scroll_progress();
-                self.runs = extraction.runs;
-                self.caret = extraction.caret;
-                self.title = extraction.title;
+                let progress = extraction.scroll_progress();
+                let tab = self.focused_mut();
+                tab.extracting = false;
+                tab.progress = progress;
+                tab.scroll_y = extraction.scroll_y;
+                tab.runs = extraction.runs;
+                tab.caret = extraction.caret;
+                tab.title = extraction.title;
 
                 // Chromium answers a DNS or connection failure by navigating
                 // to its own error page rather than failing the command, so a
@@ -414,11 +417,11 @@ impl Session {
                 if extraction.url.starts_with(CHROME_ERROR_SCHEME) {
                     // The statusline prints the URL itself, so naming it here
                     // too would print it twice.
-                    self.state = State::Error("could not be reached".to_string());
+                    tab.state = State::Error("could not be reached".to_string());
                 } else {
-                    self.url = extraction.url;
-                    if !self.navigating {
-                        self.state = State::Ready;
+                    tab.url = extraction.url;
+                    if !tab.navigating {
+                        tab.state = State::Ready;
                     }
                 }
                 // The page may have changed again while we were extracting.
@@ -426,10 +429,10 @@ impl Session {
             }
             Job::Hints(result) => {
                 // However it went, the query is over and `f` must work again.
-                self.hinting = false;
+                self.focused_mut().hinting = false;
                 match result {
                     Ok(targets) => {
-                        self.hints = Some(targets.clone());
+                        self.focused_mut().hints = Some(targets.clone());
                         // A query is a round trip, and the keystroke that
                         // asked for it was normal mode's. Landing the answer
                         // in whatever mode you have since entered would take
@@ -438,30 +441,32 @@ impl Session {
                             self.enter_hints(targets);
                         }
                     }
-                    Err(message) => self.state = State::Error(message),
+                    Err(message) => self.focused_mut().state = State::Error(message),
                 }
             }
             Job::Settled => {
-                self.navigating = false;
-                self.state = State::Ready;
-                self.mark_dirty();
+                let tab = self.focused_mut();
+                tab.navigating = false;
+                tab.state = State::Ready;
+                tab.mark_dirty();
                 self.start_extract(effects);
             }
             Job::Resized => {
-                self.mark_dirty();
+                self.focused_mut().mark_dirty();
                 self.start_extract(effects);
             }
             // The frame stays exactly as it was; only the statusline
             // changes. Spec section 8. Deliberately not `Job::Failed`: that
             // one clears the extraction and navigation flags, and a
             // keystroke that failed has finished neither of those.
-            Job::InputFailed(message) => self.state = State::Error(message),
+            Job::InputFailed(message) => self.focused_mut().state = State::Error(message),
             Job::Failed(message) => {
-                self.extracting = false;
-                self.navigating = false;
+                let tab = self.focused_mut();
+                tab.extracting = false;
+                tab.navigating = false;
                 // The frame stays exactly as it was; only the statusline
                 // changes. Section 8: never blank the frame you are looking at.
-                self.state = State::Error(message);
+                tab.state = State::Error(message);
             }
         }
     }
@@ -471,7 +476,7 @@ impl Session {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
-    use wwt_frame::CssRect;
+    use wwt_frame::{Caret, CssRect};
     use wwt_page::Extraction;
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };

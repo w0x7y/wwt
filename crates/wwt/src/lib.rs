@@ -8,6 +8,7 @@ pub mod keys;
 pub mod keymap;
 pub mod session;
 pub mod store;
+pub mod tab;
 
 use std::sync::Arc;
 
