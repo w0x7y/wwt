@@ -39,8 +39,27 @@ fn mode_tag(mode: &Mode) -> String {
     }
 }
 
+/// Everything the two rows say.
+///
+/// Named fields rather than an argument list. `url` and `title` are both
+/// `&str` and sit next to each other, so as positional arguments they could
+/// be swapped and still compile, and the caller had to know the order as well
+/// as the values. It also puts the tab bar and the statusline behind one call:
+/// which row goes down first is the chrome's business, not the composer's.
+pub struct Chrome<'a> {
+    pub mode: &'a Mode,
+    /// The tab in front. The statusline is about that one.
+    pub state: &'a State,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub progress: f64,
+    /// Every tab's title, in order, and which of them is in front.
+    pub titles: &'a [String],
+    pub focus: usize,
+}
+
 /// Build the statusline, padded or truncated to exactly `cols` characters.
-pub fn statusline(
+fn statusline(
     mode: &Mode,
     state: &State,
     url: &str,
@@ -93,7 +112,7 @@ pub fn command_caret(buffer: &str, grid: GridSize) -> Option<CellPos> {
 }
 
 /// The `:` line, padded or truncated to exactly `cols` characters.
-pub fn command_line(buffer: &str, cols: u16) -> String {
+fn command_line(buffer: &str, cols: u16) -> String {
     fit(&format!(":{buffer}"), usize::from(cols))
 }
 
@@ -116,7 +135,7 @@ fn fit(s: &str, width: usize) -> String {
 const MIN_SLOT: usize = 8;
 
 /// One tab's place on the bar.
-pub struct TabSlot {
+struct TabSlot {
     pub col: u16,
     pub text: String,
     pub focused: bool,
@@ -138,7 +157,7 @@ fn focus_style() -> Style {
 ///
 /// Titles come from pages, and the focus index can come off a session file,
 /// so neither is trusted: an absurd index still produces a paintable bar.
-pub fn tab_slots(titles: &[String], focus: usize, cols: u16) -> Vec<TabSlot> {
+fn tab_slots(titles: &[String], focus: usize, cols: u16) -> Vec<TabSlot> {
     if titles.is_empty() || cols == 0 {
         return Vec::new();
     }
@@ -187,7 +206,7 @@ fn segment(index: usize, title: &str, width: usize) -> String {
 }
 
 /// Paint the top row of the frame.
-pub fn paint_tabs(frame: &mut Frame, titles: &[String], focus: usize) {
+fn paint_tabs(frame: &mut Frame, titles: &[String], focus: usize) {
     let GridSize { cols, rows } = frame.grid();
     if rows == 0 || cols == 0 {
         return;
@@ -207,23 +226,33 @@ pub fn paint_tabs(frame: &mut Frame, titles: &[String], focus: usize) {
     }
 }
 
+/// Paint both rows the page does not own: the tab bar on top, and the
+/// statusline or the `:` line at the bottom.
+///
+/// One call rather than two, so which of them goes down first is the
+/// chrome's business rather than something every composer has to know.
+pub fn paint(frame: &mut Frame, chrome: &Chrome) {
+    paint_tabs(frame, chrome.titles, chrome.focus);
+    paint_status(frame, chrome);
+}
+
 /// Paint the bottom row of the frame.
-pub fn paint(
-    frame: &mut Frame,
-    mode: &Mode,
-    state: &State,
-    url: &str,
-    title: &str,
-    progress: f64,
-) {
+fn paint_status(frame: &mut Frame, chrome: &Chrome) {
     let GridSize { cols, rows } = frame.grid();
     if rows == 0 || cols == 0 {
         return;
     }
     let row = rows - 1;
-    let text = match mode {
+    let text = match chrome.mode {
         Mode::Command(buffer) => command_line(buffer, cols),
-        _ => statusline(mode, state, url, title, progress, cols),
+        _ => statusline(
+            chrome.mode,
+            chrome.state,
+            chrome.url,
+            chrome.title,
+            chrome.progress,
+            cols,
+        ),
     };
     frame.paint_text(CellPos { col: 0, row }, &text, chrome_style());
 }
@@ -273,11 +302,28 @@ mod tests {
         assert!(command_line("open exa", 20).starts_with(":open exa"));
     }
 
+    /// A chrome with nothing interesting in it, for the tests that are about
+    /// where the rows go rather than what they say.
+    fn plain<'a>(mode: &'a Mode, url: &'a str, titles: &'a [String]) -> Chrome<'a> {
+        Chrome {
+            mode,
+            state: &State::Ready,
+            url,
+            title: "",
+            progress: 0.0,
+            titles,
+            focus: 0,
+        }
+    }
+
     #[test]
-    fn paint_puts_chrome_on_the_last_row() {
+    fn paint_puts_the_statusline_last_and_the_tab_bar_first() {
         let mut frame = Frame::new(GridSize { cols: 30, rows: 3 });
-        paint(&mut frame, &Mode::Normal, &State::Ready, "https://example.com", "", 0.0);
-        assert_eq!(frame.row_text(0), "");
+        paint(&mut frame, &plain(&Mode::Normal, "https://example.com", &titles(2)));
+        assert!(frame.row_text(0).contains('1'), "row 0 was {:?}", frame.row_text(0));
+        // The page owns everything between them, and the chrome does not
+        // touch it.
+        assert_eq!(frame.row_text(1), "");
         assert!(frame.row_text(2).contains("example.com"), "row 2 was {:?}", frame.row_text(2));
     }
 
@@ -285,7 +331,7 @@ mod tests {
     fn paint_shows_the_command_line_instead_when_in_command_mode() {
         let mut frame = Frame::new(GridSize { cols: 30, rows: 3 });
         let mode = Mode::Command("open exa".to_string());
-        paint(&mut frame, &mode, &State::Ready, "https://example.com", "", 0.0);
+        paint(&mut frame, &plain(&mode, "https://example.com", &titles(1)));
         assert!(frame.row_text(2).starts_with(":open exa"), "row 2 was {:?}", frame.row_text(2));
     }
     #[test]
@@ -364,7 +410,7 @@ mod tests {
         // the one cursor is the composer's, because two modes want it and
         // only the composer can see both.
         let mut frame = Frame::new(GridSize { cols: 40, rows: 5 });
-        paint(&mut frame, &Mode::Command("open".to_string()), &State::Ready, "", "", 0.0);
+        paint(&mut frame, &plain(&Mode::Command("open".to_string()), "", &titles(1)));
         assert_eq!(frame.cursor(), None);
     }
 

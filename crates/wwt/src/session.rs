@@ -21,7 +21,7 @@ use wwt_frame::{
 };
 use wwt_page::{Input, MouseInput};
 use wwt_ui::Mode;
-use wwt_ui::chrome::{self, State};
+use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
@@ -357,14 +357,17 @@ impl Session {
         }
 
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
-        chrome::paint_tabs(&mut frame, &titles, self.focus);
         chrome::paint(
             &mut frame,
-            &self.mode,
-            &tab.state,
-            &tab.url,
-            &tab.title,
-            tab.progress,
+            &Chrome {
+                mode: &self.mode,
+                state: &tab.state,
+                url: &tab.url,
+                title: &tab.title,
+                progress: tab.progress,
+                titles: &titles,
+                focus: self.focus,
+            },
         );
 
         // One place decides where the cursor goes, though two modes have an
