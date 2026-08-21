@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -28,11 +29,17 @@ use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::input::InputPump;
 use crate::session::Session;
+use crate::store::Snapshot;
 use crate::tab::TabId;
 
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// A held `j` produces a scroll and an extraction per frame, and every one of
+/// them changes the scroll offset a restart would come back to. Writing each
+/// would be a syscall per frame for a file nobody reads until the next launch.
+const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// What arrives on the loop's one result channel.
 ///
@@ -79,6 +86,13 @@ pub struct Core {
 
     /// Ordered delivery of keys and clicks, across every page.
     input: InputPump,
+
+    /// Where the session file goes, or `None` when this instance does not own
+    /// it. A private session, on a profile another instance holds, writes
+    /// nothing.
+    session_file: Option<PathBuf>,
+    /// The most recent snapshot not yet written.
+    pending: Option<Snapshot>,
 }
 
 impl Core {
@@ -97,7 +111,26 @@ impl Core {
             jobs_tx,
             jobs_rx,
             input,
+            session_file: None,
+            pending: None,
         }
+    }
+
+    /// Write the pending snapshot, if there is one and it is ours to write.
+    ///
+    /// `spawn_blocking` rather than the loop's own thread: it is a small file
+    /// and a rename, but the loop's promise is that nothing in it waits on a
+    /// syscall.
+    fn flush_save(&mut self) {
+        let (Some(path), Some(snapshot)) = (self.session_file.clone(), self.pending.take()) else {
+            return;
+        };
+        let tx = self.jobs_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::store::save(&path, &snapshot) {
+                let _ = tx.send(Finished::Job(Job::Noted(error)));
+            }
+        });
     }
 
     /// Say something in the statusline before the loop starts.
@@ -109,14 +142,17 @@ impl Core {
         let mut terminal = EventStream::new();
         let mut cdp = self.client.subscribe();
         let mut resize_at: Option<Instant> = None;
+        let mut save_at: Option<Instant> = None;
 
         let effects = self.session.begin();
-        if self.apply(effects, out)? {
+        if self.apply(effects, &mut save_at, out)? {
             return Ok(());
         }
         self.present(out)?;
 
         loop {
+            let mut due_to_save = false;
+
             // Every arm produces an event and nothing else. Touching
             // `self` inside one would borrow it while the other futures are
             // still alive, which is what used to force a whole spawned task
@@ -155,7 +191,24 @@ impl Core {
                     let (grid, cell) = wwt_term::probe().context("re-measure the terminal")?;
                     Some(Incoming::Event(Event::Resized(grid, cell)))
                 }
+
+                // No event on purpose: a write changes nothing about what is
+                // on screen, and composing again would build the same frame
+                // and diff it against itself. The flag rather than the write
+                // itself, because an arm that borrowed `self` would borrow it
+                // while the other futures are still alive.
+                () = async { sleep_until(save_at.expect("guarded")).await },
+                    if save_at.is_some() =>
+                {
+                    save_at = None;
+                    due_to_save = true;
+                    None
+                }
             };
+
+            if due_to_save {
+                self.flush_save();
+            }
 
             // A page is `Core`'s. This is where one is filed, because it is
             // the first point in the turn that can borrow `self` mutably.
@@ -195,7 +248,7 @@ impl Core {
             // chatters on the console would pay for a repaint per line.
             if let Some(event) = event {
                 let effects = self.session.on(event);
-                if self.apply(effects, out)? {
+                if self.apply(effects, &mut save_at, out)? {
                     return Ok(());
                 }
                 self.present(out)?;
@@ -204,10 +257,25 @@ impl Core {
     }
 
     /// Do what the session asked for. `true` means it is time to quit.
-    fn apply(&mut self, effects: Vec<Effect>, out: &mut impl Write) -> Result<bool> {
+    fn apply(
+        &mut self,
+        effects: Vec<Effect>,
+        save_at: &mut Option<Instant>,
+        out: &mut impl Write,
+    ) -> Result<bool> {
         for effect in effects {
             match effect {
-                Effect::Quit => return Ok(true),
+                Effect::Quit => {
+                    // The last second of browsing is exactly the part you
+                    // would notice missing.
+                    self.flush_save();
+                    return Ok(true);
+                }
+
+                Effect::Save(snapshot) => {
+                    self.pending = Some(snapshot);
+                    *save_at = Some(Instant::now() + SAVE_DEBOUNCE);
+                }
 
                 Effect::MouseCapture(on) => {
                     if on {

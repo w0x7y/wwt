@@ -9,6 +9,7 @@ use wwt_cdp::Attached;
 use wwt_frame::Viewport;
 use wwt_page::Input;
 
+use crate::store::Snapshot;
 use crate::tab::TabId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +40,10 @@ pub enum Effect {
     /// answered by whichever target is foreground, so ours and the browser's
     /// have to be the same one.
     Activate(TabId),
+    /// Write the open tabs down. Coalesced by the loop, so asking often is
+    /// cheap and asking on every scroll frame is what keeps a crash from
+    /// costing you your place.
+    Save(Snapshot),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

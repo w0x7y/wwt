@@ -29,6 +29,7 @@ use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
+use crate::store::{SavedTab, Snapshot};
 use crate::tab::{Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
@@ -140,6 +141,29 @@ impl Session {
         self.tabs.push(tab);
         self.focus = self.tabs.len() - 1;
         effects.push(Effect::OpenTab { id, url });
+        self.save(effects);
+    }
+
+    /// The open tabs, as they would be restored.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            version: crate::store::VERSION,
+            focus: self.focus,
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| SavedTab {
+                    url: tab.url.clone(),
+                    title: tab.title.clone(),
+                    scroll_y: tab.scroll_y,
+                })
+                .collect(),
+        }
+    }
+
+    /// Note that what a restart would come back to has changed.
+    fn save(&self, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Save(self.snapshot()));
     }
 
     /// Make room for a tab the page opened for itself.
@@ -154,6 +178,10 @@ impl Session {
         self.tabs.push(tab);
         self.focus = self.tabs.len() - 1;
         effects.push(Effect::AdoptTab { id, target });
+        // Deliberately no save. The browser has not said where this tab is
+        // going yet, and a tab with no url in the file is one a restart
+        // cannot come back to. Its first extraction changes the url, which
+        // is a save on its own terms.
     }
 
     /// Close a tab, and go wherever that leaves you.
@@ -170,6 +198,7 @@ impl Session {
             effects.push(Effect::Quit);
             return;
         }
+        self.save(effects);
 
         if index < self.focus {
             // Something to the left went. You are still looking at the same
@@ -205,6 +234,7 @@ impl Session {
         // Spends the dirty flag this tab has been accumulating in the
         // background, and does nothing if it has none.
         self.start_extract(id, effects);
+        self.save(effects);
     }
 
     /// The tab `steps` along from the focused one, wrapping.
@@ -572,6 +602,13 @@ impl Session {
             Job::Extracted(_, extraction) => {
                 let progress = extraction.scroll_progress();
                 let tab = self.tab_mut(id).expect("resolved above");
+                // What a restart would come back to, before this extraction
+                // touches it. Compared against what is stored rather than
+                // against what arrived: an error page's URL is deliberately
+                // not kept, so a comparison with the extraction would differ
+                // every time and turn a page that cannot load into a write
+                // per dirty signal.
+                let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
                 tab.extracting = false;
                 tab.progress = progress;
                 tab.scroll_y = extraction.scroll_y;
@@ -593,6 +630,10 @@ impl Session {
                     if !tab.navigating {
                         tab.state = State::Ready;
                     }
+                }
+                let tab = self.tab_mut(id).expect("resolved above");
+                if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
+                    self.save(effects);
                 }
                 // The page may have changed again while we were extracting.
                 self.start_extract(id, effects);
@@ -755,16 +796,26 @@ mod tests {
             assert_eq!(session.on(Event::Dirty(tab0())), vec![], "a second extraction would race it");
         }
 
-        // Finishing it starts exactly one more, covering all three.
+        // Finishing it starts exactly one more, covering all three. The tab
+        // had no url until now, so this is also the first thing worth
+        // writing down.
         let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank")))));
-        assert_eq!(effects, vec![Effect::Extract(tab0())]);
+        assert_eq!(
+            effects,
+            vec![Effect::Save(session.snapshot()), Effect::Extract(tab0())]
+        );
     }
 
     #[test]
     fn a_page_that_stopped_changing_stops_being_read() {
         let mut session = ready();
+        // The same page `ready` left it on: an idle page is one that did not
+        // move, so extracting it again must cost neither a read nor a write.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("https://example.com"))
+            ))),
             vec![],
             "an idle page must cost nothing"
         );
@@ -805,7 +856,10 @@ mod tests {
         assert_eq!(mid_extraction, vec![], "an extraction was in flight and still is");
         // The one already running still finishes, and finds nothing to do.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("https://example.com"))
+            ))),
             vec![]
         );
     }
@@ -1247,6 +1301,105 @@ mod tests {
         }
     }
 
+    // The session file.
+
+    fn saved(effects: &[Effect]) -> Option<&Snapshot> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Save(snapshot) => Some(snapshot),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_snapshot_is_the_tabs_you_have_and_the_one_you_are_looking_at() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let snapshot = session.snapshot();
+
+        assert_eq!(snapshot.version, crate::store::VERSION);
+        assert_eq!(snapshot.focus, 2);
+        assert_eq!(snapshot.tabs.len(), 3);
+        assert_eq!(snapshot.tabs[0].url, "https://example.com");
+        assert_eq!(snapshot.tabs[0].title, "Example");
+    }
+
+    #[test]
+    fn opening_a_tab_is_worth_writing_down() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+
+        let effects = session.on(code(KeyCode::Enter));
+
+        assert!(saved(&effects).is_some(), "the tab set changed");
+    }
+
+    #[test]
+    fn closing_a_tab_is_worth_writing_down() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('x'));
+
+        assert_eq!(saved(&effects).map(|s| s.tabs.len()), Some(2));
+    }
+
+    #[test]
+    fn switching_tabs_is_worth_writing_down() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('J'));
+
+        assert_eq!(saved(&effects).map(|s| s.focus), Some(0));
+    }
+
+    #[test]
+    fn an_extraction_that_moved_the_page_is_worth_writing_down() {
+        let mut session = ready();
+        let mut moved = extraction("https://example.com");
+        moved.scroll_y = 240.0;
+
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(moved))));
+
+        assert_eq!(saved(&effects).map(|s| s.tabs[0].scroll_y), Some(240.0));
+    }
+
+    #[test]
+    fn an_extraction_that_changed_nothing_is_not_worth_a_write() {
+        let mut session = ready();
+        session.focused_mut().dirty = true;
+
+        let effects = session.on(Event::Done(Job::Extracted(
+            tab0(),
+            Box::new(extraction("https://example.com")),
+        )));
+
+        assert!(
+            saved(&effects).is_none(),
+            "an idle page must not turn into a write per extraction"
+        );
+    }
+
+    #[test]
+    fn an_error_page_extracted_again_is_not_worth_a_write() {
+        // Its URL is deliberately not the one the tab keeps, so a save
+        // decided on the extraction rather than on what was stored would
+        // write on every dirty signal a page that cannot even load.
+        let mut session = ready();
+        let error = || {
+            Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("chrome-error://chromewebdata/")),
+            ))
+        };
+        session.on(error());
+
+        let effects = session.on(error());
+
+        assert!(saved(&effects).is_none(), "nothing a restart would notice moved");
+    }
+
     // Opening and closing.
 
     #[test]
@@ -1263,10 +1416,13 @@ mod tests {
         assert_eq!(session.focused().id, TabId(1), "a new tab is the one you are looking at");
         assert_eq!(
             effects,
-            vec![Effect::OpenTab {
-                id: TabId(1),
-                url: "https://example.org".to_string()
-            }]
+            vec![
+                Effect::OpenTab {
+                    id: TabId(1),
+                    url: "https://example.org".to_string()
+                },
+                Effect::Save(session.snapshot()),
+            ]
         );
     }
 
@@ -1450,7 +1606,11 @@ mod tests {
         session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
 
         let effects = session.on(key('K'));
-        assert_eq!(effects, vec![Effect::Activate(TabId(2))], "nothing to re-read");
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(2)), Effect::Save(session.snapshot())],
+            "nothing to re-read, though which tab you are on is worth keeping"
+        );
     }
 
     #[test]
