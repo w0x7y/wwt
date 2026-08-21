@@ -98,6 +98,17 @@ pub struct Page {
     target_id: String,
 }
 
+/// Its identity and nothing else: a `Page` is a handle on a browser, and the
+/// browser is not something to print.
+impl std::fmt::Debug for Page {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Page")
+            .field("target", &self.target_id)
+            .field("session", &self.session_id)
+            .finish()
+    }
+}
+
 impl Page {
     /// Create a target, size it to the viewport, navigate, and wait for load.
     pub async fn open(client: Arc<Client>, url: &str, vp: Viewport) -> Result<Page> {

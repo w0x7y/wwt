@@ -33,14 +33,41 @@ use crate::tab::TabId;
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// What arrives on the loop's one result channel.
+///
+/// Most of it is a `Job` on its way to the session unchanged. A target that
+/// finished opening is not: the `Page` it produced belongs to `Core`, and the
+/// session must never hold one, so the page is filed here and the session
+/// hears only that the tab opened.
+#[derive(Debug)]
+enum Finished {
+    Job(Job),
+    Opened(TabId, Result<Arc<Page>, String>),
+}
+
+impl From<Job> for Finished {
+    fn from(job: Job) -> Self {
+        Finished::Job(job)
+    }
+}
+
+/// What one turn of the loop picked up. An arm produces one of these and
+/// touches nothing, because borrowing `self` in one while the other futures
+/// are alive is what used to force a whole spawned task to merge two
+/// channels into one.
+enum Incoming {
+    Event(Event),
+    Finished(Finished),
+}
+
 pub struct Core {
     pages: HashMap<TabId, Arc<Page>>,
     client: Arc<Client>,
     renderer: Renderer,
     session: Session,
 
-    jobs_tx: mpsc::UnboundedSender<Job>,
-    jobs_rx: mpsc::UnboundedReceiver<Job>,
+    jobs_tx: mpsc::UnboundedSender<Finished>,
+    jobs_rx: mpsc::UnboundedReceiver<Finished>,
 
     /// Ordered delivery of keys and clicks, across every page.
     input: InputPump,
@@ -85,12 +112,12 @@ impl Core {
             // `self` inside one would borrow it while the other futures are
             // still alive, which is what used to force a whole spawned task
             // to merge two channels into one.
-            let event = tokio::select! {
+            let incoming = tokio::select! {
                 Some(Ok(event)) = terminal.next() => match event {
                     TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                        Some(Event::Key(key))
+                        Some(Incoming::Event(Event::Key(key)))
                     }
-                    TermEvent::Mouse(mouse) => Some(Event::Mouse(mouse)),
+                    TermEvent::Mouse(mouse) => Some(Incoming::Event(Event::Mouse(mouse))),
                     TermEvent::Resize(..) => {
                         resize_at = Some(Instant::now() + RESIZE_DEBOUNCE);
                         None
@@ -102,17 +129,32 @@ impl Core {
                     .pages
                     .iter()
                     .find(|(_, page)| page.is_dirty(&event))
-                    .map(|(id, _)| Event::Dirty(*id)),
+                    .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
 
-                Some(job) = self.jobs_rx.recv() => Some(Event::Done(job)),
+                Some(finished) = self.jobs_rx.recv() => Some(Incoming::Finished(finished)),
 
                 () = async { sleep_until(resize_at.expect("guarded")).await },
                     if resize_at.is_some() =>
                 {
                     resize_at = None;
                     let (grid, cell) = wwt_term::probe().context("re-measure the terminal")?;
-                    Some(Event::Resized(grid, cell))
+                    Some(Incoming::Event(Event::Resized(grid, cell)))
                 }
+            };
+
+            // A page is `Core`'s. This is where one is filed, because it is
+            // the first point in the turn that can borrow `self` mutably.
+            let event = match incoming {
+                Some(Incoming::Event(event)) => Some(event),
+                Some(Incoming::Finished(Finished::Job(job))) => Some(Event::Done(job)),
+                Some(Incoming::Finished(Finished::Opened(id, Ok(page)))) => {
+                    self.pages.insert(id, page);
+                    Some(Event::Done(Job::Opened(id, Ok(()))))
+                }
+                Some(Incoming::Finished(Finished::Opened(id, Err(error)))) => {
+                    Some(Event::Done(Job::Opened(id, Err(error))))
+                }
+                None => None,
             };
 
             // Only what the session saw can have changed what it looks
@@ -200,6 +242,40 @@ impl Core {
                     })
                 }),
 
+                Effect::OpenTab { id, url } => {
+                    let vp = self.session.viewport();
+                    let client = Arc::clone(&self.client);
+                    let tx = self.jobs_tx.clone();
+                    tokio::spawn(async move {
+                        let opened = Page::open(client, &url, vp)
+                            .await
+                            .map(Arc::new)
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(Finished::Opened(id, opened));
+                    });
+                }
+
+                Effect::CloseTab(id) => {
+                    // Taken out of the map first: whatever happens to the
+                    // target, nothing may still be sent to a tab the session
+                    // has already let go of.
+                    if let Some(page) = self.pages.remove(&id) {
+                        let tx = self.jobs_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = page.close().await {
+                                let _ = tx.send(Finished::Job(Job::Noted(error.to_string())));
+                            }
+                        });
+                    }
+                }
+
+                Effect::Activate(id) => self.spawn(id, |page| async move {
+                    page.activate()
+                        .await
+                        .err()
+                        .map(|e| Job::Noted(e.to_string()))
+                }),
+
                 Effect::SetViewport(id, vp) => {
                     // A diff against a frame of different dimensions is
                     // meaningless.
@@ -242,7 +318,7 @@ impl Core {
         let tx = self.jobs_tx.clone();
         tokio::spawn(async move {
             if let Some(job) = make(page).await {
-                let _ = tx.send(job);
+                let _ = tx.send(Finished::Job(job));
             }
         });
     }

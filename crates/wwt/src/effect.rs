@@ -26,6 +26,14 @@ pub enum Effect {
     /// changed; this is the page catching up. Emitted once per tab, because
     /// a background tab has to be the right size already when you reach it.
     SetViewport(TabId, Viewport),
+    /// Create a target for a tab the session has already made room for, and
+    /// navigate it.
+    OpenTab { id: TabId, url: String },
+    CloseTab(TabId),
+    /// Make this tab the one the browser has in front. Input dispatch is
+    /// answered by whichever target is foreground, so ours and the browser's
+    /// have to be the same one.
+    Activate(TabId),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

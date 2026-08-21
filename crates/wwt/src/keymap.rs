@@ -42,6 +42,9 @@ pub enum Action {
     /// Widen them again.
     HintPop,
 
+    /// Close the tab you are looking at.
+    TabClose,
+
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
 }
@@ -95,6 +98,8 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('i') => Some(Action::Insert),
         KeyCode::Char(':') => Some(Action::EnterCommand(String::new())),
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
+        KeyCode::Char('t') => Some(Action::EnterCommand("tabopen ".to_string())),
+        KeyCode::Char('x') => Some(Action::TabClose),
         KeyCode::Char('q') => Some(Action::Quit),
         _ => None,
     }
@@ -306,5 +311,16 @@ mod tests {
             action_for(&Mode::Insert, ctrl(']'), vp()),
             Some(Action::Send(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
         );
+    }
+
+    #[test]
+    fn t_and_x_open_and_close_tabs_in_normal_mode_only() {
+        assert_eq!(
+            action_for(&normal_mode(), key('t'), vp()),
+            Some(Action::EnterCommand("tabopen ".to_string()))
+        );
+        assert_eq!(action_for(&normal_mode(), key('x'), vp()), Some(Action::TabClose));
+        // Insert mode types them, as it types everything.
+        assert!(matches!(action_for(&Mode::Insert, key('x'), vp()), Some(Action::Send(_))));
     }
 }

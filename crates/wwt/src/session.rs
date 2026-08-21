@@ -123,6 +123,56 @@ impl Session {
         self.tabs.iter_mut().find(|tab| tab.id == id)
     }
 
+    pub fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+
+    /// Make room for a tab and ask for its page.
+    ///
+    /// The tab exists before its page does. Between here and `Job::Opened`
+    /// it is marked loading and `Core` holds nothing for it, so effects
+    /// naming it are dropped; nothing could have expected to land.
+    fn open_tab(&mut self, url: String, effects: &mut Vec<Effect>) {
+        let id = self.mint();
+        let mut tab = Tab::new(id, url.clone());
+        tab.navigating = true;
+        self.tabs.push(tab);
+        self.focus = self.tabs.len() - 1;
+        effects.push(Effect::OpenTab { id, url });
+    }
+
+    /// Close a tab, and go wherever that leaves you.
+    fn close_tab(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        effects.push(Effect::CloseTab(id));
+        self.tabs.remove(index);
+
+        if self.tabs.is_empty() {
+            // A browser with no page in it is not a state worth having, and
+            // it is the same rule `q` follows.
+            effects.push(Effect::Quit);
+            return;
+        }
+
+        if index < self.focus {
+            // Something to the left went. You are still looking at the same
+            // page; only its index moved.
+            self.focus -= 1;
+            return;
+        }
+        if index > self.focus {
+            return;
+        }
+        // The page you were looking at went, and its right-hand neighbour
+        // has taken its index, which is where the eye already is.
+        self.focus = index.min(self.tabs.len() - 1);
+        let id = self.focused_id();
+        effects.push(Effect::Activate(id));
+        self.start_extract(id, effects);
+    }
+
     /// The first read of a page nobody has looked at yet.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -285,6 +335,11 @@ impl Session {
                 self.on_filtered(filtered, effects);
             }
 
+            Action::TabClose => {
+                let id = self.focused_id();
+                self.close_tab(id, effects);
+            }
+
             Action::Send(key) => self.send_key(key, effects),
         }
     }
@@ -304,6 +359,11 @@ impl Session {
             Command::Open(url) => {
                 self.focused_mut().url = url.clone();
                 self.navigate(Navigation::Open(url), effects);
+            }
+            Command::TabOpen(url) => self.open_tab(url, effects),
+            Command::TabClose => {
+                let id = self.focused_id();
+                self.close_tab(id, effects);
             }
             Command::Back => self.navigate(Navigation::Back, effects),
             Command::Forward => self.navigate(Navigation::Forward, effects),
@@ -435,6 +495,7 @@ impl Session {
                 self.focused_mut().state = State::Error(message.clone());
                 return;
             }
+            Job::Opened(id, _) => *id,
         };
         if self.tab_mut(id).is_none() {
             // The tab was closed while this was in flight. Its id is never
@@ -499,6 +560,23 @@ impl Session {
             Job::Resized(_) => {
                 self.tab_mut(id).expect("resolved above").mark_dirty();
                 self.start_extract(id, effects);
+            }
+            Job::Opened(_, Ok(())) => {
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.navigating = false;
+                tab.state = State::Ready;
+                tab.mark_dirty();
+                if self.focused_id() == id {
+                    effects.push(Effect::Activate(id));
+                }
+                self.start_extract(id, effects);
+            }
+            Job::Opened(_, Err(message)) => {
+                // A tab with no page behind it is not a tab. Drop it and say
+                // why, without disturbing the one you were on. The target was
+                // never created, so there is nothing for `Core` to close.
+                self.close_tab(id, &mut Vec::new());
+                self.focused_mut().state = State::Error(message);
             }
             Job::Failed(_, message) => {
                 let tab = self.tab_mut(id).expect("resolved above");
@@ -1062,5 +1140,109 @@ mod tests {
         let stale = Job::Extracted(TabId(999), Box::new(extraction("https://elsewhere.test")));
         assert_eq!(session.on(Event::Done(stale)), vec![]);
         assert_eq!(session.focused().url, "https://example.com", "the frame is untouched");
+    }
+
+    /// Two more tabs, both opened and settled, focus left on the last.
+    fn open_two_more(session: &mut Session) {
+        for (n, url) in [(1u32, "one.test"), (2, "two.test")] {
+            typed(session, &format!(":tabopen {url}"));
+            session.on(code(KeyCode::Enter));
+            session.on(Event::Done(Job::Opened(TabId(n), Ok(()))));
+            session.on(Event::Done(Job::Extracted(
+                TabId(n),
+                Box::new(extraction(&format!("https://{url}"))),
+            )));
+        }
+    }
+
+    // Opening and closing.
+
+    #[test]
+    fn opening_a_tab_asks_for_a_page_and_moves_you_to_it() {
+        let mut session = ready();
+        let effects = session.on(key('t'));
+        assert!(matches!(session.mode(), Mode::Command(buffer) if buffer == "tabopen "));
+        assert_eq!(effects, vec![], "`t` only opens the : line");
+
+        typed(&mut session, "example.org");
+        let effects = session.on(code(KeyCode::Enter));
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(1), "a new tab is the one you are looking at");
+        assert_eq!(
+            effects,
+            vec![Effect::OpenTab {
+                id: TabId(1),
+                url: "https://example.org".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tab_that_finished_opening_is_activated_and_read() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+        );
+    }
+
+    #[test]
+    fn a_tab_that_could_not_be_opened_leaves_you_where_you_were() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        session.on(Event::Done(Job::Opened(TabId(1), Err("no target".to_string()))));
+        assert_eq!(session.tabs().len(), 1, "a tab with no page is not a tab");
+        assert_eq!(session.focused().id, tab0());
+        assert!(matches!(session.state(), State::Error(_)));
+    }
+
+    #[test]
+    fn closing_the_focused_tab_lands_you_on_its_right_hand_neighbour() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        // Three tabs, focused on the middle one.
+        session.focus = 1;
+        assert_eq!(session.focused().id, TabId(1));
+
+        let effects = session.on(key('x'));
+        assert!(effects.contains(&Effect::CloseTab(TabId(1))));
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(2), "the right-hand neighbour took its place");
+    }
+
+    #[test]
+    fn closing_a_tab_to_your_left_leaves_you_looking_at_the_same_page() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        assert_eq!(session.focused().id, TabId(2));
+
+        session.close_tab(tab0(), &mut Vec::new());
+        assert_eq!(session.focused().id, TabId(2), "you did not move");
+    }
+
+    #[test]
+    fn closing_the_last_tab_quits() {
+        let mut session = ready();
+        let effects = session.on(key('x'));
+        assert!(effects.contains(&Effect::CloseTab(tab0())));
+        assert!(effects.contains(&Effect::Quit), "a browser with no page in it is not a state");
+    }
+
+    #[test]
+    fn a_closed_tabs_late_answer_lands_nowhere() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        session.on(key('x')); // closes TabId(2), leaving 0 and 1
+
+        let late = Job::Extracted(TabId(2), Box::new(extraction("https://gone.test")));
+        assert_eq!(session.on(Event::Done(late)), vec![]);
+        assert_eq!(session.tabs().len(), 2);
     }
 }

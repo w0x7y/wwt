@@ -838,17 +838,29 @@ fn a_closed_page_is_gone_from_the_browser() {
 
         page.close().await.expect("close the target");
 
-        let targets = h
-            .client
-            .call("Target.getTargets", serde_json::json!({}))
-            .await
-            .expect("list targets");
-        let still_there = targets["targetInfos"]
-            .as_array()
-            .expect("an array of targets")
-            .iter()
-            .any(|info| info["targetId"] == target.as_str());
-        assert!(!still_there, "the target outlived the close");
+        // `Target.closeTarget` answers as soon as the browser has accepted
+        // the close, not once the target is gone, so this waits rather than
+        // asserting on the instant after. Making `close` itself wait would
+        // put a second round trip on every tab you shut for the sake of an
+        // answer nothing needs.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let targets = h
+                .client
+                .call("Target.getTargets", serde_json::json!({}))
+                .await
+                .expect("list targets");
+            let still_there = targets["targetInfos"]
+                .as_array()
+                .expect("an array of targets")
+                .iter()
+                .any(|info| info["targetId"] == target.as_str());
+            if !still_there {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the target outlived the close");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     });
 }
 

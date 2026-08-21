@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+use wwt::event::Job;
 use wwt::input::InputPump;
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, GridSize, Viewport};
@@ -50,7 +51,7 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
     );
     page.eval("document.querySelector('#name').focus()").await.expect("focus");
 
-    let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
+    let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel::<Job>();
     let pump = InputPump::spawn(jobs_tx);
 
     let typed = "the quick brown fox";

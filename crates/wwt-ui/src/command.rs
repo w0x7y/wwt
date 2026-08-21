@@ -15,6 +15,8 @@ pub enum Setting {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Open(String),
+    TabOpen(String),
+    TabClose,
     Back,
     Forward,
     Reload,
@@ -38,6 +40,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
             }
             Ok(Command::Open(normalize_url(rest)?))
         }
+        "tabopen" | "t" => {
+            if rest.is_empty() {
+                return Err("tabopen needs a URL".to_string());
+            }
+            Ok(Command::TabOpen(normalize_url(rest)?))
+        }
+        "tabclose" => Ok(Command::TabClose),
         "back" | "b" => Ok(Command::Back),
         "forward" | "f" => Ok(Command::Forward),
         "reload" => Ok(Command::Reload),
@@ -159,4 +168,21 @@ mod tests {
         assert!(parse("set mouse maybe").is_err());
     }
 
+    #[test]
+    fn tabopen_normalizes_its_url_the_way_open_does() {
+        assert_eq!(
+            parse("tabopen example.com"),
+            Ok(Command::TabOpen("https://example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn tabopen_without_a_url_is_an_error_rather_than_a_blank_tab() {
+        assert!(parse("tabopen").is_err());
+    }
+
+    #[test]
+    fn tabclose_takes_no_argument() {
+        assert_eq!(parse("tabclose"), Ok(Command::TabClose));
+    }
 }

@@ -30,13 +30,19 @@ impl InputPump {
     /// keystroke fails, whoever typed it has typed three more. They go on
     /// the channel every other finished page operation goes on, so the loop
     /// has one thing to select on rather than two.
-    pub fn spawn(jobs: mpsc::UnboundedSender<Job>) -> Self {
+    /// Generic over what the channel carries so that the core can wrap a
+    /// `Job` in whatever its own result channel is shaped like. The pump
+    /// itself only ever reports a `Job::Noted`.
+    pub fn spawn<T>(jobs: mpsc::UnboundedSender<T>) -> Self
+    where
+        T: From<Job> + Send + 'static,
+    {
         let (tx, mut rx) = mpsc::unbounded_channel::<(Arc<Page>, Input)>();
 
         tokio::spawn(async move {
             while let Some((page, input)) = rx.recv().await {
                 if let Err(error) = page.dispatch(&input).await {
-                    let _ = jobs.send(Job::Noted(error.to_string()));
+                    let _ = jobs.send(Job::Noted(error.to_string()).into());
                 }
             }
         });

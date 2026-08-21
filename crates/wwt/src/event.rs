@@ -42,6 +42,9 @@ pub enum Job {
     Hints(TabId, Result<Vec<HintTarget>, String>),
     /// The page has been told the window changed size.
     Resized(TabId),
+    /// A tab's target was created and navigated, or could not be. The page
+    /// itself never reaches the session; `Core` keeps it.
+    Opened(TabId, Result<(), String>),
     /// Something failed after the loop had moved on: a keystroke, a click, a
     /// blur. Say so in the statusline and change nothing else.
     Noted(String),
