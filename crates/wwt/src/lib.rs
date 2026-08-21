@@ -20,7 +20,7 @@ use wwt_page::Page;
 /// M1 tears the browser down on return. M4 replaces this with a session that
 /// keeps the browser and its targets alive across navigations.
 pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
-    let browser = Chromium::launch().await.context("launch chromium")?;
+    let browser = Chromium::launch(None).await.context("launch chromium")?;
     let client = Client::connect(browser.ws_url())
         .await
         .context("connect to chromium")?;

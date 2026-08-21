@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     // Everything that can fail loudly happens before we touch the terminal,
     // so a failure leaves the user's screen exactly as it was.
-    let browser = Chromium::launch().await.context("launch chromium")?;
+    let browser = Chromium::launch(None).await.context("launch chromium")?;
     let client = Arc::new(
         Client::connect(browser.ws_url())
             .await
