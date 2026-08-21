@@ -1825,6 +1825,53 @@ mod tests {
         );
     }
 
+    /// What a tab switch costs. Run with:
+    ///
+    ///     cargo test -p wwt --lib measure_switch -- --nocapture
+    ///
+    /// The claim in spec section 3 is that a switch is a repaint and no round
+    /// trip, so this asserts the absence of an extraction as well as printing
+    /// the time. A page's worth of runs is composed and the frame is built,
+    /// which is everything between pressing `J` and having the text.
+    ///
+    /// It needs no browser, which is the point: nothing leaves the process.
+    #[test]
+    fn measure_switch() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        for tab in 0..3 {
+            // Down the page rather than all on one row, or the frame this
+            // times is one row of text and the diff has nothing to do.
+            session.tabs[tab].runs = (0..300)
+                .map(|i| {
+                    let mut run = run(&format!("line {i}"));
+                    run.rect.y = f64::from(i) * 20.0;
+                    run.baseline = run.rect.y + 16.0;
+                    run
+                })
+                .collect();
+            session.tabs[tab].read = true;
+            session.tabs[tab].dirty = false;
+        }
+
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..200 {
+            let start = std::time::Instant::now();
+            let effects = session.on(key('J'));
+            let frame = session.compose();
+            worst = worst.max(start.elapsed());
+
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::Extract(_))),
+                "a clean tab must not be re-read: a switch is a repaint"
+            );
+            std::hint::black_box(frame);
+        }
+        eprintln!("switch, worst of 200: {worst:?}");
+        // Loose on purpose: it runs on whatever machine CI has.
+        assert!(worst < std::time::Duration::from_millis(5), "switch took {worst:?}");
+    }
+
     #[test]
     fn a_hint_answer_for_a_tab_you_have_left_does_not_put_labels_over_another_page() {
         let mut session = ready();

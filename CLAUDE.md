@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M3** (interaction). Milestones M1–M7 are defined in
+Currently at **M4** (tabs and sessions). Milestones M1–M7 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 233 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 307 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -26,6 +26,7 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
     cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
     cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
+    cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -206,6 +207,71 @@ only if the mode is still normal. A round trip is long enough to have typed
 half a `:` command, and labels must not land on top of it. `Job::Hints` carries
 a `Result` rather than splitting into two variants, so there is one place that
 can forget to note the query is over.
+
+## Tabs and sessions
+
+`Session` holds `Vec<Tab>` and a focus index; `Tab` (`wwt/src/tab.rs`) holds
+everything true of one page rather than of the browser. `Core` holds
+`HashMap<TabId, Arc<Page>>`. Four rules carry M4:
+
+- **A `TabId` is a counter and never a position.** Effects name a tab and jobs
+  name it back, and a job whose tab is gone is dropped. Close a tab while its
+  extraction is in flight and every later tab shifts down one; an index would
+  let the answer land on a page that never asked.
+- **A background tab keeps its runs.** A switch paints from the cache and only
+  then re-extracts, so it is a repaint rather than a round trip.
+  `measure_switch` holds that down: tens of microseconds for three tabs of 300
+  runs, against a ~4ms extraction, which is the whole point. It
+  also keeps its dirty flag rather than spending it: a tab is read once when it
+  opens and thereafter only while focused, so an idle background tab costs what
+  an idle foreground tab costs.
+- **Switching activates.** `Input.dispatchMouseEvent` is answered by whichever
+  target the browser has in front. With one target that was a test-harness
+  quirk; with several it is a correctness rule, and M5's screencast will want
+  the same guarantee.
+- **A `Page` never reaches `Session`.** The loop's result channel carries a
+  `Finished`, which is either a `Job` on its way through or a target that
+  finished opening; the page is filed in `Core` and the session hears only that
+  the tab opened.
+
+The chrome is two rows, the tab bar on top and the statusline at the bottom,
+both unconditional so opening a tab never reflows a page. The page therefore
+does not start at frame row 0, and that shift lives in `Viewport` as an origin
+row rather than as a `+1` in `paint_run`, `Caret::cell` and `page_cell`.
+`to_cell(to_css(c)) == c` now holds at every origin too.
+
+**The profile is the lock.** Chromium refuses a `--user-data-dir` another
+Chromium holds, so a second `wwt` falls back to a temporary profile, says
+`private session`, and writes no session file. The instance holding the profile
+owns that file: one rule for both resources and no lock file of ours to go
+stale after a crash.
+
+**Deciding to save is a rule, writing is machinery.** `Session` emits
+`Effect::Save` when the tab set, the focus, or a page's URL, title or scroll
+offset changes; `Core` coalesces on a timer and writes temp-then-rename. An
+extraction of a page that did not move is not a write, and whether it moved is
+decided against what the tab stores rather than against what the extraction
+carried: an error page's URL is deliberately not kept, so comparing with the
+extraction would write on every dirty signal.
+
+**Adoption catches up; it does not hold.** A target a page opened is reported
+by auto-attach and told apart by `openerId`, which `Target.createTarget` does
+not set. `waitForDebuggerOnStart` looks like the way to get the bootstrap into
+the document such a tab loads and is not: a held target answers
+`Target.getTargetInfo` and `Runtime.runIfWaitingForDebugger` and nothing else,
+so no setup call can be awaited, and a registration queued ahead of the release
+still misses the document. `Page::adopt` registers the bootstrap for the next
+document and evaluates it into the one already there; the script returns early
+when it finds itself installed.
+
+**Restoring a tab is opening it, not opening then scrolling.**
+`Effect::OpenTab` carries the offset. As two effects they are two spawned
+tasks, and an extraction that wins that race reads offset zero and writes it
+down, losing the position being restored.
+
+Eviction of background targets past a limit, and the lazy restore that shares
+its machinery, are deferred to M7. They introduce the one state this design
+does not have, a tab that exists without a target.
 
 ## Performance
 

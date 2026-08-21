@@ -4,9 +4,11 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M3, interaction.** It renders a page, scrolls it, follows
-history, opens other URLs, reaches every link from the keyboard, types
-into forms, and clicks with the mouse. Tabs and pixel mode are M4 and
+**Status: M4, tabs and sessions.** It renders a page, scrolls it,
+follows history, opens other URLs, reaches every link from the keyboard,
+types into forms, and clicks with the mouse. It keeps many pages open at
+once under one Chromium, follows the links that want a new tab, and
+comes back to the same tabs, still logged in, tomorrow. Pixel mode is
 M5.
 
 ## Requirements
@@ -19,7 +21,9 @@ M5.
 
 ## Usage
 
-    cargo run -p wwt -- example.com
+    cargo run -p wwt                 # the tabs you had open last time
+    cargo run -p wwt -- example.com  # those, and this one beside them
+    cargo run -p wwt -- --new        # one blank tab, keeping the old session on disk
 
 | Key | |
 |---|---|
@@ -28,6 +32,9 @@ M5.
 | `space` `b` | scroll a screen |
 | `g` `G` | top, bottom |
 | `H` `L` | back, forward |
+| `J` `K` | next, previous tab |
+| `t` | open a tab |
+| `x` | close this tab |
 | `Ctrl-r` | reload |
 | `o` | open a URL |
 | `:` | command line |
@@ -47,8 +54,14 @@ which costs your terminal's own text selection. Most terminals hand it
 back while shift is held; `:set mouse off` is there for the ones that do
 not.
 
-Commands: `:open <url>`, `:back`, `:forward`, `:reload`,
+Commands: `:open <url>`, `:tabopen <url>` (`:t`), `:tabclose`,
+`:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
 `:set mouse on|off`, `:quit`.
+
+wwt keeps a Chromium profile at `$XDG_DATA_HOME/wwt/profile` and the tabs
+you had open at `$XDG_DATA_HOME/wwt/session.json`. The profile is what
+makes logins durable, and it is also the lock: a second wwt cannot have
+it, so it runs private, not logged in, and writes no session file.
 
 ## Layout
 
@@ -64,6 +77,8 @@ Commands: `:open <url>`, `:back`, `:forward`, `:reload`,
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M4 design: `docs/superpowers/specs/2026-08-21-wwt-m4-design.md`
+- M4 plan: `docs/superpowers/plans/2026-08-21-wwt-m4-tabs-and-sessions.md`
 - M3 design: `docs/superpowers/specs/2026-08-19-wwt-m3-design.md`
 - M3 plan: `docs/superpowers/plans/2026-08-19-wwt-m3-interaction.md`
 - M2 design: `docs/superpowers/specs/2026-08-19-wwt-m2-design.md`
