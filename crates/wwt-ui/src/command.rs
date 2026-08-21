@@ -71,10 +71,21 @@ pub fn parse(line: &str) -> Result<Command, String> {
     }
 }
 
-/// Turn what the user typed into a URL, or explain why it is not one.
+/// Where anything that is not a URL goes.
 ///
-/// There is deliberately no search-engine fallback: choosing a default
-/// engine is a configuration question, and there is no configuration yet.
+/// DuckDuckGo because it is the one that answers a browser like this one:
+/// its html and lite endpoints are the whole page in the markup, and it
+/// wants no account to search. Making this a setting is a configuration
+/// question, and there is still no configuration.
+const SEARCH: &str = "https://duckduckgo.com/?q=";
+
+/// Turn what the user typed into a URL, or into a search for it.
+///
+/// The only thing that cannot be either is nothing at all. A single word
+/// with a dot in it is where you meant to go; everything else is what you
+/// wanted to look up, which is the guess that costs least when it is wrong:
+/// a search for `notahost` is a page you can read, where the error it used
+/// to be was a keystroke thrown away.
 pub fn normalize_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -83,20 +94,62 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     if SCHEMES.iter().any(|scheme| raw.starts_with(scheme)) {
         return Ok(raw.to_string());
     }
-    if raw.split_whitespace().count() > 1 {
-        return Err(format!("not a URL: {raw}"));
+    if raw.split_whitespace().count() == 1
+        && is_host(raw.split(['/', '?', '#']).next().unwrap_or(raw))
+    {
+        return Ok(format!("https://{raw}"));
     }
-    // A bare host needs at least one dot to be distinguishable from a typo.
-    let host = raw.split(['/', '?', '#']).next().unwrap_or(raw);
-    if !host.contains('.') {
-        return Err(format!("not a URL: {raw}"));
+    Ok(format!("{SEARCH}{}", as_query(raw)))
+}
+
+/// Whether one word is somewhere to go rather than something to look up.
+///
+/// A dot is what usually says so. The exception is a port, because
+/// `localhost:3000` has no dot in it and is the address a browser that lives
+/// in a terminal gets typed at more than any other. A colon alone is not
+/// enough: `error: not found` is a search, which is why only a word with
+/// digits after the colon counts.
+fn is_host(word: &str) -> bool {
+    if word.contains('.') {
+        return true;
     }
-    Ok(format!("https://{raw}"))
+    match word.split_once(':') {
+        Some((name, port)) => {
+            !name.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+        }
+        None => word == "localhost",
+    }
+}
+
+/// Percent-encode a search phrase for a query string.
+///
+/// Hand-rolled because the dependency set is fixed, and because the whole of
+/// what is needed here is one rule: keep what is unreserved, turn a space
+/// into `+`, and escape every other byte. Encoding is per byte, so text in
+/// any alphabet survives as its UTF-8.
+fn as_query(phrase: &str) -> String {
+    let mut out = String::with_capacity(phrase.len());
+    for byte in phrase.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The URL a search for `query` should land in, so the tests say what
+    /// they are about rather than repeating the engine.
+    fn searched(query: &str) -> String {
+        format!("{SEARCH}{query}")
+    }
 
     #[test]
     fn open_takes_a_url() {
@@ -127,9 +180,62 @@ mod tests {
     }
 
     #[test]
-    fn something_that_is_not_a_url_is_an_error_not_a_search() {
-        assert!(normalize_url("how tall is everest").is_err());
-        assert!(normalize_url("notahost").is_err());
+    fn a_word_that_is_not_a_host_is_searched_for() {
+        assert_eq!(normalize_url("banana"), Ok(searched("banana")));
+    }
+
+    #[test]
+    fn several_words_are_searched_for_as_one_phrase() {
+        assert_eq!(
+            normalize_url("how tall is everest"),
+            Ok(searched("how+tall+is+everest"))
+        );
+    }
+
+    #[test]
+    fn a_search_that_would_change_the_url_it_lands_in_is_escaped() {
+        // Anything that means something in a query string has to stop
+        // meaning it, or a search for one thing fetches another.
+        assert_eq!(normalize_url("rust & c++ 100%"), Ok(searched("rust+%26+c%2B%2B+100%25")));
+        assert_eq!(normalize_url("a/b?c#d"), Ok(searched("a%2Fb%3Fc%23d")));
+    }
+
+    #[test]
+    fn a_search_in_someone_elses_alphabet_survives_the_trip() {
+        assert_eq!(normalize_url("בננה"), Ok(searched("%D7%91%D7%A0%D7%A0%D7%94")));
+    }
+
+    #[test]
+    fn a_host_is_still_a_host_rather_than_something_to_search_for() {
+        // The fallback must not swallow the common case: one word with a dot
+        // in it is where you meant to go, not what you wanted to look up.
+        assert_eq!(normalize_url("example.com"), Ok("https://example.com".to_string()));
+        assert_eq!(
+            normalize_url("example.com/a/b?c=d"),
+            Ok("https://example.com/a/b?c=d".to_string())
+        );
+    }
+
+    #[test]
+    fn a_host_and_port_is_somewhere_to_go_rather_than_something_to_look_up() {
+        // No dot in it, and the one address a browser built in a terminal
+        // gets typed at more than any other.
+        assert_eq!(normalize_url("localhost:3000"), Ok("https://localhost:3000".to_string()));
+        assert_eq!(
+            normalize_url("localhost:8080/health"),
+            Ok("https://localhost:8080/health".to_string())
+        );
+        assert_eq!(normalize_url("localhost"), Ok("https://localhost".to_string()));
+    }
+
+    #[test]
+    fn a_phrase_with_a_colon_in_it_is_still_a_search() {
+        assert_eq!(normalize_url("error: not found"), Ok(searched("error%3A+not+found")));
+    }
+
+    #[test]
+    fn there_is_still_nothing_to_do_with_nothing() {
+        assert!(normalize_url("   ").is_err());
     }
 
     #[test]
