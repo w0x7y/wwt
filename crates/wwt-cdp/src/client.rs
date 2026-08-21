@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
+use crate::target::{Attached, TargetId};
+
 /// Every command carries a deadline, so a wedged page cannot hang the caller.
 /// Spec section 8.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -78,6 +80,54 @@ impl Client {
     ///
     /// Subscribe *before* issuing the command whose event you intend to
     /// wait for, or you can miss it.
+    /// Attach to every page target the browser opens, and hold each one
+    /// before it runs.
+    ///
+    /// The hold is the point. A target a page opened starts loading its
+    /// document at once, and a script registered with
+    /// `Page.addScriptToEvaluateOnNewDocument` only reaches documents that
+    /// have not started, so a target attached late has no bootstrap in it and
+    /// cannot be read at all. `Runtime.runIfWaitingForDebugger` lets it go
+    /// once we have installed one.
+    pub async fn auto_attach(&self) -> Result<()> {
+        self.call(
+            "Target.setAutoAttach",
+            json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
+        )
+        .await
+        .context("turn on auto-attach")?;
+        Ok(())
+    }
+
+    /// The target this event says the browser attached us to, if it is a
+    /// page rather than a worker or an iframe.
+    pub fn attached_page(event: &Event) -> Option<Attached> {
+        if event.method != "Target.attachedToTarget" {
+            return None;
+        }
+        let info = event.params.get("targetInfo")?;
+        if info.get("type")?.as_str()? != "page" {
+            return None;
+        }
+        Some(Attached {
+            target: TargetId(info.get("targetId")?.as_str()?.to_string()),
+            session: event.params.get("sessionId")?.as_str()?.to_string(),
+        })
+    }
+
+    /// The same, narrowed to targets a page opened rather than ones we asked
+    /// for.
+    ///
+    /// `openerId` is the discriminator: a page that calls `window.open` is
+    /// the opener of what it opens, and `Target.createTarget` leaves the
+    /// field out entirely. It is what keeps `Page::open` from adopting its
+    /// own target.
+    pub fn opened_by_a_page(event: &Event) -> Option<Attached> {
+        let attached = Self::attached_page(event)?;
+        let opener = event.params["targetInfo"].get("openerId")?.as_str()?;
+        (!opener.is_empty()).then_some(attached)
+    }
+
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.subscribers
@@ -290,5 +340,45 @@ mod tests {
 
         assert!(rx.recv().await.is_some(), "the event itself");
         assert!(rx.recv().await.is_none(), "the channel should close with the socket");
+    }
+
+    /// One `Target.attachedToTarget` event, as the browser sends it.
+    fn attach_event(json: &str) -> Event {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        Event {
+            session_id: None,
+            method: value["method"].as_str().expect("a method").to_string(),
+            params: value["params"].clone(),
+        }
+    }
+
+    #[test]
+    fn a_target_a_page_opened_is_told_apart_from_one_we_asked_for() {
+        // A target we created carries no openerId at all, which is what the
+        // browser was observed to do rather than sending an empty one.
+        let ours = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S1",
+                "targetInfo":{"targetId":"T1","type":"page"}}}"#,
+        );
+        assert!(Client::attached_page(&ours).is_some());
+        assert_eq!(Client::opened_by_a_page(&ours), None, "we created this one");
+
+        let theirs = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S2",
+                "targetInfo":{"targetId":"T2","type":"page","openerId":"T1"}}}"#,
+        );
+        assert_eq!(
+            Client::opened_by_a_page(&theirs),
+            Some(Attached { target: TargetId("T2".to_string()), session: "S2".to_string() })
+        );
+    }
+
+    #[test]
+    fn a_worker_is_not_a_tab() {
+        let worker = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S3",
+                "targetInfo":{"targetId":"T3","type":"worker","openerId":"T1"}}}"#,
+        );
+        assert_eq!(Client::attached_page(&worker), None);
     }
 }
