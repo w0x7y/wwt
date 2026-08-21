@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Harness, harness, open, runtime, viewport};
+use common::{Harness, harness, open, open_url, runtime, viewport};
 use tokio::sync::mpsc;
 use wwt_cdp::Event;
 use wwt_frame::{CssPoint, TargetKind};
@@ -775,5 +775,103 @@ fn focusing_a_field_signals_the_page_dirty() {
         .await;
 
         assert!(signals > 0, "a field clicked into would have no caret until it changed");
+    });
+}
+
+#[test]
+fn scrolling_to_an_offset_lands_there() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "tall.html").await;
+
+        page.scroll_to(400.0).await.expect("scroll to an offset");
+        let extraction = page.extract().await.expect("extract");
+
+        // Chromium clamps to the scrollable range and rounds to device
+        // pixels, so this asserts the neighbourhood rather than the exact
+        // number.
+        assert!(
+            (extraction.scroll_y - 400.0).abs() < 2.0,
+            "scrolled to {}, wanted 400",
+            extraction.scroll_y
+        );
+    });
+}
+
+#[test]
+fn two_pages_on_one_browser_read_their_own_documents() {
+    // One client, one websocket, one event stream. Every command a page
+    // issues is `call_on` its own session, and this is what says so: two
+    // targets alive at once, each extracting what is in it and not what is
+    // in the other.
+    let h = harness();
+    runtime().block_on(async {
+        let first = open(&h, "hello.html").await;
+        let second = open(&h, "blank.html").await;
+
+        let one = first.extract().await.expect("extract the first");
+        let two = second.extract().await.expect("extract the second");
+
+        assert!(
+            one.runs.iter().any(|run| run.text.contains("hello")),
+            "{:?}",
+            texts(&one)
+        );
+        assert!(
+            two.runs.iter().any(|run| run.text.contains("opener")),
+            "{:?}",
+            texts(&two)
+        );
+        assert_ne!(one.url, two.url);
+
+        second.close().await.expect("close the second");
+        first.close().await.expect("close the first");
+    });
+}
+
+#[test]
+fn a_closed_page_is_gone_from_the_browser() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open_url(&h, "about:blank").await;
+        let target = page.target_id().to_string();
+
+        page.close().await.expect("close the target");
+
+        let targets = h
+            .client
+            .call("Target.getTargets", serde_json::json!({}))
+            .await
+            .expect("list targets");
+        let still_there = targets["targetInfos"]
+            .as_array()
+            .expect("an array of targets")
+            .iter()
+            .any(|info| info["targetId"] == target.as_str());
+        assert!(!still_there, "the target outlived the close");
+    });
+}
+
+#[test]
+fn activating_a_page_makes_it_the_one_the_browser_has_in_front() {
+    // Input dispatch is answered by whichever target is in front, which is
+    // why switching tabs has to activate. Two targets, activate the first,
+    // and it is the one that takes the click.
+    let h = harness();
+    runtime().block_on(async {
+        let first = open(&h, "click.html").await;
+        let second = open_url(&h, "about:blank").await;
+
+        first.activate().await.expect("activate the first page");
+
+        let at = CssPoint { x: 40.0, y: 20.0 };
+        first.dispatch_mouse(&MouseInput::press(at)).await.expect("press");
+        first.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
+
+        let clicked = first.eval("window.__clicked === true").await.expect("read the flag");
+        assert_eq!(clicked, serde_json::Value::Bool(true));
+
+        second.close().await.expect("close the second");
+        first.close().await.expect("close the first");
     });
 }

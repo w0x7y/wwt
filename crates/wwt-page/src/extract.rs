@@ -95,6 +95,7 @@ struct RawTarget {
 pub struct Page {
     client: Arc<Client>,
     session_id: String,
+    target_id: String,
 }
 
 impl Page {
@@ -121,7 +122,11 @@ impl Page {
             .ok_or_else(|| anyhow!("Target.attachToTarget returned no sessionId"))?
             .to_string();
 
-        let page = Page { client, session_id };
+        let page = Page {
+            client,
+            session_id,
+            target_id,
+        };
         page.client
             .call_on(&page.session_id, "Page.enable", json!({}))
             .await
@@ -148,6 +153,40 @@ impl Page {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    /// Make this page the one the browser has in front.
+    ///
+    /// `Input.dispatchMouseEvent` is answered by whichever target is
+    /// foreground, so switching tabs without this would leave clicks landing
+    /// on the page you just left. M5's screencast will want the same
+    /// guarantee.
+    pub async fn activate(&self) -> Result<()> {
+        self.client
+            .call(
+                "Target.activateTarget",
+                json!({ "targetId": self.target_id }),
+            )
+            .await
+            .context("activate the target")?;
+        Ok(())
+    }
+
+    /// Close this page's target.
+    ///
+    /// Browser-level rather than `call_on`: a session cannot outlive the
+    /// target it is attached to, so asking the target to close itself races
+    /// its own answer.
+    pub async fn close(&self) -> Result<()> {
+        self.client
+            .call("Target.closeTarget", json!({ "targetId": self.target_id }))
+            .await
+            .context("close the target")?;
+        Ok(())
     }
 
     /// Whether a CDP event is this page's dirty signal.
@@ -302,7 +341,7 @@ impl Page {
     }
 
     pub async fn scroll_to_top(&self) -> Result<()> {
-        self.scroll_to("0").await
+        self.scroll_to_expression("0").await
     }
 
     /// Jump to the end of the document.
@@ -313,10 +352,21 @@ impl Page {
     /// has loaded, which is the correct behavior — it is simply not
     /// wheel-driven.
     pub async fn scroll_to_end(&self) -> Result<()> {
-        self.scroll_to("document.documentElement.scrollHeight").await
+        self.scroll_to_expression("document.documentElement.scrollHeight")
+            .await
     }
 
-    async fn scroll_to(&self, y_expression: &str) -> Result<()> {
+    /// Put the document at an absolute offset.
+    ///
+    /// Restoring a scroll position, and nothing else. A wheel event would be
+    /// the wrong tool: we know exactly where the page should be, and letting
+    /// Chromium animate its way there would mean the extraction after it
+    /// reads a position on the way rather than the one asked for.
+    pub async fn scroll_to(&self, y: f64) -> Result<()> {
+        self.scroll_to_expression(&y.to_string()).await
+    }
+
+    async fn scroll_to_expression(&self, y_expression: &str) -> Result<()> {
         self.client
             .call_on(
                 &self.session_id,

@@ -109,3 +109,13 @@ pub async fn open(h: &Harness, fixture: &str) -> Page {
         .await
         .expect("open the fixture")
 }
+
+/// Open a page at an arbitrary URL rather than a fixture.
+///
+/// `about:blank` and a second copy of a fixture are both things a tab test
+/// wants and a fixture name cannot say.
+pub async fn open_url(h: &Harness, url: &str) -> Page {
+    Page::open(Arc::clone(&h.client), url, viewport())
+        .await
+        .expect("open the url")
+}
