@@ -1,10 +1,11 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{Harness, harness, open, open_url, runtime, viewport};
 use tokio::sync::mpsc;
-use wwt_cdp::Event;
+use wwt_cdp::{Client, Event};
 use wwt_frame::{CssPoint, TargetKind};
 use wwt_page::{Extraction, KeyInput, MouseInput, Page};
 
@@ -885,5 +886,57 @@ fn activating_a_page_makes_it_the_one_the_browser_has_in_front() {
 
         second.close().await.expect("close the second");
         first.close().await.expect("close the first");
+    });
+}
+
+#[test]
+fn a_tab_the_page_opened_for_itself_is_adopted_with_our_script_in_it() {
+    let h = harness();
+    runtime().block_on(async {
+        // Subscribed before the opener exists: the attach for the tab it
+        // opens arrives unasked for, and a subscription taken afterwards has
+        // already missed it.
+        let mut events = h.client.subscribe();
+        let opener = open(&h, "blank.html").await;
+
+        // Clicked rather than scripted. `window.open` from an evaluation has
+        // no user activation behind it and Chromium's popup blocker returns
+        // null, and a link opened without a gesture carries no opener for
+        // `opened_by_a_page` to recognise it by.
+        let at = center_of(&opener, "#new").await;
+        opener.dispatch_mouse(&MouseInput::press(at)).await.expect("press");
+        opener.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
+
+        let attached = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.expect("the browser stayed up");
+                if let Some(attached) = Client::opened_by_a_page(&event) {
+                    return attached;
+                }
+            }
+        })
+        .await
+        .expect("the browser reported the tab its page opened");
+
+        let adopted = Page::adopt(Arc::clone(&h.client), attached, viewport())
+            .await
+            .expect("adopt the tab");
+
+        // The assertion that matters: the bootstrap is in the document the
+        // tab already loaded, not merely in the next one it navigates to. A
+        // tab whose document ran before we reached it has no `__wwt` in it at
+        // all, and extracting one fails rather than coming back empty.
+        let extraction = eventually(&adopted, "the adopted tab's text", |extraction| {
+            extraction.runs.iter().any(|run| run.text.contains("hello"))
+        })
+        .await;
+        assert!(
+            extraction.url.ends_with("hello.html"),
+            "adopted the wrong target: {}",
+            extraction.url
+        );
+
+        adopted.close().await.expect("close the adopted tab");
+        opener.close().await.expect("close the opener");
     });
 }

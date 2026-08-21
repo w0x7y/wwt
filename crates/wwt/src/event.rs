@@ -5,6 +5,7 @@
 //! other to name one, which is why they live here rather than beside either.
 
 use crossterm::event::{KeyEvent, MouseEvent};
+use wwt_cdp::Attached;
 use wwt_frame::{CellSize, GridSize, HintTarget};
 use wwt_page::Extraction;
 
@@ -21,6 +22,9 @@ pub enum Event {
     /// A page says it changed under us. Which page matters: one browser
     /// serves all of them and they all report on one subscription.
     Dirty(TabId),
+    /// A page opened a tab for itself. The session has to make room for it
+    /// before it can be prepared, because ids are minted on that side.
+    TargetOpened(Attached),
     /// Something that ran off the loop's thread finished.
     Done(Job),
 }

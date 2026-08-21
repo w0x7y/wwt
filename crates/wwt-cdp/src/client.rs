@@ -80,19 +80,26 @@ impl Client {
     ///
     /// Subscribe *before* issuing the command whose event you intend to
     /// wait for, or you can miss it.
-    /// Attach to every page target the browser opens, and hold each one
-    /// before it runs.
+    /// Attach to every page target the browser opens, whoever opened it.
     ///
-    /// The hold is the point. A target a page opened starts loading its
-    /// document at once, and a script registered with
-    /// `Page.addScriptToEvaluateOnNewDocument` only reaches documents that
-    /// have not started, so a target attached late has no bootstrap in it and
-    /// cannot be read at all. `Runtime.runIfWaitingForDebugger` lets it go
-    /// once we have installed one.
+    /// Every page takes its session from here, the ones we create and the
+    /// ones a page opens for itself alike, so this has to be on before the
+    /// first target exists.
+    ///
+    /// Deliberately without `waitForDebuggerOnStart`. Holding a target before
+    /// its first script sounds like the way to get our bootstrap into the
+    /// document it loads, and measurement says otherwise: a held target
+    /// answers `Target.getTargetInfo` and `Runtime.runIfWaitingForDebugger`
+    /// and nothing else, so `Page.enable`, `Runtime.addBinding` and
+    /// `Page.addScriptToEvaluateOnNewDocument` all queue unanswered until it
+    /// is released, and a registration queued that way still misses the
+    /// document. The hold costs every setup call a round trip it cannot make
+    /// and buys nothing, so `Page::adopt` catches up on the loaded document
+    /// instead.
     pub async fn auto_attach(&self) -> Result<()> {
         self.call(
             "Target.setAutoAttach",
-            json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
+            json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
         )
         .await
         .context("turn on auto-attach")?;

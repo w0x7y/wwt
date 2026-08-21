@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use wwt_cdp::{Client, Event};
+use wwt_cdp::{Attached, Client, Event, TargetId};
 use wwt_frame::{Caret, CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
@@ -110,33 +110,76 @@ impl std::fmt::Debug for Page {
 }
 
 impl Page {
-    /// Create a target, size it to the viewport, navigate, and wait for load.
+    /// Create a target, prepare it, size it to the viewport, navigate, and
+    /// wait for load.
+    ///
+    /// The session is not asked for. Auto-attach delivers one for every new
+    /// target, so waiting for it here is what keeps a tab we opened and a tab
+    /// a page opened on the same path, and the caller has to have turned it
+    /// on. Subscribed before the create, because the attach for a fast target
+    /// arrives before the create's own answer does.
     pub async fn open(client: Arc<Client>, url: &str, vp: Viewport) -> Result<Page> {
-        let target = client
+        let mut events = client.subscribe();
+        let created = client
             .call("Target.createTarget", json!({ "url": "about:blank" }))
             .await
             .context("create a page target")?;
-        let target_id = target["targetId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Target.createTarget returned no targetId"))?
-            .to_string();
+        let target = TargetId(
+            created["targetId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Target.createTarget returned no targetId"))?
+                .to_string(),
+        );
 
-        let attached = client
-            .call(
-                "Target.attachToTarget",
-                json!({ "targetId": target_id, "flatten": true }),
-            )
+        let attached = timeout(LOAD_TIMEOUT, async {
+            loop {
+                let event = events
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow!("the browser went away"))?;
+                if let Some(attached) = Client::attached_page(&event)
+                    && attached.target == target
+                {
+                    return Ok::<_, anyhow::Error>(attached);
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("the browser did not attach to the target it created"))??;
+
+        let page = Page::prepare(client, attached, vp).await?;
+        page.navigate(url).await?;
+        Ok(page)
+    }
+
+    /// Take over a target a page opened for itself.
+    ///
+    /// A target we did not create has already started, and possibly
+    /// finished, loading its document by the time the browser reports it, and
+    /// `Page.addScriptToEvaluateOnNewDocument` only reaches documents that
+    /// have not started. Registering it is still what covers the next
+    /// document; this evaluates the same source into the one already there,
+    /// so a tab arrives readable rather than blank until it navigates. The
+    /// bootstrap returns early when it finds itself installed, so whichever
+    /// of the two got there first, only one takes effect.
+    pub async fn adopt(client: Arc<Client>, attached: Attached, vp: Viewport) -> Result<Page> {
+        let page = Page::prepare(client, attached, vp).await?;
+        page.js(BOOTSTRAP_JS)
             .await
-            .context("attach to the page target")?;
-        let session_id = attached["sessionId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Target.attachToTarget returned no sessionId"))?
-            .to_string();
+            .context("install the bootstrap in the document the tab already loaded")?;
+        Ok(page)
+    }
 
+    /// Everything a target needs before it is worth looking at.
+    ///
+    /// The order is load-bearing: the binding exists before the bootstrap
+    /// that calls it, and the bootstrap is registered before the document
+    /// that should contain it is navigated to.
+    async fn prepare(client: Arc<Client>, attached: Attached, vp: Viewport) -> Result<Page> {
         let page = Page {
             client,
-            session_id,
-            target_id,
+            session_id: attached.session,
+            target_id: attached.target.0,
         };
         page.client
             .call_on(&page.session_id, "Page.enable", json!({}))
@@ -146,8 +189,6 @@ impl Page {
             .call_on(&page.session_id, "Runtime.enable", json!({}))
             .await
             .context("enable the Runtime domain")?;
-        // Registered before the first navigation, so the binding exists by
-        // the time the bootstrap runs.
         page.client
             .call_on(
                 &page.session_id,
@@ -158,7 +199,6 @@ impl Page {
             .context("install the dirty-signal binding")?;
         page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
-        page.navigate(url).await?;
         Ok(page)
     }
 

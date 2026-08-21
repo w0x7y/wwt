@@ -26,6 +26,7 @@ pub async fn render_url(url: &str, vp: Viewport) -> Result<Frame> {
     let client = Client::connect(browser.ws_url())
         .await
         .context("connect to chromium")?;
+    client.auto_attach().await.context("watch for new targets")?;
     let page = Page::open(Arc::new(client), url, vp).await?;
 
     let extraction = page.extract().await?;

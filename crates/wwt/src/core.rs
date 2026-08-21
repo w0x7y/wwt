@@ -16,9 +16,10 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use futures_util::StreamExt;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
-use wwt_cdp::Client;
+use wwt_cdp::{Client, TargetId};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::Page;
 use wwt_term::Renderer;
@@ -62,6 +63,13 @@ enum Incoming {
 
 pub struct Core {
     pages: HashMap<TabId, Arc<Page>>,
+    /// Targets attached to us but not yet made into pages.
+    ///
+    /// Only adoption writes here. A tab we opened ourselves and failed to
+    /// open has no target to answer for; one the browser handed us exists
+    /// whether we manage to prepare it or not, and closing it needs its id
+    /// after the `Page` that would have carried it is gone.
+    opening: HashMap<TabId, TargetId>,
     client: Arc<Client>,
     renderer: Renderer,
     session: Session,
@@ -82,6 +90,7 @@ impl Core {
 
         Self {
             pages,
+            opening: HashMap::new(),
             client,
             renderer: Renderer::new(),
             session,
@@ -125,11 +134,17 @@ impl Core {
                     _ => None,
                 },
 
-                Some(event) = cdp.recv() => self
-                    .pages
-                    .iter()
-                    .find(|(_, page)| page.is_dirty(&event))
-                    .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
+                // Two questions of one event, in this order: a target we
+                // never asked for belongs to no page yet, so asking the pages
+                // about it first would only ever answer no.
+                Some(event) = cdp.recv() => match Client::opened_by_a_page(&event) {
+                    Some(attached) => Some(Incoming::Event(Event::TargetOpened(attached))),
+                    None => self
+                        .pages
+                        .iter()
+                        .find(|(_, page)| page.is_dirty(&event))
+                        .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
+                },
 
                 Some(finished) = self.jobs_rx.recv() => Some(Incoming::Finished(finished)),
 
@@ -148,10 +163,25 @@ impl Core {
                 Some(Incoming::Event(event)) => Some(event),
                 Some(Incoming::Finished(Finished::Job(job))) => Some(Event::Done(job)),
                 Some(Incoming::Finished(Finished::Opened(id, Ok(page)))) => {
+                    self.opening.remove(&id);
                     self.pages.insert(id, page);
                     Some(Event::Done(Job::Opened(id, Ok(()))))
                 }
                 Some(Incoming::Finished(Finished::Opened(id, Err(error)))) => {
+                    // The session is about to drop the tab. A target the
+                    // browser handed us outlives that: left alone it is a
+                    // page loading somewhere nobody can see and nothing can
+                    // reach. There is no `Page` to close it with, so it is
+                    // closed by id, and a failure to close is not worth a
+                    // second notice on top of the first.
+                    if let Some(target) = self.opening.remove(&id) {
+                        let client = Arc::clone(&self.client);
+                        tokio::spawn(async move {
+                            let _ = client
+                                .call("Target.closeTarget", json!({ "targetId": target.0 }))
+                                .await;
+                        });
+                    }
                     Some(Event::Done(Job::Opened(id, Err(error))))
                 }
                 None => None,
@@ -248,6 +278,23 @@ impl Core {
                     let tx = self.jobs_tx.clone();
                     tokio::spawn(async move {
                         let opened = Page::open(client, &url, vp)
+                            .await
+                            .map(Arc::new)
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(Finished::Opened(id, opened));
+                    });
+                }
+
+                Effect::AdoptTab { id, target } => {
+                    let vp = self.session.viewport();
+                    let client = Arc::clone(&self.client);
+                    let tx = self.jobs_tx.clone();
+                    // Noted before the spawn, so a preparation that fails
+                    // leaves something to close the target by. A tab we
+                    // created and could not open has no target to close.
+                    self.opening.insert(id, target.target.clone());
+                    tokio::spawn(async move {
+                        let opened = Page::adopt(client, target, vp)
                             .await
                             .map(Arc::new)
                             .map_err(|error| error.to_string());

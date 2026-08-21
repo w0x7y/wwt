@@ -5,6 +5,7 @@
 //! feature, and so a test can read what a keystroke asked for without
 //! anything having to happen.
 
+use wwt_cdp::Attached;
 use wwt_frame::Viewport;
 use wwt_page::Input;
 
@@ -29,6 +30,10 @@ pub enum Effect {
     /// Create a target for a tab the session has already made room for, and
     /// navigate it.
     OpenTab { id: TabId, url: String },
+    /// Prepare a target the browser already attached us to, as the tab the
+    /// session has just made for it. It is already loading somewhere of its
+    /// own choosing, so unlike `OpenTab` there is no url to give it.
+    AdoptTab { id: TabId, target: Attached },
     CloseTab(TabId),
     /// Make this tab the one the browser has in front. Input dispatch is
     /// answered by whichever target is foreground, so ours and the browser's

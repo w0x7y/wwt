@@ -15,6 +15,7 @@
 //! them.
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use wwt_cdp::Attached;
 use wwt_frame::{
     CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
 };
@@ -139,6 +140,20 @@ impl Session {
         self.tabs.push(tab);
         self.focus = self.tabs.len() - 1;
         effects.push(Effect::OpenTab { id, url });
+    }
+
+    /// Make room for a tab the page opened for itself.
+    ///
+    /// `open_tab` with the target already in hand and no url to give it: the
+    /// browser chose where it goes. It arrives focused, which is what
+    /// following such a link does anywhere else.
+    fn adopt_tab(&mut self, target: Attached, effects: &mut Vec<Effect>) {
+        let id = self.mint();
+        let mut tab = Tab::new(id, String::new());
+        tab.navigating = true;
+        self.tabs.push(tab);
+        self.focus = self.tabs.len() - 1;
+        effects.push(Effect::AdoptTab { id, target });
     }
 
     /// Close a tab, and go wherever that leaves you.
@@ -276,6 +291,7 @@ impl Session {
                 }
                 self.start_extract(id, &mut effects);
             }
+            Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
             Event::Done(job) => self.on_job(job, &mut effects),
         }
         effects
@@ -1261,6 +1277,39 @@ mod tests {
         session.on(code(KeyCode::Enter));
 
         let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+        );
+    }
+
+    #[test]
+    fn a_tab_the_page_opened_for_itself_arrives_focused_and_asks_to_be_adopted() {
+        let mut session = ready();
+        let target = Attached {
+            target: wwt_cdp::TargetId("T2".to_string()),
+            session: "S2".to_string(),
+        };
+
+        let effects = session.on(Event::TargetOpened(target.clone()));
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(1), "a link that opens a tab takes you to it");
+        assert_eq!(effects, vec![Effect::AdoptTab { id: TabId(1), target }]);
+    }
+
+    #[test]
+    fn an_adopted_tab_is_activated_and_read_like_any_other() {
+        // Adoption differs from opening only in where the target came from,
+        // so everything after `Job::Opened` has to be the one path.
+        let mut session = ready();
+        session.on(Event::TargetOpened(Attached {
+            target: wwt_cdp::TargetId("T2".to_string()),
+            session: "S2".to_string(),
+        }));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+
         assert_eq!(
             effects,
             vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]

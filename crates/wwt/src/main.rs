@@ -34,6 +34,12 @@ async fn main() -> Result<()> {
             .await
             .context("connect to chromium")?,
     );
+    // Before the first target exists, or it races the setting. Every page
+    // takes its session from this, adopted and asked for alike.
+    client
+        .auto_attach()
+        .await
+        .context("watch for tabs the page opens")?;
     let vp = wwt::session::page_viewport(grid, cell);
     let page = Arc::new(Page::open(Arc::clone(&client), &url, vp).await?);
 

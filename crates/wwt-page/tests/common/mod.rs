@@ -79,6 +79,10 @@ pub fn harness() -> Turn {
                 let harness = Arc::new(runtime().block_on(async {
                     let browser = Chromium::launch(None).await.expect("launch chromium");
                     let client = Client::connect(browser.ws_url()).await.expect("connect");
+                    // `Page::open` takes its session from auto-attach rather
+                    // than attaching for itself, so a client without this
+                    // opens nothing at all.
+                    client.auto_attach().await.expect("turn on auto-attach");
                     Harness { _browser: browser, client: Arc::new(client) }
                 }));
                 *shared = Arc::downgrade(&harness);

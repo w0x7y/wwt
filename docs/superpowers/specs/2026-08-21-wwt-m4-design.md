@@ -157,12 +157,30 @@ typed half a `:` command. It must now also be true that the answering tab is sti
 focused, or labels measured against one page would be painted over another.
 
 **Adoption.** A page that opens a tab for itself, through `target=_blank` or
-`window.open`, creates a target we did not ask for. `Target.setAutoAttach` with
-`waitForDebuggerOnStart` reports it as `Event::TargetOpened`, and `Page::adopt`
-installs the binding, the bootstrap and the viewport on it before releasing it to run,
-which is why the wait matters: a target allowed to start first would load its document
-without our script in it. The adopted tab opens in the foreground, which is what clicking such a
-link does in any other browser.
+`window.open`, creates a target we did not ask for. `Target.setAutoAttach` reports it
+as `Event::TargetOpened`, and `Page::adopt` installs the binding, the bootstrap and
+the viewport on it. Auto-attach delivers a session for every new target, ours
+included, so `Page::open` takes its session from the same event and the two paths are
+one; they are told apart by `openerId`, which `Target.createTarget` does not set.
+
+The document such a tab loads has usually already run by the time we hear about it,
+and `Page.addScriptToEvaluateOnNewDocument` only reaches documents that have not
+started. Registering it is still what covers the tab's *next* document, and `adopt`
+evaluates the same source into the one already there, so an adopted tab is readable
+on arrival rather than blank until it navigates. The bootstrap returns early when it
+finds itself installed, so only one of the two ever takes effect.
+
+*Amended.* This section previously specified `waitForDebuggerOnStart`, holding each
+new target before its first script so the bootstrap could be installed into the
+document it was about to load. Measured against Chromium, a held target answers
+`Target.getTargetInfo` and `Runtime.runIfWaitingForDebugger` and nothing else:
+`Page.enable`, `Runtime.addBinding` and `Page.addScriptToEvaluateOnNewDocument` all
+queue unanswered until it is released, so no setup call can be awaited, and a
+registration queued that way still misses the document. The hold costs every setup
+call a round trip it cannot make and buys nothing, so it is not used.
+
+The adopted tab opens in the foreground, which is what clicking such a link does in
+any other browser.
 
 *Known deviation.* A middle click makes Chromium open a background tab, and
 `Target.targetCreated` does not distinguish that from a foreground one, so for now
@@ -414,7 +432,7 @@ browser.
 | `wwt-ui` | `tab_bar` painting: the focused tab marked, titles elided to fit, a window around the focus when there are more tabs than columns, one tab and zero tabs. |
 | `wwt` | Everything in sections 3, 4 and 9 that does not need a browser, which is most of this milestone. Focus movement and wrapping; closing the focused tab, the last tab, and a background tab; a job returning for a closed tab being dropped; a dirty signal for a background tab setting a flag and emitting no effect; that flag being spent on switch; a late `Job::Hints` for an unfocused tab not opening hint mode; effects naming the focused tab and no other; a resize emitting one `SetViewport` per tab. `Snapshot` round-tripping through serde; XDG resolution with `XDG_DATA_HOME` set, unset, and both unset; a malformed file, an empty tab list and an out-of-range focus index all producing a usable state. |
 | `wwt-cdp` | Two launches on one profile directory, asserting the second falls back rather than hanging or succeeding. |
-| `wwt-page` | Browser tests: two targets on one client extracting independently; `scroll_to` landing at an offset a later extraction reports; adoption of a target opened by `window.open`, asserting the bootstrap is present in the adopted document; `activate` making a target the one that answers input. |
+| `wwt-page` | Browser tests: two targets on one client extracting independently; `scroll_to` landing at an offset a later extraction reports; adoption of a target opened by a click on a `target=_blank` link, asserting the bootstrap is present in the adopted document (the click is the point: `window.open` from an evaluation has no user activation behind it, so the popup blocker returns null, and a link opened without a gesture carries no `openerId` to recognise it by); `activate` making a target the one that answers input. |
 
 The measurement M4 owns is the switch: how long from `J` to the neighbouring tab's
 cached frame on screen, recorded in the plan the way extraction and hints were. It
