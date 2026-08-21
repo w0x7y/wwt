@@ -1,10 +1,11 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Harness, harness, open, runtime, viewport};
+use common::{Harness, harness, open, open_url, runtime, viewport};
 use tokio::sync::mpsc;
-use wwt_cdp::Event;
+use wwt_cdp::{Client, Event};
 use wwt_frame::{CssPoint, TargetKind};
 use wwt_page::{Extraction, KeyInput, MouseInput, Page};
 
@@ -775,5 +776,215 @@ fn focusing_a_field_signals_the_page_dirty() {
         .await;
 
         assert!(signals > 0, "a field clicked into would have no caret until it changed");
+    });
+}
+
+#[test]
+fn scrolling_to_an_offset_lands_there() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "tall.html").await;
+
+        page.scroll_to(400.0).await.expect("scroll to an offset");
+        let extraction = page.extract().await.expect("extract");
+
+        // Chromium clamps to the scrollable range and rounds to device
+        // pixels, so this asserts the neighbourhood rather than the exact
+        // number.
+        assert!(
+            (extraction.scroll_y - 400.0).abs() < 2.0,
+            "scrolled to {}, wanted 400",
+            extraction.scroll_y
+        );
+    });
+}
+
+#[test]
+fn a_scroll_that_threw_is_a_failure_and_not_a_silence() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "tall.html").await;
+
+        // A page may replace anything on `window`, so a scroll command can
+        // throw for reasons that are the page's business rather than ours.
+        // What matters is that we hear about it: `Effect::Scroll` turns a
+        // failure into `Job::Failed` and a stale-but-labeled frame, and this
+        // path used to report `Ok` for a page that had not moved, so that
+        // job could never arrive from it.
+        page.eval("window.scrollTo = () => { throw new Error('nope') }")
+            .await
+            .expect("replace the page's own scrollTo");
+
+        let scrolled = page.scroll_to(400.0).await;
+        assert!(scrolled.is_err(), "a scroll that threw reported success");
+
+        let extraction = page.extract().await.expect("extract");
+        assert!(
+            extraction.scroll_y < 1.0,
+            "the page did not move, which is the half that was always true: {}",
+            extraction.scroll_y
+        );
+    });
+}
+
+#[test]
+fn two_pages_on_one_browser_read_their_own_documents() {
+    // One client, one websocket, one event stream. Every command a page
+    // issues is `call_on` its own session, and this is what says so: two
+    // targets alive at once, each extracting what is in it and not what is
+    // in the other.
+    let h = harness();
+    runtime().block_on(async {
+        let first = open(&h, "hello.html").await;
+        let second = open(&h, "blank.html").await;
+
+        let one = first.extract().await.expect("extract the first");
+        let two = second.extract().await.expect("extract the second");
+
+        assert!(
+            one.runs.iter().any(|run| run.text.contains("hello")),
+            "{:?}",
+            texts(&one)
+        );
+        assert!(
+            two.runs.iter().any(|run| run.text.contains("opener")),
+            "{:?}",
+            texts(&two)
+        );
+        assert_ne!(one.url, two.url);
+
+        second.close().await.expect("close the second");
+        first.close().await.expect("close the first");
+    });
+}
+
+#[test]
+fn a_closed_page_is_gone_from_the_browser() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open_url(&h, "about:blank").await;
+        let target = page.target_id().to_string();
+
+        page.close().await.expect("close the target");
+
+        // `Target.closeTarget` answers as soon as the browser has accepted
+        // the close, not once the target is gone, so this waits rather than
+        // asserting on the instant after. Making `close` itself wait would
+        // put a second round trip on every tab you shut for the sake of an
+        // answer nothing needs.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let targets = h
+                .client
+                .call("Target.getTargets", serde_json::json!({}))
+                .await
+                .expect("list targets");
+            let still_there = targets["targetInfos"]
+                .as_array()
+                .expect("an array of targets")
+                .iter()
+                .any(|info| info["targetId"] == target.as_str());
+            if !still_there {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the target outlived the close");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+}
+
+#[test]
+fn activating_a_page_makes_it_the_one_the_browser_has_in_front() {
+    // Input dispatch is answered by whichever target is in front, which is
+    // why switching tabs has to activate. Two targets, activate the first,
+    // and it is the one that takes the click.
+    let h = harness();
+    runtime().block_on(async {
+        let first = open(&h, "click.html").await;
+        let second = open_url(&h, "about:blank").await;
+
+        first.activate().await.expect("activate the first page");
+
+        let at = CssPoint { x: 40.0, y: 20.0 };
+        first.dispatch_mouse(&MouseInput::press(at)).await.expect("press");
+        first.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
+
+        let clicked = first.eval("window.__clicked === true").await.expect("read the flag");
+        assert_eq!(clicked, serde_json::Value::Bool(true));
+
+        second.close().await.expect("close the second");
+        first.close().await.expect("close the first");
+    });
+}
+
+#[test]
+fn a_page_does_not_announce_itself_as_headless() {
+    // Not cosmetic. A user agent saying HeadlessChrome is what search
+    // engines turn away: with it, duckduckgo.com returns a shell with no
+    // results in it and its html and lite endpoints return a CAPTCHA.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open_url(&h, "about:blank").await;
+
+        let reported = page.eval("navigator.userAgent").await.expect("read the user agent");
+        let reported = reported.as_str().expect("a string");
+
+        assert!(!reported.contains("Headless"), "sites turn this away: {reported}");
+        assert!(
+            reported.contains("Chrome/"),
+            "still the browser it actually is: {reported}"
+        );
+    });
+}
+
+#[test]
+fn a_tab_the_page_opened_for_itself_is_adopted_with_our_script_in_it() {
+    let h = harness();
+    runtime().block_on(async {
+        // Subscribed before the opener exists: the attach for the tab it
+        // opens arrives unasked for, and a subscription taken afterwards has
+        // already missed it.
+        let mut events = h.client.subscribe();
+        let opener = open(&h, "blank.html").await;
+
+        // Clicked rather than scripted. `window.open` from an evaluation has
+        // no user activation behind it and Chromium's popup blocker returns
+        // null, and a link opened without a gesture carries no opener for
+        // `opened_by_a_page` to recognise it by.
+        let at = center_of(&opener, "#new").await;
+        opener.dispatch_mouse(&MouseInput::press(at)).await.expect("press");
+        opener.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
+
+        let attached = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.expect("the browser stayed up");
+                if let Some(attached) = Client::opened_by_a_page(&event) {
+                    return attached;
+                }
+            }
+        })
+        .await
+        .expect("the browser reported the tab its page opened");
+
+        let adopted = Page::adopt(Arc::clone(&h.client), attached, viewport())
+            .await
+            .expect("adopt the tab");
+
+        // The assertion that matters: the bootstrap is in the document the
+        // tab already loaded, not merely in the next one it navigates to. A
+        // tab whose document ran before we reached it has no `__wwt` in it at
+        // all, and extracting one fails rather than coming back empty.
+        let extraction = eventually(&adopted, "the adopted tab's text", |extraction| {
+            extraction.runs.iter().any(|run| run.text.contains("hello"))
+        })
+        .await;
+        assert!(
+            extraction.url.ends_with("hello.html"),
+            "adopted the wrong target: {}",
+            extraction.url
+        );
+
+        adopted.close().await.expect("close the adopted tab");
+        opener.close().await.expect("close the opener");
     });
 }

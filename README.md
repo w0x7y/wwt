@@ -4,9 +4,11 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M3, interaction.** It renders a page, scrolls it, follows
-history, opens other URLs, reaches every link from the keyboard, types
-into forms, and clicks with the mouse. Tabs and pixel mode are M4 and
+**Status: M4, tabs and sessions.** It renders a page, scrolls it,
+follows history, opens other URLs, reaches every link from the keyboard,
+types into forms, and clicks with the mouse. It keeps many pages open at
+once under one Chromium, follows the links that want a new tab, and
+comes back to the same tabs, still logged in, tomorrow. Pixel mode is
 M5.
 
 ## Requirements
@@ -19,7 +21,9 @@ M5.
 
 ## Usage
 
-    cargo run -p wwt -- example.com
+    cargo run -p wwt                 # the tabs you had open last time
+    cargo run -p wwt -- example.com  # those, and this one beside them
+    cargo run -p wwt -- --new        # one blank tab, keeping the old session on disk
 
 | Key | |
 |---|---|
@@ -28,6 +32,9 @@ M5.
 | `space` `b` | scroll a screen |
 | `g` `G` | top, bottom |
 | `H` `L` | back, forward |
+| `Shift-1` … `Shift-9` | go to the first tab through the ninth |
+| `t` | open a tab |
+| `x` | close this tab |
 | `Ctrl-r` | reload |
 | `o` | open a URL |
 | `:` | command line |
@@ -47,8 +54,32 @@ which costs your terminal's own text selection. Most terminals hand it
 back while shift is held; `:set mouse off` is there for the ones that do
 not.
 
-Commands: `:open <url>`, `:back`, `:forward`, `:reload`,
+Shift and a digit goes straight to that tab, so the one you want is one
+keystroke away however many are open and wherever you are now. Past the
+ninth there is `:tabnext` and `:tabprev`, which still cycle.
+
+The digit works on its own too, and that is what makes this the same
+keystroke on every keyboard: a number row with digits on it reaches a
+tab unshifted, and one with punctuation on it, as a French keyboard has,
+reaches it with the shift you were pressing anyway. Above the digit, the
+glyphs are the US row (`!` through `(`) and the few from other layouts
+that do not clash with it. Where two layouts do clash the glyph is left
+out rather than guessed at, so `Shift-6` on a German keyboard prints `&`
+and goes nowhere. Press `6`.
+
+`:open` and `:tabopen` take a URL or anything else: `:open banana`
+searches DuckDuckGo for it rather than telling you it is not a URL, and
+so does `wwt banana`. A word with a dot in it, or a host and a port like
+`localhost:3000`, is still somewhere to go.
+
+Commands: `:open <url-or-search>`, `:tabopen <url-or-search>` (`:t`),
+`:tabclose`, `:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
 `:set mouse on|off`, `:quit`.
+
+wwt keeps a Chromium profile at `$XDG_DATA_HOME/wwt/profile` and the tabs
+you had open at `$XDG_DATA_HOME/wwt/session.json`. The profile is what
+makes logins durable, and it is also the lock: a second wwt cannot have
+it, so it runs private, not logged in, and writes no session file.
 
 ## Layout
 
@@ -64,6 +95,8 @@ Commands: `:open <url>`, `:back`, `:forward`, `:reload`,
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M4 design: `docs/superpowers/specs/2026-08-21-wwt-m4-design.md`
+- M4 plan: `docs/superpowers/plans/2026-08-21-wwt-m4-tabs-and-sessions.md`
 - M3 design: `docs/superpowers/specs/2026-08-19-wwt-m3-design.md`
 - M3 plan: `docs/superpowers/plans/2026-08-19-wwt-m3-interaction.md`
 - M2 design: `docs/superpowers/specs/2026-08-19-wwt-m2-design.md`

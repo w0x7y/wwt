@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use wwt_cdp::{Client, Event};
+use wwt_cdp::{Attached, Client, Event, TargetId};
 use wwt_frame::{Caret, CssPoint, CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
@@ -20,7 +20,7 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Arrives back as a `Runtime.bindingCalled` event.
 pub const DIRTY_BINDING: &str = "__wwt_dirty";
 
-/// The shape `extract.js` returns.
+/// The shape `bootstrap.js` returns from `window.__wwt.extract()`.
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
@@ -95,33 +95,92 @@ struct RawTarget {
 pub struct Page {
     client: Arc<Client>,
     session_id: String,
+    target_id: String,
+}
+
+/// Its identity and nothing else: a `Page` is a handle on a browser, and the
+/// browser is not something to print.
+impl std::fmt::Debug for Page {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Page")
+            .field("target", &self.target_id)
+            .field("session", &self.session_id)
+            .finish()
+    }
 }
 
 impl Page {
-    /// Create a target, size it to the viewport, navigate, and wait for load.
+    /// Create a target, prepare it, size it to the viewport, navigate, and
+    /// wait for load.
+    ///
+    /// The session is not asked for. Auto-attach delivers one for every new
+    /// target, so waiting for it here is what keeps a tab we opened and a tab
+    /// a page opened on the same path, and the caller has to have turned it
+    /// on. Subscribed before the create, because the attach for a fast target
+    /// arrives before the create's own answer does.
     pub async fn open(client: Arc<Client>, url: &str, vp: Viewport) -> Result<Page> {
-        let target = client
+        let mut events = client.subscribe();
+        let created = client
             .call("Target.createTarget", json!({ "url": "about:blank" }))
             .await
             .context("create a page target")?;
-        let target_id = target["targetId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Target.createTarget returned no targetId"))?
-            .to_string();
+        let target = TargetId(
+            created["targetId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Target.createTarget returned no targetId"))?
+                .to_string(),
+        );
 
-        let attached = client
-            .call(
-                "Target.attachToTarget",
-                json!({ "targetId": target_id, "flatten": true }),
-            )
+        let attached = timeout(LOAD_TIMEOUT, async {
+            loop {
+                let event = events
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow!("the browser went away"))?;
+                if let Some(attached) = Client::attached_page(&event)
+                    && attached.target == target
+                {
+                    return Ok::<_, anyhow::Error>(attached);
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("the browser did not attach to the target it created"))??;
+
+        let page = Page::prepare(client, attached, vp).await?;
+        page.navigate(url).await?;
+        Ok(page)
+    }
+
+    /// Take over a target a page opened for itself.
+    ///
+    /// A target we did not create has already started, and possibly
+    /// finished, loading its document by the time the browser reports it, and
+    /// `Page.addScriptToEvaluateOnNewDocument` only reaches documents that
+    /// have not started. Registering it is still what covers the next
+    /// document; this evaluates the same source into the one already there,
+    /// so a tab arrives readable rather than blank until it navigates. The
+    /// bootstrap returns early when it finds itself installed, so whichever
+    /// of the two got there first, only one takes effect.
+    pub async fn adopt(client: Arc<Client>, attached: Attached, vp: Viewport) -> Result<Page> {
+        let page = Page::prepare(client, attached, vp).await?;
+        page.js(BOOTSTRAP_JS)
             .await
-            .context("attach to the page target")?;
-        let session_id = attached["sessionId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Target.attachToTarget returned no sessionId"))?
-            .to_string();
+            .context("install the bootstrap in the document the tab already loaded")?;
+        Ok(page)
+    }
 
-        let page = Page { client, session_id };
+    /// Everything a target needs before it is worth looking at.
+    ///
+    /// The order is load-bearing: the binding exists before the bootstrap
+    /// that calls it, and the bootstrap is registered before the document
+    /// that should contain it is navigated to.
+    async fn prepare(client: Arc<Client>, attached: Attached, vp: Viewport) -> Result<Page> {
+        let page = Page {
+            client,
+            session_id: attached.session,
+            target_id: attached.target.0,
+        };
         page.client
             .call_on(&page.session_id, "Page.enable", json!({}))
             .await
@@ -130,8 +189,6 @@ impl Page {
             .call_on(&page.session_id, "Runtime.enable", json!({}))
             .await
             .context("enable the Runtime domain")?;
-        // Registered before the first navigation, so the binding exists by
-        // the time the bootstrap runs.
         page.client
             .call_on(
                 &page.session_id,
@@ -140,14 +197,59 @@ impl Page {
             )
             .await
             .context("install the dirty-signal binding")?;
+        // Before anything is navigated to, so the first request already
+        // carries it. A page that loads as HeadlessChrome is a page a search
+        // engine answers with a CAPTCHA or an empty shell.
+        let user_agent = page.client.user_agent().await?;
+        page.client
+            .call_on(
+                &page.session_id,
+                "Network.setUserAgentOverride",
+                json!({ "userAgent": user_agent }),
+            )
+            .await
+            .context("set the user agent")?;
         page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
-        page.navigate(url).await?;
         Ok(page)
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    /// Make this page the one the browser has in front.
+    ///
+    /// `Input.dispatchMouseEvent` is answered by whichever target is
+    /// foreground, so switching tabs without this would leave clicks landing
+    /// on the page you just left. M5's screencast will want the same
+    /// guarantee.
+    pub async fn activate(&self) -> Result<()> {
+        self.client
+            .call(
+                "Target.activateTarget",
+                json!({ "targetId": self.target_id }),
+            )
+            .await
+            .context("activate the target")?;
+        Ok(())
+    }
+
+    /// Close this page's target.
+    ///
+    /// Browser-level rather than `call_on`: a session cannot outlive the
+    /// target it is attached to, so asking the target to close itself races
+    /// its own answer.
+    pub async fn close(&self) -> Result<()> {
+        self.client
+            .call("Target.closeTarget", json!({ "targetId": self.target_id }))
+            .await
+            .context("close the target")?;
+        Ok(())
     }
 
     /// Whether a CDP event is this page's dirty signal.
@@ -302,7 +404,7 @@ impl Page {
     }
 
     pub async fn scroll_to_top(&self) -> Result<()> {
-        self.scroll_to("0").await
+        self.scroll_to_expression("0").await
     }
 
     /// Jump to the end of the document.
@@ -313,19 +415,27 @@ impl Page {
     /// has loaded, which is the correct behavior — it is simply not
     /// wheel-driven.
     pub async fn scroll_to_end(&self) -> Result<()> {
-        self.scroll_to("document.documentElement.scrollHeight").await
+        self.scroll_to_expression("document.documentElement.scrollHeight")
+            .await
     }
 
-    async fn scroll_to(&self, y_expression: &str) -> Result<()> {
-        self.client
-            .call_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({
-                    "expression": format!("window.scrollTo(0, {y_expression})"),
-                    "returnByValue": true,
-                }),
-            )
+    /// Put the document at an absolute offset.
+    ///
+    /// Restoring a scroll position, and nothing else. A wheel event would be
+    /// the wrong tool: we know exactly where the page should be, and letting
+    /// Chromium animate its way there would mean the extraction after it
+    /// reads a position on the way rather than the one asked for.
+    pub async fn scroll_to(&self, y: f64) -> Result<()> {
+        self.scroll_to_expression(&y.to_string()).await
+    }
+
+    /// Through `js` rather than around it. Built by hand, this evaluated the
+    /// same command ten lines from the one place that inspects
+    /// `exceptionDetails`, and so reported success for a scroll that threw:
+    /// `Effect::Scroll` maps a failure to `Job::Failed`, which these three
+    /// paths could therefore never produce, and the page simply did not move.
+    async fn scroll_to_expression(&self, y_expression: &str) -> Result<()> {
+        self.js(&format!("window.scrollTo(0, {y_expression})"))
             .await
             .context("scroll to a document position")?;
         Ok(())
@@ -385,8 +495,12 @@ impl Page {
     /// Evaluate an expression in the page and return its value.
     ///
     /// Deliberately not how anything reads the page: that is `extract`,
-    /// once, in one round trip. The two callers here are commands this crate
+    /// once, in one round trip. The callers here are commands this crate
     /// issues rather than reads it performs.
+    ///
+    /// It is also the one place that inspects `exceptionDetails`, so
+    /// evaluating around it is how a command comes to report success for an
+    /// expression that threw.
     async fn js(&self, expression: &str) -> Result<serde_json::Value> {
         let mut result = self
             .client

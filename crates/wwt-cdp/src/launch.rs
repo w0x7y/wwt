@@ -44,21 +44,40 @@ pub fn find_chromium() -> Result<PathBuf> {
 pub struct Chromium {
     child: Child,
     ws_url: String,
-    /// Held so the profile directory outlives the browser. M4 replaces this
-    /// with a persistent profile under the user's data directory.
-    _profile: tempfile::TempDir,
+    /// Held so a temporary profile outlives the browser. `None` when the
+    /// profile is a directory the caller owns and expects to survive us.
+    _profile: Option<tempfile::TempDir>,
 }
 
 impl Chromium {
-    pub async fn launch() -> Result<Self> {
+    /// Launch a browser on `profile`, or on a temporary directory when it is
+    /// `None`.
+    ///
+    /// Where a persistent profile lives is the binary's business, not this
+    /// crate's: `wwt-cdp` launches browsers and has no opinion about the
+    /// user's data directory.
+    ///
+    /// A profile another Chromium already holds is refused by Chromium
+    /// itself, which exits without announcing an endpoint, so this returns an
+    /// error rather than a second browser sharing a cookie jar. That is the
+    /// whole of the locking in spec section 7.
+    pub async fn launch(profile: Option<&std::path::Path>) -> Result<Self> {
         let binary = find_chromium()?;
-        let profile = tempfile::tempdir().context("create a temporary profile directory")?;
+        let temporary = match profile {
+            Some(_) => None,
+            None => Some(tempfile::tempdir().context("create a temporary profile directory")?),
+        };
+        let dir = match (profile, &temporary) {
+            (Some(path), _) => path.to_path_buf(),
+            (None, Some(temp)) => temp.path().to_path_buf(),
+            (None, None) => unreachable!("a temporary profile is created when none is given"),
+        };
 
         let mut child = Command::new(&binary)
             .arg("--headless=new")
             // Port 0 lets the OS pick; we read the real one back off stderr.
             .arg("--remote-debugging-port=0")
-            .arg(format!("--user-data-dir={}", profile.path().display()))
+            .arg(format!("--user-data-dir={}", dir.display()))
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-gpu")
@@ -88,7 +107,7 @@ impl Chromium {
         Ok(Self {
             child,
             ws_url,
-            _profile: profile,
+            _profile: temporary,
         })
     }
 

@@ -15,12 +15,13 @@
 //! them.
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use wwt_cdp::Attached;
 use wwt_frame::{
-    Caret, CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, TextRun, Viewport,
+    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
 };
 use wwt_page::{Input, MouseInput};
 use wwt_ui::Mode;
-use wwt_ui::chrome::{self, State};
+use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
@@ -28,6 +29,8 @@ use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
+use crate::store::{SavedTab, Snapshot};
+use crate::tab::{Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
@@ -42,78 +45,290 @@ pub struct Session {
     vp: Viewport,
 
     mode: Mode,
-    state: State,
-    url: String,
-    title: String,
-    progress: f64,
-    runs: Vec<TextRun>,
-    /// Where typing would land, when the page has a field focused.
-    caret: Option<Caret>,
 
-    /// The page says it changed and we have not caught up yet.
-    dirty: bool,
-    /// An extraction is in flight; a second would race it.
-    extracting: bool,
-    /// A navigation is in flight.
-    navigating: bool,
-    /// The last hint query's targets, held so that pressing `f` twice on a
-    /// page that has not moved costs one round trip rather than two.
-    hints: Option<Vec<HintTarget>>,
-    /// A hint query is in flight. Every other effect answers to itself, but
-    /// this one comes back and changes the mode, so it needs to be known
-    /// about while it is away.
-    hinting: bool,
+    tabs: Vec<Tab>,
+    focus: usize,
+    /// Never reused, which is what makes a job from a closed tab safe to
+    /// drop rather than plausible to paint.
+    next_id: u32,
 }
 
-/// The page viewport: the terminal grid, less the row chrome occupies.
+/// The rows the page does not get: the tab bar above it and the statusline
+/// below. Unconditional, so opening a tab never reflows a page.
+pub const CHROME_ROWS: u16 = 2;
+
+/// The page viewport: the terminal grid, less the rows chrome occupies, and
+/// sitting below the tab bar.
 ///
 /// Chromium is told this is the whole window, so the page genuinely does not
-/// know the statusline exists.
+/// know either chrome row exists.
 pub fn page_viewport(grid: GridSize, cell: CellSize) -> Viewport {
-    let rows = grid.rows.saturating_sub(1).max(1);
-    Viewport::new(GridSize { cols: grid.cols, rows }, cell)
+    let rows = grid.rows.saturating_sub(CHROME_ROWS).max(1);
+    Viewport::with_origin(GridSize { cols: grid.cols, rows }, cell, 1)
 }
 
 /// The page cell a terminal cell refers to, or `None` when it is one of ours.
 ///
-/// The last row is chrome. The page does not know it exists, so a click there
-/// has no page coordinate to become.
+/// The first row is the tab bar and the last is the statusline. The page does
+/// not know either exists, so a click on one has no page coordinate to become.
 pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
     let grid = vp.grid();
-    (column < grid.cols && row < grid.rows).then_some(CellPos { col: column, row })
+    let top = vp.origin_row();
+    let below = top.checked_add(grid.rows)?;
+    (column < grid.cols && row >= top && row < below).then_some(CellPos { col: column, row })
 }
 
 impl Session {
+    /// A session with one tab that already has a page. Tests and nothing
+    /// else, now that every real tab comes into being through an effect.
     pub fn new(grid: GridSize, cell: CellSize) -> Self {
+        let mut session = Self::empty(grid, cell);
+        let id = session.mint();
+        let mut tab = Tab::new(id, String::new());
+        tab.opened = true;
+        session.tabs.push(tab);
+        session
+    }
+
+    /// The shape of a session with nothing in it. Never handed out: a
+    /// browser with no tab is not a state, and both constructors put one in.
+    fn empty(grid: GridSize, cell: CellSize) -> Self {
         Self {
             grid,
             cell,
             vp: page_viewport(grid, cell),
             mode: Mode::Normal,
-            state: State::Loading,
-            url: String::new(),
-            title: String::new(),
-            progress: 0.0,
-            runs: Vec::new(),
-            caret: None,
-            dirty: true,
-            extracting: false,
-            navigating: false,
-            hints: None,
-            hinting: false,
+            tabs: Vec::new(),
+            focus: 0,
+            next_id: 0,
         }
     }
 
-    /// The first read of a page nobody has looked at yet.
+    /// The tabs a restart should come back to, plus whatever was asked for
+    /// on the command line.
+    ///
+    /// The snapshot is data from disk and is not trusted: an empty tab list
+    /// and a focus index past the end both have to produce a browser you can
+    /// use, because the alternative is a crash on launch you cannot get past
+    /// without finding the file yourself.
+    pub fn restore(
+        grid: GridSize,
+        cell: CellSize,
+        snapshot: Option<Snapshot>,
+        open: Option<String>,
+    ) -> Self {
+        let mut session = Self::empty(grid, cell);
+
+        let (focus, saved) = snapshot.map_or((0, Vec::new()), |s| (s.focus, s.tabs));
+        for restored in saved {
+            let id = session.mint();
+            let mut tab = Tab::new(id, restored.url);
+            // The title from the file, so the bar reads as the tabs you left
+            // rather than as a row of blanks until each one loads.
+            tab.title = restored.title;
+            tab.scroll_y = restored.scroll_y;
+            tab.navigating = true;
+            session.tabs.push(tab);
+        }
+        session.focus = focus.min(session.tabs.len().saturating_sub(1));
+
+        if let Some(url) = open {
+            let id = session.mint();
+            let mut tab = Tab::new(id, url);
+            tab.navigating = true;
+            session.tabs.push(tab);
+            session.focus = session.tabs.len() - 1;
+        }
+
+        if session.tabs.is_empty() {
+            let id = session.mint();
+            let mut tab = Tab::new(id, "about:blank".to_string());
+            tab.navigating = true;
+            session.tabs.push(tab);
+        }
+        session
+    }
+
+    /// The next unused tab id.
+    fn mint(&mut self) -> TabId {
+        let id = TabId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// The tab you are looking at. There is always one: closing the last tab
+    /// quits, so a session with no tabs never reaches a caller.
+    pub fn focused(&self) -> &Tab {
+        &self.tabs[self.focus]
+    }
+
+    fn focused_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.focus]
+    }
+
+    pub fn focused_id(&self) -> TabId {
+        self.focused().id
+    }
+
+    /// The tab a job is about, or `None` if it has since been closed.
+    ///
+    /// A page operation outlives the state that asked for it. Looking the id
+    /// up rather than assuming the focused tab is what lets a slow load in a
+    /// backgrounded tab land in that tab, and a load in a closed one land
+    /// nowhere.
+    fn tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|tab| tab.id == id)
+    }
+
+    pub fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+
+    /// Make room for a tab and ask for its page.
+    ///
+    /// The tab exists before its page does. Between here and `Job::Opened`
+    /// it is marked loading and `Core` holds nothing for it, so effects
+    /// naming it are dropped; nothing could have expected to land.
+    fn open_tab(&mut self, url: String, effects: &mut Vec<Effect>) {
+        let id = self.mint();
+        let mut tab = Tab::new(id, url.clone());
+        tab.navigating = true;
+        self.tabs.push(tab);
+        self.focus = self.tabs.len() - 1;
+        effects.push(Effect::OpenTab {
+            id,
+            url,
+            scroll_y: 0.0,
+        });
+        self.save(effects);
+    }
+
+    /// The open tabs, as they would be restored.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            version: crate::store::VERSION,
+            focus: self.focus,
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| SavedTab {
+                    url: tab.url.clone(),
+                    title: tab.title.clone(),
+                    scroll_y: tab.scroll_y,
+                })
+                .collect(),
+        }
+    }
+
+    /// Note that what a restart would come back to has changed.
+    fn save(&self, effects: &mut Vec<Effect>) {
+        effects.push(Effect::Save(self.snapshot()));
+    }
+
+    /// Make room for a tab the page opened for itself.
+    ///
+    /// `open_tab` with the target already in hand and no url to give it: the
+    /// browser chose where it goes. It arrives focused, which is what
+    /// following such a link does anywhere else.
+    fn adopt_tab(&mut self, target: Attached, effects: &mut Vec<Effect>) {
+        let id = self.mint();
+        let mut tab = Tab::new(id, String::new());
+        tab.navigating = true;
+        self.tabs.push(tab);
+        self.focus = self.tabs.len() - 1;
+        effects.push(Effect::AdoptTab { id, target });
+        // Deliberately no save. The browser has not said where this tab is
+        // going yet, and a tab with no url in the file is one a restart
+        // cannot come back to. Its first extraction changes the url, which
+        // is a save on its own terms.
+    }
+
+    /// Close a tab, and go wherever that leaves you.
+    fn close_tab(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        effects.push(Effect::CloseTab(id));
+        self.tabs.remove(index);
+
+        if self.tabs.is_empty() {
+            // A browser with no page in it is not a state worth having, and
+            // it is the same rule `q` follows.
+            effects.push(Effect::Quit);
+            return;
+        }
+        self.save(effects);
+
+        if index < self.focus {
+            // Something to the left went. You are still looking at the same
+            // page; only its index moved.
+            self.focus -= 1;
+            return;
+        }
+        if index > self.focus {
+            return;
+        }
+        // The page you were looking at went, and its right-hand neighbour
+        // has taken its index, which is where the eye already is.
+        self.focus = index.min(self.tabs.len() - 1);
+        let id = self.focused_id();
+        effects.push(Effect::Activate(id));
+        self.start_extract(id, effects);
+    }
+
+    /// Look at another tab.
+    ///
+    /// The cached runs are painted the moment this returns, so a switch is a
+    /// repaint; the extraction only refreshes what is already on screen. That
+    /// is what a background tab keeps its runs for.
+    fn focus_tab(&mut self, index: usize, effects: &mut Vec<Effect>) {
+        if index >= self.tabs.len() || index == self.focus {
+            return;
+        }
+        self.focus = index;
+        let id = self.focused_id();
+        // The browser's foreground and ours have to be the same target, or
+        // input lands on the page you just left.
+        effects.push(Effect::Activate(id));
+        // Spends the dirty flag this tab has been accumulating in the
+        // background, and does nothing if it has none.
+        self.start_extract(id, effects);
+        self.save(effects);
+    }
+
+    /// The tab `steps` along from the focused one, wrapping.
+    fn neighbour(&self, steps: isize) -> usize {
+        let count = self.tabs.len() as isize;
+        if count == 0 {
+            return 0;
+        }
+        (self.focus as isize + steps).rem_euclid(count) as usize
+    }
+
+    /// The first thing a browser does: ask for the pages it does not have,
+    /// and read the ones it does.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        self.start_extract(&mut effects);
+        // Collected first, because opening a tab is decided per tab and
+        // `start_extract` borrows the whole session.
+        let wanted: Vec<(TabId, String, f64, bool)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, tab.url.clone(), tab.scroll_y, tab.opened))
+            .collect();
+        for (id, url, scroll_y, opened) in wanted {
+            if opened {
+                self.start_extract(id, &mut effects);
+            } else {
+                effects.push(Effect::OpenTab { id, url, scroll_y });
+            }
+        }
         effects
     }
 
     /// Say something in the statusline.
     pub fn notice(&mut self, message: &str) {
-        self.state = State::Notice(message.to_string());
+        self.focused_mut().state = State::Notice(message.to_string());
     }
 
     pub fn mode(&self) -> &Mode {
@@ -121,7 +336,7 @@ impl Session {
     }
 
     pub fn state(&self) -> &State {
-        &self.state
+        &self.focused().state
     }
 
     pub fn viewport(&self) -> Viewport {
@@ -131,21 +346,28 @@ impl Session {
     /// Paint the page and the chrome into one full-grid frame.
     pub fn compose(&self) -> Frame {
         let mut frame = Frame::new(self.grid);
-        frame.paint_runs(&self.vp, &self.runs);
+        let tab = self.focused();
+        frame.paint_runs(&self.vp, &tab.runs);
 
         // After the page and before the chrome: labels cover the text they
         // point at, which is what makes them readable, and the chrome still
-        // owns its row.
+        // owns its rows.
         if let Mode::Hint(session) = &self.mode {
             session.paint(&mut frame, &self.vp);
         }
+
+        let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
         chrome::paint(
             &mut frame,
-            &self.mode,
-            &self.state,
-            &self.url,
-            &self.title,
-            self.progress,
+            &Chrome {
+                mode: &self.mode,
+                state: &tab.state,
+                url: &tab.url,
+                title: &tab.title,
+                progress: tab.progress,
+                titles: &titles,
+                focus: self.focus,
+            },
         );
 
         // One place decides where the cursor goes, though two modes have an
@@ -155,7 +377,7 @@ impl Session {
             // A page can focus a field without your asking, and a caret
             // there would promise that your typing lands in it when in
             // normal mode it does not.
-            Mode::Insert => self.caret.and_then(|caret| caret.cell(&self.vp)),
+            Mode::Insert => tab.caret.and_then(|caret| caret.cell(&self.vp)),
             Mode::Command(buffer) => chrome::command_caret(buffer, self.grid),
             Mode::Normal | Mode::Hint(_) => None,
         });
@@ -169,10 +391,13 @@ impl Session {
             Event::Key(key) => self.on_key(key, &mut effects),
             Event::Mouse(mouse) => self.on_mouse(mouse, &mut effects),
             Event::Resized(grid, cell) => self.on_resize(grid, cell, &mut effects),
-            Event::Dirty => {
-                self.mark_dirty();
-                self.start_extract(&mut effects);
+            Event::Dirty(id) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.mark_dirty();
+                }
+                self.start_extract(id, &mut effects);
             }
+            Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
             Event::Done(job) => self.on_job(job, &mut effects),
         }
         effects
@@ -190,22 +415,31 @@ impl Session {
             Action::Quit => effects.push(Effect::Quit),
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
-            Action::Hints => match self.hints.clone() {
+            Action::Hints => match self.focused().hints.clone() {
                 Some(targets) => self.enter_hints(targets),
                 // `f` pressed twice before the first answer comes back is
                 // one question, not two.
-                None if !self.hinting => {
-                    self.hinting = true;
-                    effects.push(Effect::Hints);
+                //
+                // And a tab with no page behind it is not asked at all.
+                // `Core` drops an effect naming a page it does not hold,
+                // which is every effect between asking for a tab and being
+                // told it opened, and `Job::Hints` is the only thing that
+                // clears the flag below. Setting it for a query nobody can
+                // answer leaves `f` dead on that tab for the rest of the
+                // run. `Tab::opened` is what names that window.
+                None if !self.focused().hinting && self.focused().opened => {
+                    let id = self.focused_id();
+                    self.focused_mut().hinting = true;
+                    effects.push(Effect::Hints(id));
                 }
                 None => {}
             },
 
             // Scrolling does not settle the way a navigation does; the
             // page's own scroll listener reports when it has moved.
-            Action::Scroll(dy) => effects.push(Effect::Scroll(Scroll::By(dy))),
-            Action::ScrollTop => effects.push(Effect::Scroll(Scroll::Top)),
-            Action::ScrollEnd => effects.push(Effect::Scroll(Scroll::End)),
+            Action::Scroll(dy) => effects.push(Effect::Scroll(self.focused_id(), Scroll::By(dy))),
+            Action::ScrollTop => effects.push(Effect::Scroll(self.focused_id(), Scroll::Top)),
+            Action::ScrollEnd => effects.push(Effect::Scroll(self.focused_id(), Scroll::End)),
             Action::Back => self.navigate(Navigation::Back, effects),
             Action::Forward => self.navigate(Navigation::Forward, effects),
             Action::Reload => self.navigate(Navigation::Reload, effects),
@@ -216,7 +450,7 @@ impl Session {
                 // keyboard is still yours: taking it back must never depend
                 // on the page.
                 if self.mode == Mode::Insert {
-                    effects.push(Effect::Blur);
+                    effects.push(Effect::Blur(self.focused_id()));
                 }
                 self.mode = Mode::Normal;
             }
@@ -240,7 +474,7 @@ impl Session {
                 match command::parse(&line) {
                     Ok(Command::Quit) => effects.push(Effect::Quit),
                     Ok(command) => self.run_command(command, effects),
-                    Err(message) => self.state = State::Error(message),
+                    Err(message) => self.focused_mut().state = State::Error(message),
                 }
             }
 
@@ -259,6 +493,16 @@ impl Session {
                 self.on_filtered(filtered, effects);
             }
 
+            Action::TabClose => {
+                let id = self.focused_id();
+                self.close_tab(id, effects);
+            }
+            // Out of range does nothing rather than clamping to the last
+            // tab: `$` with three open is a tab that is not there, and
+            // landing somewhere you did not ask for is worse than landing
+            // nowhere.
+            Action::TabAt(index) => self.focus_tab(index, effects),
+
             Action::Send(key) => self.send_key(key, effects),
         }
     }
@@ -269,22 +513,36 @@ impl Session {
     /// worse than a missing keystroke, because the page acts on it.
     fn send_key(&self, key: KeyEvent, effects: &mut Vec<Effect>) {
         if let Some(input) = keys::describe(key) {
-            effects.push(Effect::Send(Input::Key(input)));
+            effects.push(Effect::Send(self.focused_id(), Input::Key(input)));
         }
     }
 
     fn run_command(&mut self, command: Command, effects: &mut Vec<Effect>) {
         match command {
             Command::Open(url) => {
-                self.url = url.clone();
+                self.focused_mut().url = url.clone();
                 self.navigate(Navigation::Open(url), effects);
+            }
+            Command::TabOpen(url) => self.open_tab(url, effects),
+            Command::TabClose => {
+                let id = self.focused_id();
+                self.close_tab(id, effects);
+            }
+            Command::TabNext => {
+                let index = self.neighbour(1);
+                self.focus_tab(index, effects);
+            }
+            Command::TabPrev => {
+                let index = self.neighbour(-1);
+                self.focus_tab(index, effects);
             }
             Command::Back => self.navigate(Navigation::Back, effects),
             Command::Forward => self.navigate(Navigation::Forward, effects),
             Command::Reload => self.navigate(Navigation::Reload, effects),
             Command::Set(Setting::Mouse(on)) => {
                 effects.push(Effect::MouseCapture(on));
-                self.state = State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
+                self.focused_mut().state =
+                    State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
             }
             // Handled by the caller.
             Command::Quit => {}
@@ -296,12 +554,14 @@ impl Session {
     /// The previous page stays on screen, marked loading, until the new one
     /// has been extracted. Nothing a page does blanks the frame.
     fn navigate(&mut self, navigation: Navigation, effects: &mut Vec<Effect>) {
-        if self.navigating {
+        if self.focused().navigating {
             return;
         }
-        self.navigating = true;
-        self.state = State::Loading;
-        effects.push(Effect::Navigate(navigation));
+        let id = self.focused_id();
+        let tab = self.focused_mut();
+        tab.navigating = true;
+        tab.state = State::Loading;
+        effects.push(Effect::Navigate(id, navigation));
     }
 
     fn on_mouse(&mut self, event: MouseEvent, effects: &mut Vec<Effect>) {
@@ -322,31 +582,36 @@ impl Session {
             // no context menu to open and no tab to middle-click into.
             _ => return,
         };
-        effects.push(Effect::Send(Input::Mouse(mouse)));
+        effects.push(Effect::Send(self.focused_id(), Input::Mouse(mouse)));
     }
 
-    /// Note that the page has changed under us.
-    ///
-    /// Hint targets are geometry, so a page that moved has invalidated them.
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-        self.hints = None;
-    }
-
-    fn start_extract(&mut self, effects: &mut Vec<Effect>) {
-        if self.extracting || !self.dirty {
+    fn start_extract(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let focused = self.focused_id() == id;
+        let Some(tab) = self.tab_mut(id) else { return };
+        if tab.extracting || !tab.dirty {
             return;
         }
-        self.extracting = true;
-        self.dirty = false;
-        effects.push(Effect::Extract);
+        // A background tab keeps its flag and spends it when focus arrives.
+        // Reading a page nobody is looking at is a round trip for a frame
+        // nobody will see, and spec section 3 is explicit that an idle
+        // background tab must cost what an idle foreground tab costs.
+        //
+        // The exception is a tab nobody has read yet: reading it once is what
+        // puts a real title in the bar and makes the first switch to it a
+        // repaint rather than a round trip. Idling means after that.
+        if !focused && tab.read {
+            return;
+        }
+        tab.extracting = true;
+        tab.dirty = false;
+        effects.push(Effect::Extract(id));
     }
 
     fn enter_hints(&mut self, targets: Vec<HintTarget>) {
         let session = HintSession::new(targets);
         if session.is_empty() {
             // Entering a mode with nothing in it would only need escaping.
-            self.state = State::Notice("no hints".to_string());
+            self.focused_mut().state = State::Notice("no hints".to_string());
             return;
         }
         self.mode = Mode::Hint(session);
@@ -365,8 +630,9 @@ impl Session {
 
     fn activate(&mut self, target: HintTarget, effects: &mut Vec<Effect>) {
         let at = target.center();
-        effects.push(Effect::Send(Input::Mouse(MouseInput::press(at))));
-        effects.push(Effect::Send(Input::Mouse(MouseInput::release(at))));
+        let id = self.focused_id();
+        effects.push(Effect::Send(id, Input::Mouse(MouseInput::press(at))));
+        effects.push(Effect::Send(id, Input::Mouse(MouseInput::release(at))));
         // Clicking a text field is the beginning of typing into it, so that
         // is where the mode goes. Anything else is finished when the click
         // lands.
@@ -383,78 +649,173 @@ impl Session {
         self.grid = grid;
         self.cell = cell;
         self.vp = page_viewport(grid, cell);
-        // The page genuinely reflows: it is being told the window changed
-        // size. Extraction waits for `Job::Resized`, because reading the
-        // page before it has been resized reads the old layout.
-        effects.push(Effect::SetViewport(self.vp));
+        // Every tab, not just the one in front: a background tab laid out
+        // for the terminal you used to have would be wrong the moment you
+        // reached it, and reaching it is the one moment there is no time to
+        // fix it in. The page genuinely reflows; extraction waits for
+        // `Job::Resized`, because reading before the page has been resized
+        // reads the old layout.
+        for tab in &self.tabs {
+            effects.push(Effect::SetViewport(tab.id, self.vp));
+        }
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
+        let id = match &job {
+            Job::Extracted(id, _)
+            | Job::Failed(id, _)
+            | Job::Settled(id)
+            | Job::Hints(id, _)
+            | Job::Resized(id)
+            | Job::Noted(id, _) => *id,
+            // The one job with no tab: the session file is made of all of
+            // them. It goes on the tab in front because that is the only
+            // statusline there is.
+            Job::Unsaved(message) => {
+                self.focused_mut().state = State::Error(message.clone());
+                return;
+            }
+            Job::Opened(id, _) => *id,
+        };
+        if self.tab_mut(id).is_none() {
+            // The tab was closed while this was in flight. Its id is never
+            // reused, so there is no page this could belong to instead.
+            return;
+        }
+
         match job {
-            Job::Extracted(extraction) => {
-                self.extracting = false;
-                self.progress = extraction.scroll_progress();
-                self.runs = extraction.runs;
-                self.caret = extraction.caret;
-                self.title = extraction.title;
+            Job::Extracted(_, extraction) => {
+                let progress = extraction.scroll_progress();
+                let tab = self.tab_mut(id).expect("resolved above");
+                // What a restart would come back to, before this extraction
+                // touches it. Compared against what is stored rather than
+                // against what arrived: an error page's URL is deliberately
+                // not kept, so a comparison with the extraction would differ
+                // every time and turn a page that cannot load into a write
+                // per dirty signal.
+                let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
+                tab.extracting = false;
+                tab.read = true;
+                tab.progress = progress;
+                tab.scroll_y = extraction.scroll_y;
+                tab.runs = extraction.runs;
+                tab.caret = extraction.caret;
+                tab.title = extraction.title;
 
                 // Chromium answers a DNS or connection failure by navigating
                 // to its own error page rather than failing the command, so a
                 // navigation can "succeed" into one. Its error page is more
-                // use than a stale frame — it says what went wrong — but the
+                // use than a stale frame, it says what went wrong, but the
                 // statusline must not go on claiming the page is fine.
                 if extraction.url.starts_with(CHROME_ERROR_SCHEME) {
                     // The statusline prints the URL itself, so naming it here
                     // too would print it twice.
-                    self.state = State::Error("could not be reached".to_string());
+                    tab.state = State::Error("could not be reached".to_string());
                 } else {
-                    self.url = extraction.url;
-                    if !self.navigating {
-                        self.state = State::Ready;
+                    tab.url = extraction.url;
+                    if !tab.navigating {
+                        tab.state = State::Ready;
                     }
                 }
+                let tab = self.tab_mut(id).expect("resolved above");
+                if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
+                    self.save(effects);
+                }
                 // The page may have changed again while we were extracting.
-                self.start_extract(effects);
+                self.start_extract(id, effects);
             }
-            Job::Hints(result) => {
-                // However it went, the query is over and `f` must work again.
-                self.hinting = false;
+            Job::Hints(_, result) => {
+                // However it went, that tab's query is over and `f` must
+                // work on it again.
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.hinting = false;
+                }
                 match result {
                     Ok(targets) => {
-                        self.hints = Some(targets.clone());
+                        if let Some(tab) = self.tab_mut(id) {
+                            tab.hints = Some(targets.clone());
+                        }
                         // A query is a round trip, and the keystroke that
-                        // asked for it was normal mode's. Landing the answer
-                        // in whatever mode you have since entered would take
-                        // the command line out from under you mid-word.
-                        if self.mode == Mode::Normal {
+                        // asked for it was normal mode's, on a tab that was
+                        // in front. Landing the answer in whatever mode you
+                        // have since entered would take the command line out
+                        // from under you mid-word, and landing it on another
+                        // tab would paint one page's labels over another's
+                        // text.
+                        if self.mode == Mode::Normal && self.focused_id() == id {
                             self.enter_hints(targets);
                         }
                     }
-                    Err(message) => self.state = State::Error(message),
+                    Err(message) => {
+                        if let Some(tab) = self.tab_mut(id) {
+                            tab.state = State::Error(message);
+                        }
+                    }
                 }
             }
-            Job::Settled => {
-                self.navigating = false;
-                self.state = State::Ready;
-                self.mark_dirty();
-                self.start_extract(effects);
+            Job::Settled(_) => {
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.navigating = false;
+                tab.state = State::Ready;
+                tab.mark_dirty();
+                self.start_extract(id, effects);
             }
-            Job::Resized => {
-                self.mark_dirty();
-                self.start_extract(effects);
+            Job::Resized(_) => {
+                self.tab_mut(id).expect("resolved above").mark_dirty();
+                self.start_extract(id, effects);
             }
-            // The frame stays exactly as it was; only the statusline
-            // changes. Spec section 8. Deliberately not `Job::Failed`: that
-            // one clears the extraction and navigation flags, and a
-            // keystroke that failed has finished neither of those.
-            Job::InputFailed(message) => self.state = State::Error(message),
-            Job::Failed(message) => {
-                self.extracting = false;
-                self.navigating = false;
+            Job::Opened(_, Ok(())) => {
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.opened = true;
+                tab.navigating = false;
+                tab.state = State::Ready;
+                tab.mark_dirty();
+                if self.focused_id() == id {
+                    effects.push(Effect::Activate(id));
+                }
+                // The page is already at the offset it was restored to;
+                // `Effect::OpenTab` carried it, so this reads what is there.
+                self.start_extract(id, effects);
+            }
+            Job::Opened(_, Err(message)) => {
+                // A tab with no page behind it is not a tab. Drop it and say
+                // why, without disturbing the one you were on.
+                //
+                // Through the caller's own effects, because closing decides
+                // more than that a tab is gone: it asks to quit when that was
+                // the last one, and hands the browser to the tab taking its
+                // place. Those decisions were being made into a vector nobody
+                // read, which left the browser in front of a page the session
+                // had let go of, and left `focused_mut` below indexing a tab
+                // list that closing had just emptied.
+                //
+                // `Effect::CloseTab` names a tab `Core` holds no page for and
+                // is a no-op there. A target the browser did manage to create
+                // is closed by `Core`, which is the only side that knows one
+                // exists.
+                self.close_tab(id, effects);
+                // Closing the last tab asks to quit, and there is then no
+                // statusline left to put the message on.
+                if !self.tabs.is_empty() {
+                    self.focused_mut().state = State::Error(message);
+                }
+            }
+            Job::Failed(_, message) => {
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.extracting = false;
+                tab.navigating = false;
                 // The frame stays exactly as it was; only the statusline
                 // changes. Section 8: never blank the frame you are looking at.
-                self.state = State::Error(message);
+                tab.state = State::Error(message);
             }
+            // The frame stays exactly as it was; only the statusline changes.
+            // Spec section 8. Deliberately not `Job::Failed`: that one clears
+            // the extraction and navigation flags, and a keystroke that
+            // failed has finished neither of those.
+            Job::Noted(_, message) => {
+                self.tab_mut(id).expect("resolved above").state = State::Error(message);
+            }
+            Job::Unsaved(_) => unreachable!("answered above"),
         }
     }
 }
@@ -463,7 +824,7 @@ impl Session {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
-    use wwt_frame::CssRect;
+    use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
     use wwt_page::Extraction;
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
@@ -473,11 +834,16 @@ mod tests {
         Session::new(GRID, CELL)
     }
 
+    /// The id of the tab a fresh session starts with.
+    fn tab0() -> TabId {
+        TabId(0)
+    }
+
     /// A session past its first extraction, the state most keys are pressed in.
     fn ready() -> Session {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(Box::new(extraction("https://example.com")))));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
         session
     }
 
@@ -511,7 +877,7 @@ mod tests {
 
     /// The page answering a hint query.
     fn hinted(targets: Vec<HintTarget>) -> Event {
-        Event::Done(Job::Hints(Ok(targets)))
+        Event::Done(Job::Hints(tab0(), Ok(targets)))
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
@@ -529,29 +895,39 @@ mod tests {
 
     #[test]
     fn the_first_thing_a_session_does_is_read_the_page() {
-        assert_eq!(session().begin(), vec![Effect::Extract]);
+        assert_eq!(session().begin(), vec![Effect::Extract(tab0())]);
     }
 
     #[test]
     fn a_dirty_signal_during_an_extraction_re_runs_it_once_not_twice() {
         let mut session = session();
-        assert_eq!(session.begin(), vec![Effect::Extract]);
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
 
         // Three signals arrive while that extraction is still in flight.
         for _ in 0..3 {
-            assert_eq!(session.on(Event::Dirty), vec![], "a second extraction would race it");
+            assert_eq!(session.on(Event::Dirty(tab0())), vec![], "a second extraction would race it");
         }
 
-        // Finishing it starts exactly one more, covering all three.
-        let effects = session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank")))));
-        assert_eq!(effects, vec![Effect::Extract]);
+        // Finishing it starts exactly one more, covering all three. The tab
+        // had no url until now, so this is also the first thing worth
+        // writing down.
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank")))));
+        assert_eq!(
+            effects,
+            vec![Effect::Save(session.snapshot()), Effect::Extract(tab0())]
+        );
     }
 
     #[test]
     fn a_page_that_stopped_changing_stops_being_read() {
         let mut session = ready();
+        // The same page `ready` left it on: an idle page is one that did not
+        // move, so extracting it again must cost neither a read nor a write.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("https://example.com"))
+            ))),
             vec![],
             "an idle page must cost nothing"
         );
@@ -561,8 +937,8 @@ mod tests {
     fn a_failed_extraction_lets_the_next_one_start() {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Failed("boom".to_string())));
-        assert_eq!(session.on(Event::Dirty), vec![Effect::Extract]);
+        session.on(Event::Done(Job::Failed(tab0(), "boom".to_string())));
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0())]);
     }
 
     // What a finished job says about the page.
@@ -570,8 +946,8 @@ mod tests {
     #[test]
     fn a_chrome_error_url_is_an_error_without_becoming_the_url() {
         let mut session = ready();
-        session.on(Event::Dirty);
-        session.on(Event::Done(Job::Extracted(Box::new(extraction(
+        session.on(Event::Dirty(tab0()));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction(
             "chrome-error://chromewebdata/",
         )))));
 
@@ -585,14 +961,17 @@ mod tests {
     #[test]
     fn a_keystroke_that_failed_leaves_the_page_alone() {
         let mut session = ready();
-        session.on(Event::Dirty);
-        let mid_extraction = session.on(Event::Done(Job::InputFailed("no".to_string())));
+        session.on(Event::Dirty(tab0()));
+        let mid_extraction = session.on(Event::Done(Job::Noted(tab0(), "no".to_string())));
 
         assert_eq!(session.state(), &State::Error("no".to_string()));
         assert_eq!(mid_extraction, vec![], "an extraction was in flight and still is");
         // The one already running still finishes, and finds nothing to do.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("https://example.com"))
+            ))),
             vec![]
         );
     }
@@ -601,7 +980,7 @@ mod tests {
     fn a_failure_never_blanks_the_frame() {
         let mut session = ready();
         let before = session.compose();
-        session.on(Event::Done(Job::Failed("the page went away".to_string())));
+        session.on(Event::Done(Job::Failed(tab0(), "the page went away".to_string())));
         let after = session.compose();
 
         let rows = |f: &Frame| (0..23).map(|r| f.row_text(r)).collect::<Vec<_>>();
@@ -617,7 +996,7 @@ mod tests {
         session.on(key('i'));
         assert_eq!(session.mode(), &Mode::Insert);
 
-        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur]);
+        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur(tab0())]);
         assert_eq!(
             session.mode(),
             &Mode::Normal,
@@ -637,11 +1016,11 @@ mod tests {
     fn the_page_never_sees_an_escape_it_was_not_sent_on_purpose() {
         let mut session = ready();
         session.on(key('i'));
-        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur], "ours, always");
+        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur(tab0())], "ours, always");
 
         session.on(key('i'));
         let sent = session.on(ctrl(']'));
-        let [Effect::Send(Input::Key(sent))] = sent.as_slice() else {
+        let [Effect::Send(_, Input::Key(sent))] = sent.as_slice() else {
             panic!("Ctrl-] should reach the page, got {sent:?}");
         };
         assert_eq!(sent.key, "Escape");
@@ -656,7 +1035,7 @@ mod tests {
         let mut sent = Vec::new();
         for c in "abc".chars() {
             for effect in session.on(key(c)) {
-                if let Effect::Send(Input::Key(key)) = effect {
+                if let Effect::Send(_, Input::Key(key)) = effect {
                     sent.push(key.text);
                 }
             }
@@ -674,7 +1053,7 @@ mod tests {
         let effects = session.on(code(KeyCode::Enter));
         assert_eq!(
             effects,
-            vec![Effect::Navigate(Navigation::Open("https://example.co".to_string()))],
+            vec![Effect::Navigate(tab0(), Navigation::Open("https://example.co".to_string()))],
             "backspace rubbed out the m"
         );
     }
@@ -701,18 +1080,18 @@ mod tests {
     #[test]
     fn a_second_navigation_while_one_is_in_flight_is_dropped() {
         let mut session = ready();
-        assert_eq!(session.on(key('H')), vec![Effect::Navigate(Navigation::Back)]);
+        assert_eq!(session.on(key('H')), vec![Effect::Navigate(tab0(), Navigation::Back)]);
         assert_eq!(session.on(key('L')), vec![], "one navigation at a time");
 
-        session.on(Event::Done(Job::Settled));
-        assert_eq!(session.on(key('L')), vec![Effect::Navigate(Navigation::Forward)]);
+        session.on(Event::Done(Job::Settled(tab0())));
+        assert_eq!(session.on(key('L')), vec![Effect::Navigate(tab0(), Navigation::Forward)]);
     }
 
     #[test]
     fn a_settled_navigation_reads_the_new_page() {
         let mut session = ready();
         session.on(key('H'));
-        assert_eq!(session.on(Event::Done(Job::Settled)), vec![Effect::Extract]);
+        assert_eq!(session.on(Event::Done(Job::Settled(tab0()))), vec![Effect::Extract(tab0())]);
         assert_eq!(session.state(), &State::Ready);
     }
 
@@ -720,9 +1099,9 @@ mod tests {
     fn scrolling_asks_the_page_to_move_and_waits_to_be_told_it_did() {
         let mut session = ready();
         // One row of 20 CSS pixels.
-        assert_eq!(session.on(key('j')), vec![Effect::Scroll(Scroll::By(20.0))]);
-        assert_eq!(session.on(key('g')), vec![Effect::Scroll(Scroll::Top)]);
-        assert_eq!(session.on(key('G')), vec![Effect::Scroll(Scroll::End)]);
+        assert_eq!(session.on(key('j')), vec![Effect::Scroll(tab0(), Scroll::By(20.0))]);
+        assert_eq!(session.on(key('g')), vec![Effect::Scroll(tab0(), Scroll::Top)]);
+        assert_eq!(session.on(key('G')), vec![Effect::Scroll(tab0(), Scroll::End)]);
     }
 
     // Hints: cached until the page moves, and a text field lands in insert.
@@ -730,7 +1109,7 @@ mod tests {
     #[test]
     fn f_queries_the_page_once_and_then_uses_what_it_said() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
 
         session.on(hinted(vec![target(TargetKind::Clickable)]));
         assert!(matches!(session.mode(), Mode::Hint(_)));
@@ -747,10 +1126,10 @@ mod tests {
         session.on(hinted(vec![target(TargetKind::Clickable)]));
         session.on(code(KeyCode::Esc));
 
-        session.on(Event::Dirty);
+        session.on(Event::Dirty(tab0()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints],
+            vec![Effect::Hints(tab0())],
             "hints are geometry, so a page that moved has invalidated them"
         );
     }
@@ -778,8 +1157,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                Effect::Send(Input::Mouse(MouseInput::press(at))),
-                Effect::Send(Input::Mouse(MouseInput::release(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::press(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::release(at))),
             ]
         );
         assert_eq!(session.mode(), &Mode::Insert, "clicking a field is the start of typing in it");
@@ -796,8 +1175,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                Effect::Send(Input::Mouse(MouseInput::press(at))),
-                Effect::Send(Input::Mouse(MouseInput::release(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::press(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::release(at))),
             ]
         );
         assert_eq!(session.mode(), &Mode::Normal, "a link is finished when the click lands");
@@ -806,7 +1185,7 @@ mod tests {
     #[test]
     fn a_query_still_in_flight_is_not_asked_again() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
         assert_eq!(session.on(key('f')), vec![], "one question, not two");
     }
 
@@ -835,12 +1214,12 @@ mod tests {
     fn a_query_that_failed_leaves_f_working() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(Err("the page went away".to_string()))));
+        session.on(Event::Done(Job::Hints(tab0(), Err("the page went away".to_string()))));
 
         assert_eq!(session.state(), &State::Error("the page went away".to_string()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints],
+            vec![Effect::Hints(tab0())],
             "a failed query that never cleared its flag would kill `f` for the session"
         );
     }
@@ -880,7 +1259,7 @@ mod tests {
         let mut session = ready();
         let effects = session.on(mouse(MouseEventKind::Down(MouseButton::Left), 4, 2));
         let at = session.viewport().to_css(CellPos { col: 4, row: 2 });
-        assert_eq!(effects, vec![Effect::Send(Input::Mouse(MouseInput::press(at)))]);
+        assert_eq!(effects, vec![Effect::Send(tab0(), Input::Mouse(MouseInput::press(at)))]);
     }
 
     #[test]
@@ -893,9 +1272,9 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_three_rows_a_notch() {
         let mut session = ready();
-        let effects = session.on(mouse(MouseEventKind::ScrollDown, 0, 0));
-        let at = session.viewport().to_css(CellPos { col: 0, row: 0 });
-        assert_eq!(effects, vec![Effect::Send(Input::Mouse(MouseInput::wheel(at, 60.0)))]);
+        let effects = session.on(mouse(MouseEventKind::ScrollDown, 0, 1));
+        let at = session.viewport().to_css(CellPos { col: 0, row: 1 });
+        assert_eq!(effects, vec![Effect::Send(tab0(), Input::Mouse(MouseInput::wheel(at, 60.0)))]);
     }
 
     #[test]
@@ -907,16 +1286,32 @@ mod tests {
     // Resize.
 
     #[test]
-    fn a_resize_tells_the_page_before_reading_it() {
+    fn a_resize_tells_every_tab_before_reading_any_of_them() {
         let mut session = ready();
+        open_two_more(&mut session);
         let grid = GridSize { cols: 100, rows: 30 };
-        let effects = session.on(Event::Resized(grid, CELL));
+        let vp = page_viewport(grid, CELL);
 
-        assert_eq!(effects, vec![Effect::SetViewport(page_viewport(grid, CELL))]);
+        let effects = session.on(Event::Resized(grid, CELL));
         assert_eq!(
-            session.on(Event::Done(Job::Resized)),
-            vec![Effect::Extract],
+            effects,
+            vec![
+                Effect::SetViewport(tab0(), vp),
+                Effect::SetViewport(TabId(1), vp),
+                Effect::SetViewport(TabId(2), vp),
+            ],
+            "a tab you switch to must already be the size of the terminal you have"
+        );
+
+        assert_eq!(
+            session.on(Event::Done(Job::Resized(TabId(2)))),
+            vec![Effect::Extract(TabId(2))],
             "reading before the page has reflowed reads the old layout"
+        );
+        assert_eq!(
+            session.on(Event::Done(Job::Resized(tab0()))),
+            vec![],
+            "a background tab keeps the flag until you look at it"
         );
     }
 
@@ -935,7 +1330,7 @@ mod tests {
 
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(Box::new(with_caret))));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(with_caret))));
         assert_eq!(
             session.compose().cursor(),
             None,
@@ -943,21 +1338,22 @@ mod tests {
         );
 
         session.on(key('i'));
-        assert_eq!(session.compose().cursor(), Some(CellPos { col: 12, row: 2 }));
+        assert_eq!(session.compose().cursor(), Some(CellPos { col: 12, row: 3 }));
     }
 
     #[test]
-    fn the_statusline_owns_the_last_row_and_the_page_does_not_know_it_exists() {
+    fn the_chrome_owns_a_row_at_each_end_and_the_page_knows_of_neither() {
         let session = ready();
-        assert_eq!(session.viewport().grid().rows, 23);
+        assert_eq!(session.viewport().grid().rows, 22);
+        assert_eq!(session.viewport().origin_row(), 1);
         assert_eq!(session.compose().grid().rows, 24);
     }
 
     #[test]
-    fn the_page_viewport_is_one_row_shorter_than_the_terminal() {
+    fn the_page_viewport_is_two_rows_shorter_than_the_terminal() {
         let vp = page_viewport(GRID, CELL);
-        assert_eq!(vp.grid(), GridSize { cols: 80, rows: 23 });
-        assert_eq!(vp.css_height(), 23 * 20);
+        assert_eq!(vp.grid(), GridSize { cols: 80, rows: 22 });
+        assert_eq!(vp.css_height(), 22 * 20);
     }
 
     #[test]
@@ -973,10 +1369,663 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_chrome_row_belongs_to_no_page_cell() {
-        // Row 23 is the statusline. The page does not know that row exists,
-        // so there is nothing to convert a click there into.
+    fn a_click_on_the_tab_bar_belongs_to_no_page_cell() {
+        // Row 0 is the tab bar and row 23 is the statusline. The page does
+        // not know either exists, so there is nothing to convert a click
+        // there into.
         let vp = page_viewport(GRID, CELL);
+        assert_eq!(page_cell(&vp, 5, 0), None);
         assert_eq!(page_cell(&vp, 5, 23), None);
+    }
+
+    #[test]
+    fn every_effect_says_which_page_it_is_for() {
+        let mut session = session();
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
+
+        let mut session = ready();
+        assert_eq!(
+            session.on(key('j')),
+            vec![Effect::Scroll(tab0(), Scroll::By(20.0))]
+        );
+    }
+
+    #[test]
+    fn a_job_for_a_tab_that_is_gone_is_dropped_rather_than_painted() {
+        // Nothing can close a tab yet, but the guard is what makes Task 8
+        // safe, and a job carrying an unknown id must never be looked up.
+        let mut session = ready();
+        let stale = Job::Extracted(TabId(999), Box::new(extraction("https://elsewhere.test")));
+        assert_eq!(session.on(Event::Done(stale)), vec![]);
+        assert_eq!(session.focused().url, "https://example.com", "the frame is untouched");
+    }
+
+    /// Two more tabs, both opened and settled, focus left on the last.
+    fn open_two_more(session: &mut Session) {
+        for (n, url) in [(1u32, "one.test"), (2, "two.test")] {
+            typed(session, &format!(":tabopen {url}"));
+            session.on(code(KeyCode::Enter));
+            session.on(Event::Done(Job::Opened(TabId(n), Ok(()))));
+            session.on(Event::Done(Job::Extracted(
+                TabId(n),
+                Box::new(extraction(&format!("https://{url}"))),
+            )));
+        }
+    }
+
+    // Restore.
+
+    fn snapshot_of(urls: &[&str], focus: usize) -> Snapshot {
+        Snapshot {
+            version: crate::store::VERSION,
+            focus,
+            tabs: urls
+                .iter()
+                .map(|url| SavedTab {
+                    url: (*url).to_string(),
+                    title: "saved".to_string(),
+                    scroll_y: 120.0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn restoring_asks_for_every_tab_that_was_open() {
+        let mut session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 1)),
+            None,
+        );
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().url, "https://two.test", "you come back where you were");
+        assert_eq!(
+            session.begin(),
+            vec![
+                Effect::OpenTab {
+                    id: TabId(0),
+                    url: "https://one.test".to_string(),
+                    scroll_y: 120.0
+                },
+                Effect::OpenTab {
+                    id: TabId(1),
+                    url: "https://two.test".to_string(),
+                    scroll_y: 120.0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_url_on_the_command_line_is_a_new_tab_beside_the_restored_ones() {
+        // Nothing you had is lost by typing `wwt example.com` out of habit,
+        // which is the failure mode that actually costs something.
+        let session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test"], 0)),
+            Some("https://asked.test".to_string()),
+        );
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().url, "https://asked.test");
+    }
+
+    #[test]
+    fn no_snapshot_and_no_url_is_one_blank_tab() {
+        let session = Session::restore(GRID, CELL, None, None);
+
+        assert_eq!(session.tabs().len(), 1);
+        assert_eq!(session.focused().url, "about:blank");
+    }
+
+    #[test]
+    fn a_snapshot_with_no_tabs_in_it_still_leaves_you_a_browser() {
+        let empty = Snapshot { version: crate::store::VERSION, focus: 0, tabs: Vec::new() };
+
+        let session = Session::restore(GRID, CELL, Some(empty), None);
+
+        assert_eq!(session.tabs().len(), 1, "a browser with no page in it is not a state");
+    }
+
+    #[test]
+    fn a_focus_index_past_the_end_of_the_snapshot_lands_on_a_real_tab() {
+        // The file is data from disk and is not trusted.
+        let session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 99)),
+            None,
+        );
+
+        assert_eq!(session.focused().url, "https://two.test");
+    }
+
+    #[test]
+    fn a_restored_tab_is_asked_for_at_the_offset_it_was_left_at() {
+        // Asked for as part of opening, not scrolled to afterwards: the two
+        // as separate effects are two spawned tasks, and an extraction that
+        // wins that race reads offset zero and writes it down.
+        let mut session =
+            Session::restore(GRID, CELL, Some(snapshot_of(&["https://one.test"], 0)), None);
+
+        let effects = session.begin();
+
+        assert_eq!(
+            effects,
+            vec![Effect::OpenTab {
+                id: tab0(),
+                url: "https://one.test".to_string(),
+                scroll_y: 120.0
+            }]
+        );
+    }
+
+    #[test]
+    fn every_restored_tab_is_read_once_so_the_bar_has_real_titles() {
+        let mut session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 1)),
+            None,
+        );
+        session.begin();
+
+        // Tab 0 is in the background and has never been read. It is read
+        // anyway, once, which is what makes the first switch to it instant.
+        let effects = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
+        assert!(effects.contains(&Effect::Extract(tab0())));
+
+        // And having been read, it goes quiet.
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://one.test")))));
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
+    }
+
+    // The session file.
+
+    fn saved(effects: &[Effect]) -> Option<&Snapshot> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Save(snapshot) => Some(snapshot),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_snapshot_is_the_tabs_you_have_and_the_one_you_are_looking_at() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let snapshot = session.snapshot();
+
+        assert_eq!(snapshot.version, crate::store::VERSION);
+        assert_eq!(snapshot.focus, 2);
+        assert_eq!(snapshot.tabs.len(), 3);
+        assert_eq!(snapshot.tabs[0].url, "https://example.com");
+        assert_eq!(snapshot.tabs[0].title, "Example");
+    }
+
+    #[test]
+    fn opening_a_tab_is_worth_writing_down() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+
+        let effects = session.on(code(KeyCode::Enter));
+
+        assert!(saved(&effects).is_some(), "the tab set changed");
+    }
+
+    #[test]
+    fn closing_a_tab_is_worth_writing_down() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('x'));
+
+        assert_eq!(saved(&effects).map(|s| s.tabs.len()), Some(2));
+    }
+
+    #[test]
+    fn switching_tabs_is_worth_writing_down() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('!'));
+
+        assert_eq!(saved(&effects).map(|s| s.focus), Some(0));
+    }
+
+    #[test]
+    fn an_extraction_that_moved_the_page_is_worth_writing_down() {
+        let mut session = ready();
+        let mut moved = extraction("https://example.com");
+        moved.scroll_y = 240.0;
+
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(moved))));
+
+        assert_eq!(saved(&effects).map(|s| s.tabs[0].scroll_y), Some(240.0));
+    }
+
+    #[test]
+    fn an_extraction_that_changed_nothing_is_not_worth_a_write() {
+        let mut session = ready();
+        session.focused_mut().dirty = true;
+
+        let effects = session.on(Event::Done(Job::Extracted(
+            tab0(),
+            Box::new(extraction("https://example.com")),
+        )));
+
+        assert!(
+            saved(&effects).is_none(),
+            "an idle page must not turn into a write per extraction"
+        );
+    }
+
+    #[test]
+    fn an_error_page_extracted_again_is_not_worth_a_write() {
+        // Its URL is deliberately not the one the tab keeps, so a save
+        // decided on the extraction rather than on what was stored would
+        // write on every dirty signal a page that cannot even load.
+        let mut session = ready();
+        let error = || {
+            Event::Done(Job::Extracted(
+                tab0(),
+                Box::new(extraction("chrome-error://chromewebdata/")),
+            ))
+        };
+        session.on(error());
+
+        let effects = session.on(error());
+
+        assert!(saved(&effects).is_none(), "nothing a restart would notice moved");
+    }
+
+    // Opening and closing.
+
+    #[test]
+    fn opening_a_tab_asks_for_a_page_and_moves_you_to_it() {
+        let mut session = ready();
+        let effects = session.on(key('t'));
+        assert!(matches!(session.mode(), Mode::Command(buffer) if buffer == "tabopen "));
+        assert_eq!(effects, vec![], "`t` only opens the : line");
+
+        typed(&mut session, "example.org");
+        let effects = session.on(code(KeyCode::Enter));
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(1), "a new tab is the one you are looking at");
+        assert_eq!(
+            effects,
+            vec![
+                Effect::OpenTab {
+                    id: TabId(1),
+                    url: "https://example.org".to_string(),
+                    scroll_y: 0.0
+                },
+                Effect::Save(session.snapshot()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tab_that_finished_opening_is_activated_and_read() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+        );
+    }
+
+    #[test]
+    fn a_tab_the_page_opened_for_itself_arrives_focused_and_asks_to_be_adopted() {
+        let mut session = ready();
+        let target = Attached {
+            target: wwt_cdp::TargetId("T2".to_string()),
+            session: "S2".to_string(),
+        };
+
+        let effects = session.on(Event::TargetOpened(target.clone()));
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(1), "a link that opens a tab takes you to it");
+        assert_eq!(effects, vec![Effect::AdoptTab { id: TabId(1), target }]);
+    }
+
+    #[test]
+    fn an_adopted_tab_is_activated_and_read_like_any_other() {
+        // Adoption differs from opening only in where the target came from,
+        // so everything after `Job::Opened` has to be the one path.
+        let mut session = ready();
+        session.on(Event::TargetOpened(Attached {
+            target: wwt_cdp::TargetId("T2".to_string()),
+            session: "S2".to_string(),
+        }));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+        );
+    }
+
+    #[test]
+    fn a_tab_that_could_not_be_opened_leaves_you_where_you_were() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        session.on(Event::Done(Job::Opened(TabId(1), Err("no target".to_string()))));
+        assert_eq!(session.tabs().len(), 1, "a tab with no page is not a tab");
+        assert_eq!(session.focused().id, tab0());
+        assert!(matches!(session.state(), State::Error(_)));
+    }
+
+    #[test]
+    fn a_failure_on_a_background_tab_does_not_land_on_the_one_in_front() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+        session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        session.on(key('!'));
+        assert_eq!(session.focused().id, tab0(), "back on the first tab");
+
+        // A target that would not come to the front, reported while you are
+        // looking at something else. It is the second tab's failure and it
+        // says so there.
+        session.on(Event::Done(Job::Noted(
+            TabId(1),
+            "would not activate".to_string(),
+        )));
+
+        assert!(
+            !matches!(session.state(), State::Error(_)),
+            "the tab in front did not fail: {:?}",
+            session.state()
+        );
+        let background = session
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == TabId(1))
+            .expect("the tab is still open");
+        assert!(
+            matches!(background.state, State::Error(_)),
+            "the tab that failed says nothing about it: {:?}",
+            background.state
+        );
+    }
+
+    #[test]
+    fn a_tab_with_no_page_yet_is_not_asked_for_hints() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+        // Focus is on the new tab, which has been asked for and not yet
+        // opened. `Core` holds no page for it and would drop the query.
+        let effects = session.on(key('f'));
+        assert!(
+            !effects.iter().any(|effect| matches!(effect, Effect::Hints(_))),
+            "asked a tab with no page behind it: {effects:?}"
+        );
+
+        // And the asking is still there to be done once there is a page.
+        // `Job::Hints` is the only thing that clears the in-flight flag, so
+        // a query nobody could answer would have left `f` dead on this tab
+        // for the rest of the run.
+        session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        let effects = session.on(key('f'));
+        assert!(
+            effects.contains(&Effect::Hints(TabId(1))),
+            "f stopped working on the tab: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_only_tab_failing_to_open_asks_to_quit() {
+        // A browser with no page in it is not a state worth having, and one
+        // page that will not open is that state. The tab it would have been
+        // is gone, so there is nowhere left to say so and nothing to do but
+        // leave, which is the same rule closing the last tab follows.
+        let mut session = session();
+        session.begin();
+        let effects = session.on(Event::Done(Job::Opened(tab0(), Err("no target".to_string()))));
+
+        assert!(session.tabs().is_empty(), "the tab had no page behind it");
+        assert!(
+            effects.contains(&Effect::Quit),
+            "closing the last tab asks to quit, and asking is the whole \
+             point of handing closing the caller's effects: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_tab_that_could_not_be_opened_hands_its_neighbour_the_browser() {
+        // Closing decides more than that a tab is gone: the tab taking its
+        // place has to be brought to the front, because input dispatch is
+        // answered by whichever target the browser has in front.
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Err("no target".to_string()))));
+        assert!(
+            effects.contains(&Effect::Activate(tab0())),
+            "the tab you are left looking at is the one the browser must \
+             have in front: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn closing_the_focused_tab_lands_you_on_its_right_hand_neighbour() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        // Three tabs, focused on the middle one.
+        session.on(key('@'));
+        assert_eq!(session.focused().id, TabId(1));
+
+        let effects = session.on(key('x'));
+        assert!(effects.contains(&Effect::CloseTab(TabId(1))));
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().id, TabId(2), "the right-hand neighbour took its place");
+    }
+
+    #[test]
+    fn closing_a_tab_to_your_left_leaves_you_looking_at_the_same_page() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        assert_eq!(session.focused().id, TabId(2));
+
+        session.close_tab(tab0(), &mut Vec::new());
+        assert_eq!(session.focused().id, TabId(2), "you did not move");
+    }
+
+    #[test]
+    fn closing_the_last_tab_quits() {
+        let mut session = ready();
+        let effects = session.on(key('x'));
+        assert!(effects.contains(&Effect::CloseTab(tab0())));
+        assert!(effects.contains(&Effect::Quit), "a browser with no page in it is not a state");
+    }
+
+    #[test]
+    fn a_closed_tabs_late_answer_lands_nowhere() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        session.on(key('x')); // closes TabId(2), leaving 0 and 1
+
+        let late = Job::Extracted(TabId(2), Box::new(extraction("https://gone.test")));
+        assert_eq!(session.on(Event::Done(late)), vec![]);
+        assert_eq!(session.tabs().len(), 2);
+    }
+
+    fn hinted_for(id: TabId, targets: Vec<HintTarget>) -> Event {
+        Event::Done(Job::Hints(id, Ok(targets)))
+    }
+
+    fn run(text: &str) -> TextRun {
+        TextRun {
+            text: text.to_string(),
+            rect: CssRect { x: 0.0, y: 0.0, w: 400.0, h: 20.0 },
+            baseline: 16.0,
+            style: Style { fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, bold: false, reverse: false },
+            z: 0,
+        }
+    }
+
+    // Switching.
+
+    #[test]
+    fn a_shifted_digit_looks_at_the_tab_in_that_position() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        assert_eq!(session.focused().id, TabId(2));
+
+        session.on(key('!'));
+        assert_eq!(session.focused().id, tab0(), "the first tab, whichever you were on");
+
+        session.on(key('#'));
+        assert_eq!(session.focused().id, TabId(2), "and back, without passing the second");
+    }
+
+    #[test]
+    fn a_digit_past_the_last_tab_leaves_you_where_you_are() {
+        // Three tabs and a key for nine of them. The four hundredth is what
+        // `:tabnext` is still for.
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('$'));
+
+        assert_eq!(session.focused().id, TabId(2), "there is no fourth tab to go to");
+        assert_eq!(effects, vec![], "and nothing was asked of the browser");
+    }
+
+    #[test]
+    fn switching_activates_the_tab_you_switched_to() {
+        // Input dispatch is answered by whichever target the browser has in
+        // front, so a switch that does not activate leaves clicks landing on
+        // the page you just left.
+        let mut session = ready();
+        open_two_more(&mut session);
+        let effects = session.on(key('!'));
+        assert!(effects.contains(&Effect::Activate(tab0())));
+    }
+
+    #[test]
+    fn a_switch_paints_the_page_you_switched_to_before_anyone_asks_the_browser() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("first tab")];
+        open_two_more(&mut session);
+
+        session.on(key('!'));
+        let frame = session.compose();
+        assert!(
+            (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
+            "the cached frame is what makes a switch a repaint rather than a round trip"
+        );
+    }
+
+    #[test]
+    fn a_background_tab_that_changed_is_not_read_until_you_look_at_it() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        // Tab 0 is in the background and its page says it moved.
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![],
+            "an idle background tab must cost what an idle foreground tab costs"
+        );
+
+        // Switching to it spends the flag.
+        let effects = session.on(key('!'));
+        assert!(effects.contains(&Effect::Extract(tab0())));
+    }
+
+    #[test]
+    fn switching_to_a_tab_that_did_not_change_costs_no_round_trip() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        session.on(key('!')); // to tab 0, spending its flag
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
+
+        let effects = session.on(key('#'));
+        assert_eq!(
+            effects,
+            vec![Effect::Activate(TabId(2)), Effect::Save(session.snapshot())],
+            "nothing to re-read, though which tab you are on is worth keeping"
+        );
+    }
+
+    /// What a tab switch costs. Run with:
+    ///
+    ///     cargo test -p wwt --lib measure_switch -- --nocapture
+    ///
+    /// The claim in spec section 3 is that a switch is a repaint and no round
+    /// trip, so this asserts the absence of an extraction as well as printing
+    /// the time. A page's worth of runs is composed and the frame is built,
+    /// which is everything between pressing `J` and having the text.
+    ///
+    /// It needs no browser, which is the point: nothing leaves the process.
+    #[test]
+    fn measure_switch() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        for tab in 0..3 {
+            // Down the page rather than all on one row, or the frame this
+            // times is one row of text and the diff has nothing to do.
+            session.tabs[tab].runs = (0..300)
+                .map(|i| {
+                    let mut run = run(&format!("line {i}"));
+                    run.rect.y = f64::from(i) * 20.0;
+                    run.baseline = run.rect.y + 16.0;
+                    run
+                })
+                .collect();
+            session.tabs[tab].read = true;
+            session.tabs[tab].dirty = false;
+        }
+
+        let mut worst = std::time::Duration::ZERO;
+        // Alternating, because going to the tab you are already on is not a
+        // switch and would measure nothing.
+        for step in 0..200 {
+            let to = if step % 2 == 0 { key('!') } else { key('#') };
+            let start = std::time::Instant::now();
+            let effects = session.on(to);
+            let frame = session.compose();
+            worst = worst.max(start.elapsed());
+
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::Extract(_))),
+                "a clean tab must not be re-read: a switch is a repaint"
+            );
+            std::hint::black_box(frame);
+        }
+        eprintln!("switch, worst of 200: {worst:?}");
+        // Loose on purpose: it runs on whatever machine CI has.
+        assert!(worst < std::time::Duration::from_millis(5), "switch took {worst:?}");
+    }
+
+    #[test]
+    fn a_hint_answer_for_a_tab_you_have_left_does_not_put_labels_over_another_page() {
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        session.on(key('f'));
+        session.on(key('!'));
+        session.on(hinted_for(TabId(2), vec![target(TargetKind::Clickable)]));
+
+        assert_eq!(
+            session.mode(),
+            &Mode::Normal,
+            "labels measured against one page must not be painted over another"
+        );
     }
 }

@@ -13,26 +13,37 @@ use tokio::sync::mpsc;
 use wwt_page::{Input, Page};
 
 use crate::event::Job;
+use crate::tab::TabId;
 
 /// The sending half of the pump. The core holds one.
 pub struct InputPump {
-    tx: mpsc::UnboundedSender<Input>,
+    tx: mpsc::UnboundedSender<(TabId, Arc<Page>, Input)>,
 }
 
 impl InputPump {
-    /// Start the pump for a page.
+    /// Start the pump.
+    ///
+    /// One pump for every page, not one per page: keys typed either side of
+    /// a tab switch must not overtake each other, and two channels would make
+    /// their order a matter of which task woke first.
     ///
     /// Failures are reported as a `Job` rather than returned: by the time a
     /// keystroke fails, whoever typed it has typed three more. They go on
     /// the channel every other finished page operation goes on, so the loop
     /// has one thing to select on rather than two.
-    pub fn spawn(page: Arc<Page>, jobs: mpsc::UnboundedSender<Job>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
+    /// Generic over what the channel carries so that the core can wrap a
+    /// `Job` in whatever its own result channel is shaped like. The pump
+    /// itself only ever reports a `Job::Noted`.
+    pub fn spawn<T>(jobs: mpsc::UnboundedSender<T>) -> Self
+    where
+        T: From<Job> + Send + 'static,
+    {
+        let (tx, mut rx) = mpsc::unbounded_channel::<(TabId, Arc<Page>, Input)>();
 
         tokio::spawn(async move {
-            while let Some(input) = rx.recv().await {
+            while let Some((id, page, input)) = rx.recv().await {
                 if let Err(error) = page.dispatch(&input).await {
-                    let _ = jobs.send(Job::InputFailed(error.to_string()));
+                    let _ = jobs.send(Job::Noted(id, error.to_string()).into());
                 }
             }
         });
@@ -42,7 +53,7 @@ impl InputPump {
 
     /// Queue one input. Never blocks, never fails: a closed channel means
     /// the pump task is gone, which only happens on the way out.
-    pub fn send(&self, input: Input) {
-        let _ = self.tx.send(input);
+    pub fn send(&self, id: TabId, page: Arc<Page>, input: Input) {
+        let _ = self.tx.send((id, page, input));
     }
 }

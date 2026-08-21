@@ -1,8 +1,10 @@
 //! Writing a `Frame` to a terminal.
 //!
-//! M1 repaints the whole grid every time. The diffing renderer that only
-//! emits changed cells is M2; the signature here does not change when it
-//! arrives.
+//! Two ways to write one: `render` puts down the whole grid, and `Renderer`
+//! holds the last frame and emits only the cells that differ from it. The
+//! full repaint is not dead code behind the diff, it is what the diff falls
+//! back to when the grid itself changed, and there is nothing to diff
+//! against.
 
 use std::io::Write;
 

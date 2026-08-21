@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+use wwt::event::Job;
 use wwt::input::InputPump;
+use wwt::tab::TabId;
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::{Input, KeyInput, Page};
@@ -40,8 +42,9 @@ fn space() -> KeyInput {
 /// the shape of the bug it would otherwise have.
 #[tokio::test]
 async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
-    let browser = Chromium::launch().await.expect("launch chromium");
+    let browser = Chromium::launch(None).await.expect("launch chromium");
     let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
+    client.auto_attach().await.expect("turn on auto-attach");
     let vp = Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });
     let page = Arc::new(
         Page::open(Arc::clone(&client), &fixture_url("form.html"), vp)
@@ -50,13 +53,17 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
     );
     page.eval("document.querySelector('#name').focus()").await.expect("focus");
 
-    let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
-    let pump = InputPump::spawn(Arc::clone(&page), jobs_tx);
+    let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel::<Job>();
+    let pump = InputPump::spawn(jobs_tx);
 
     let typed = "the quick brown fox";
     for c in typed.chars() {
         // No await between sends: the pump is what keeps these in order.
-        pump.send(Input::Key(if c == ' ' { space() } else { letter(c) }));
+        pump.send(
+            TabId(0),
+            Arc::clone(&page),
+            Input::Key(if c == ' ' { space() } else { letter(c) }),
+        );
     }
 
     // What the field holds is read the way the browser reads it, so an

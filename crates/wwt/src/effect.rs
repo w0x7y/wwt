@@ -5,24 +5,54 @@
 //! feature, and so a test can read what a keystroke asked for without
 //! anything having to happen.
 
+use wwt_cdp::Attached;
 use wwt_frame::Viewport;
 use wwt_page::Input;
+
+use crate::store::Snapshot;
+use crate::tab::TabId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Read the page.
-    Extract,
+    Extract(TabId),
     /// Ask the page for its interactive boxes.
-    Hints,
-    Scroll(Scroll),
-    Navigate(Navigation),
+    Hints(TabId),
+    Scroll(TabId, Scroll),
+    Navigate(TabId, Navigation),
     /// Send one key or click to the page, in order with the others.
-    Send(Input),
+    Send(TabId, Input),
     /// Take focus off whatever has it.
-    Blur,
+    Blur(TabId),
     /// Tell the page the window is this size. The terminal has already
-    /// changed; this is the page catching up.
-    SetViewport(Viewport),
+    /// changed; this is the page catching up. Emitted once per tab, because
+    /// a background tab has to be the right size already when you reach it.
+    SetViewport(TabId, Viewport),
+    /// Create a target for a tab the session has already made room for,
+    /// navigate it, and leave it at `scroll_y`.
+    ///
+    /// The offset is part of opening rather than an effect of its own
+    /// because restoring means both. As two effects they are two spawned
+    /// tasks, and an extraction that wins that race reads offset zero and
+    /// saves it, losing the position being restored.
+    OpenTab {
+        id: TabId,
+        url: String,
+        scroll_y: f64,
+    },
+    /// Prepare a target the browser already attached us to, as the tab the
+    /// session has just made for it. It is already loading somewhere of its
+    /// own choosing, so unlike `OpenTab` there is no url to give it.
+    AdoptTab { id: TabId, target: Attached },
+    CloseTab(TabId),
+    /// Make this tab the one the browser has in front. Input dispatch is
+    /// answered by whichever target is foreground, so ours and the browser's
+    /// have to be the same one.
+    Activate(TabId),
+    /// Write the open tabs down. Coalesced by the loop, so asking often is
+    /// cheap and asking on every scroll frame is what keeps a crash from
+    /// costing you your place.
+    Save(Snapshot),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

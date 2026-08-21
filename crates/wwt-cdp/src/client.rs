@@ -1,11 +1,14 @@
 //! A minimal CDP client: request/response correlation over one websocket.
 //!
-//! M1 discards protocol events. The event pump that feeds the extraction loop
-//! is M2; it hooks into `read_loop` below without changing this API.
+//! Protocol events are broadcast rather than discarded: `read_loop` below
+//! answers a call by its id and hands anything else to every subscriber, so
+//! the dirty signal that drives re-extraction and the attach that reports a
+//! new target both arrive through `subscribe`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
@@ -13,6 +16,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
+
+use crate::target::{Attached, TargetId};
 
 /// Every command carries a deadline, so a wedged page cannot hang the caller.
 /// Spec section 8.
@@ -40,6 +45,16 @@ pub struct Client {
     outgoing: mpsc::UnboundedSender<String>,
     pending: Pending,
     subscribers: Subscribers,
+    /// The browser's user agent, once anything has asked for it.
+    user_agent: OnceLock<String>,
+}
+
+/// A user agent with Chromium's headless marker taken out.
+///
+/// Kept apart from the round trip that fetches one so it can be asserted on
+/// with data.
+fn without_headless(reported: &str) -> String {
+    reported.replace("HeadlessChrome/", "Chrome/")
 }
 
 impl Client {
@@ -71,6 +86,7 @@ impl Client {
             outgoing: tx,
             pending,
             subscribers,
+            user_agent: OnceLock::new(),
         })
     }
 
@@ -78,6 +94,88 @@ impl Client {
     ///
     /// Subscribe *before* issuing the command whose event you intend to
     /// wait for, or you can miss it.
+    /// Attach to every page target the browser opens, whoever opened it.
+    ///
+    /// Every page takes its session from here, the ones we create and the
+    /// ones a page opens for itself alike, so this has to be on before the
+    /// first target exists.
+    ///
+    /// Deliberately without `waitForDebuggerOnStart`. Holding a target before
+    /// its first script sounds like the way to get our bootstrap into the
+    /// document it loads, and measurement says otherwise: a held target
+    /// answers `Target.getTargetInfo` and `Runtime.runIfWaitingForDebugger`
+    /// and nothing else, so `Page.enable`, `Runtime.addBinding` and
+    /// `Page.addScriptToEvaluateOnNewDocument` all queue unanswered until it
+    /// is released, and a registration queued that way still misses the
+    /// document. The hold costs every setup call a round trip it cannot make
+    /// and buys nothing, so `Page::adopt` catches up on the loaded document
+    /// instead.
+    pub async fn auto_attach(&self) -> Result<()> {
+        self.call(
+            "Target.setAutoAttach",
+            json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+        )
+        .await
+        .context("turn on auto-attach")?;
+        Ok(())
+    }
+
+    /// What this browser should tell sites it is.
+    ///
+    /// Its own user agent with the headless marker taken out, so the version
+    /// is never invented: we really are that Chromium, and the only untrue
+    /// part of what it says by default is the claim that nobody is looking.
+    /// Sites read `HeadlessChrome` as a crawler and answer accordingly, which
+    /// costs a person driving this browser their search results.
+    ///
+    /// Asked once and remembered. A racing caller asks twice and the answers
+    /// agree, which is cheaper than holding a lock across a round trip.
+    pub async fn user_agent(&self) -> Result<String> {
+        if let Some(known) = self.user_agent.get() {
+            return Ok(known.clone());
+        }
+        let version = self
+            .call("Browser.getVersion", json!({}))
+            .await
+            .context("ask the browser what it is")?;
+        let reported = version["userAgent"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Browser.getVersion returned no userAgent"))?;
+        Ok(self
+            .user_agent
+            .get_or_init(|| without_headless(reported))
+            .clone())
+    }
+
+    /// The target this event says the browser attached us to, if it is a
+    /// page rather than a worker or an iframe.
+    pub fn attached_page(event: &Event) -> Option<Attached> {
+        if event.method != "Target.attachedToTarget" {
+            return None;
+        }
+        let info = event.params.get("targetInfo")?;
+        if info.get("type")?.as_str()? != "page" {
+            return None;
+        }
+        Some(Attached {
+            target: TargetId(info.get("targetId")?.as_str()?.to_string()),
+            session: event.params.get("sessionId")?.as_str()?.to_string(),
+        })
+    }
+
+    /// The same, narrowed to targets a page opened rather than ones we asked
+    /// for.
+    ///
+    /// `openerId` is the discriminator: a page that calls `window.open` is
+    /// the opener of what it opens, and `Target.createTarget` leaves the
+    /// field out entirely. It is what keeps `Page::open` from adopting its
+    /// own target.
+    pub fn opened_by_a_page(event: &Event) -> Option<Attached> {
+        let attached = Self::attached_page(event)?;
+        let opener = event.params["targetInfo"].get("openerId")?.as_str()?;
+        (!opener.is_empty()).then_some(attached)
+    }
+
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.subscribers
@@ -290,5 +388,65 @@ mod tests {
 
         assert!(rx.recv().await.is_some(), "the event itself");
         assert!(rx.recv().await.is_none(), "the channel should close with the socket");
+    }
+
+    /// One `Target.attachedToTarget` event, as the browser sends it.
+    fn attach_event(json: &str) -> Event {
+        let value: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        Event {
+            session_id: None,
+            method: value["method"].as_str().expect("a method").to_string(),
+            params: value["params"].clone(),
+        }
+    }
+
+    #[test]
+    fn a_target_a_page_opened_is_told_apart_from_one_we_asked_for() {
+        // A target we created carries no openerId at all, which is what the
+        // browser was observed to do rather than sending an empty one.
+        let ours = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S1",
+                "targetInfo":{"targetId":"T1","type":"page"}}}"#,
+        );
+        assert!(Client::attached_page(&ours).is_some());
+        assert_eq!(Client::opened_by_a_page(&ours), None, "we created this one");
+
+        let theirs = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S2",
+                "targetInfo":{"targetId":"T2","type":"page","openerId":"T1"}}}"#,
+        );
+        assert_eq!(
+            Client::opened_by_a_page(&theirs),
+            Some(Attached { target: TargetId("T2".to_string()), session: "S2".to_string() })
+        );
+    }
+
+    #[test]
+    fn the_headless_marker_comes_out_of_the_user_agent() {
+        assert_eq!(
+            without_headless(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 HeadlessChrome/151.0.0.0 Safari/537.36"
+            ),
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/151.0.0.0 Safari/537.36"
+        );
+    }
+
+    #[test]
+    fn a_user_agent_that_never_claimed_to_be_headless_is_left_alone() {
+        // The version is the browser's own, so this must not invent one.
+        let real = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                    Chrome/141.0.0.0 Safari/537.36";
+        assert_eq!(without_headless(real), real);
+    }
+
+    #[test]
+    fn a_worker_is_not_a_tab() {
+        let worker = attach_event(
+            r#"{"method":"Target.attachedToTarget","params":{"sessionId":"S3",
+                "targetInfo":{"targetId":"T3","type":"worker","openerId":"T1"}}}"#,
+        );
+        assert_eq!(Client::attached_page(&worker), None);
     }
 }

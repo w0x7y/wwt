@@ -77,8 +77,12 @@ pub fn harness() -> Turn {
             Some(harness) => harness,
             None => {
                 let harness = Arc::new(runtime().block_on(async {
-                    let browser = Chromium::launch().await.expect("launch chromium");
+                    let browser = Chromium::launch(None).await.expect("launch chromium");
                     let client = Client::connect(browser.ws_url()).await.expect("connect");
+                    // `Page::open` takes its session from auto-attach rather
+                    // than attaching for itself, so a client without this
+                    // opens nothing at all.
+                    client.auto_attach().await.expect("turn on auto-attach");
                     Harness { _browser: browser, client: Arc::new(client) }
                 }));
                 *shared = Arc::downgrade(&harness);
@@ -108,4 +112,14 @@ pub async fn open(h: &Harness, fixture: &str) -> Page {
     Page::open(Arc::clone(&h.client), &fixture_url(fixture), viewport())
         .await
         .expect("open the fixture")
+}
+
+/// Open a page at an arbitrary URL rather than a fixture.
+///
+/// `about:blank` and a second copy of a fixture are both things a tab test
+/// wants and a fixture name cannot say.
+pub async fn open_url(h: &Harness, url: &str) -> Page {
+    Page::open(Arc::clone(&h.client), url, viewport())
+        .await
+        .expect("open the url")
 }

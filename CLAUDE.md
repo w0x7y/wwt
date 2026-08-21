@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M3** (interaction). Milestones M1–M7 are defined in
+Currently at **M4** (tabs and sessions). Milestones M1–M7 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 233 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 307 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -26,6 +26,7 @@ Currently at **M3** (interaction). Milestones M1–M7 are defined in
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
     cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
     cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
+    cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -206,6 +207,121 @@ only if the mode is still normal. A round trip is long enough to have typed
 half a `:` command, and labels must not land on top of it. `Job::Hints` carries
 a `Result` rather than splitting into two variants, so there is one place that
 can forget to note the query is over.
+
+**An in-flight flag must not outlive the effect it was set beside.** `Core` drops
+any effect naming a page it does not hold, which is every effect between asking for
+a tab and being told it opened, and `Job::Hints` is the only thing that clears
+`hinting`. So `f` is not asked at all on a tab that has not opened: setting the flag
+for a query nobody can answer left `f` dead on that tab for the rest of the run.
+`Tab::opened` names that window, and it is the question to ask before setting any of
+the three flags beside an effect. `navigating` and `extracting` are safe today by
+accident rather than by rule: `open_tab` already sets `navigating`, and an extraction
+is only ever asked for by a dirty signal, which a page has to exist to send.
+
+## Tabs and sessions
+
+`Session` holds `Vec<Tab>` and a focus index; `Tab` (`wwt/src/tab.rs`) holds
+everything true of one page rather than of the browser. `Core` holds
+`HashMap<TabId, Arc<Page>>`. Four rules carry M4:
+
+- **A `TabId` is a counter and never a position.** Effects name a tab and jobs
+  name it back, and a job whose tab is gone is dropped. Close a tab while its
+  extraction is in flight and every later tab shifts down one; an index would
+  let the answer land on a page that never asked.
+- **A background tab keeps its runs.** A switch paints from the cache and only
+  then re-extracts, so it is a repaint rather than a round trip.
+  `measure_switch` holds that down: tens of microseconds for three tabs of 300
+  runs, against a ~4ms extraction, which is the whole point. It
+  also keeps its dirty flag rather than spending it: a tab is read once when it
+  opens and thereafter only while focused, so an idle background tab costs what
+  an idle foreground tab costs.
+- **Switching activates.** `Input.dispatchMouseEvent` is answered by whichever
+  target the browser has in front. With one target that was a test-harness
+  quirk; with several it is a correctness rule, and M5's screencast will want
+  the same guarantee.
+- **A `Page` never reaches `Session`.** The loop's result channel carries a
+  `Finished`, which is either a `Job` on its way through or a target that
+  finished opening; the page is filed in `Core` and the session hears only that
+  the tab opened.
+
+The chrome is two rows, the tab bar on top and the statusline at the bottom,
+both unconditional so opening a tab never reflows a page. The page therefore
+does not start at frame row 0, and that shift lives in `Viewport` as an origin
+row rather than as a `+1` in `paint_run`, `Caret::cell` and `page_cell`.
+`to_cell(to_css(c)) == c` now holds at every origin too.
+
+**The profile is the lock.** Chromium refuses a `--user-data-dir` another
+Chromium holds, so a second `wwt` falls back to a temporary profile, says
+`private session`, and writes no session file. The instance holding the profile
+owns that file: one rule for both resources and no lock file of ours to go
+stale after a crash.
+
+**Deciding to save is a rule, writing is machinery.** `Session` emits
+`Effect::Save` when the tab set, the focus, or a page's URL, title or scroll
+offset changes; `Core` coalesces on a timer and writes temp-then-rename. An
+extraction of a page that did not move is not a write, and whether it moved is
+decided against what the tab stores rather than against what the extraction
+carried: an error page's URL is deliberately not kept, so comparing with the
+extraction would write on every dirty signal.
+
+**Adoption catches up; it does not hold.** A target a page opened is reported
+by auto-attach and told apart by `openerId`, which `Target.createTarget` does
+not set. `waitForDebuggerOnStart` looks like the way to get the bootstrap into
+the document such a tab loads and is not: a held target answers
+`Target.getTargetInfo` and `Runtime.runIfWaitingForDebugger` and nothing else,
+so no setup call can be awaited, and a registration queued ahead of the release
+still misses the document. `Page::adopt` registers the bootstrap for the next
+document and evaluates it into the one already there; the script returns early
+when it finds itself installed.
+
+**A tab is reached by its position, not by cycling to it.** Shift and a digit focuses
+the first tab through the ninth.
+
+**The digit is what carries that across layouts, and the glyph is muscle memory on top
+of it.** What shift and a digit prints belongs to the keyboard layout, so `keymap.rs`
+takes the digit with `SHIFT` or without and asks nothing of the terminal. Nearly every
+layout has digits on the unshifted number row, so the plain digit is that key; the ones
+that do not, French among them, are exactly the ones where shift and that key is how a
+digit is typed at all. The glyph table is US muscle memory plus the foreign glyphs that
+collide with none of it, and a collision is resolved by leaving the glyph out rather
+than guessing: `&` is a US shift-7 and a German shift-6, `"` is a German shift-2 and a
+US shift-apostrophe. Nothing is lost by leaving one out, because every layout that
+prints it has the digit.
+
+**Do not enable Kitty's keyboard protocol to read the number row.** It looks like the
+principled fix and is a regression twice over. `REPORT_ALTERNATE_KEYS` reports the
+PC-101 key beside the layout's own, which would be layout independence outright, but
+crossterm 0.29 (`parse.rs`) discards it: given `SHIFT` it takes the *shifted* codepoint,
+overwrites the keycode and clears the modifier, which is the layout-dependent glyph
+again. And `DISAMBIGUATE_ESCAPE_CODES` alone reports the unshifted key, so shift and `h`
+arrives as `Char('h')` with `SHIFT` rather than as `Char('H')`: `H`, `L` and `G` stop
+working, and insert mode types a lowercase letter and the wrong punctuation, since the
+glyph a shifted key prints is what the flag stops telling us. Typing is worth more than
+a keystroke to a tab. `supports_keyboard_enhancement` also takes the terminal's stdin
+for up to two seconds to ask.
+
+Binding a bare digit spends the count prefix a vim-like would put there. Reaching a tab
+on every layout is worth more than a count no command takes yet; `/` is kept unbound for
+find-in-page for the same reason, though it is European shift-7.
+
+**A page is not told nobody is looking.** `Page::prepare` overrides the user agent
+with the browser's own, headless marker removed. Search engines read `HeadlessChrome`
+as a crawler: with it, duckduckgo.com returns a shell with no results and its html and
+lite endpoints return a CAPTCHA. This is why `wwt-cdp` has a `user_agent` at all.
+Google is unaffected by it and blocks on the requesting address instead.
+
+**Anything that is not a URL is a search.** `normalize_url` sends a word with a dot in
+it, or a host and a port, to `https://`, and everything else to DuckDuckGo. It is the
+one place that decides, so `:open`, `:tabopen` and the command line argument all agree.
+
+**Restoring a tab is opening it, not opening then scrolling.**
+`Effect::OpenTab` carries the offset. As two effects they are two spawned
+tasks, and an extraction that wins that race reads offset zero and writes it
+down, losing the position being restored.
+
+Eviction of background targets past a limit, and the lazy restore that shares
+its machinery, are deferred to M7. They introduce the one state this design
+does not have, a tab that exists without a target.
 
 ## Performance
 

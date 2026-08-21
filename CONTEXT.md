@@ -48,24 +48,49 @@ thing allowed to divide by a cell dimension. Zoom is a bigger declared
 **cell size**, not a CSS zoom, so a page genuinely reflows into different
 breakpoints. `wwt_frame::Viewport`.
 
-**Page viewport** — the terminal grid less the row the chrome occupies.
-Chromium is told this is the whole window, so the page does not know the
-statusline exists. `session::page_viewport`.
+**Page viewport** — the terminal grid less the two rows the chrome occupies,
+and sitting below the tab bar. Chromium is told this is the whole window, so
+the page knows about neither chrome row. The shift down lives in `Viewport`
+as an **origin row** rather than as a `+1` wherever a cell is painted, so
+`to_cell(to_css(c)) == c` holds at every origin. `session::page_viewport`.
 
 **Frame** — a full grid of cells, plus where the terminal's cursor belongs.
 The single output type every rendering mode produces, so text mode and later
 pixel and reader modes cannot diverge in how they reach the screen.
 `wwt_frame::Frame`.
 
-**Chrome** — the bottom row: the statusline, or the `:` line when one is
-open. **State** is what it says about the page — loading, ready, an error, a
-notice — and it is never a reason to blank the frame.
+**Chrome** — the two rows that are ours: the **tab bar** on top, and at the
+bottom the statusline, or the `:` line when one is open. Both unconditional,
+so opening a tab never reflows a page. **State** is what the statusline says
+about the page — loading, ready, an error, a notice — and it is never a
+reason to blank the frame.
 
 ## What the browser is doing
 
 **Mode** — what keys mean right now: normal, insert, hint, or the `:` line.
 Changes only in response to a keystroke; a page cannot move you between
 modes, which is what makes handing it the keyboard safe. `wwt_ui::Mode`.
+
+**Tab** — one page, and everything true of it rather than of the browser: its
+URL, title, runs, caret, scroll offset, and what we have asked it for.
+Identified by a **tab id**, a counter that never reuses a value, because a
+page operation outlives the state that asked for it and an index would let a
+closed tab's answer land on the tab that took its place. `wwt::tab::Tab`.
+
+**Focus** — which tab you are looking at. The only tab that receives keys,
+clicks and hint queries, and the only one painted. Switching **activates**
+the target as well, because `Input.dispatchMouseEvent` is answered by
+whichever target the browser has in front.
+
+**Idle** — what a background tab is, precisely: it is read once when it
+opens, so its title is real and the first switch to it is a repaint, and
+after that it re-extracts only while focused. A dirty signal for a background
+tab sets a flag that is spent when focus arrives.
+
+**Snapshot** — the open tabs on their way to or from disk: a URL, a title and
+a scroll offset each, plus which one was in front. Not called a session,
+because `Session` already names the state machine and `wwt-cdp` already calls
+an attached target a session id. `wwt::store::Snapshot`.
 
 **Action** — what a key means, given a mode. The whole keyboard is one
 table, `keymap::action_for(mode, key, vp)`, pure and total.
@@ -102,6 +127,18 @@ keys as three tasks would sometimes type `acb`.
 response correlated by id, events broadcast to subscribers. **Session id**
 identifies one attached target on it; every command a page issues is
 `call_on` its own.
+
+**Profile** — Chromium's `--user-data-dir`, persistent at
+`$XDG_DATA_HOME/wwt/profile`. The cookie jar that makes logins durable, and
+the lock: Chromium refuses one another Chromium holds, so a second wwt gets a
+temporary profile and writes no session file. The instance holding the
+profile owns that file.
+
+**Adoption** — taking over a target a page opened for itself, reported by
+**auto-attach** and told apart from one we created by its `openerId`. Its
+document has usually already run by the time we hear about it, so `adopt`
+registers the bootstrap for the tab's next document and evaluates it into the
+one already there.
 
 **Bootstrap** — `crates/wwt-page/assets/bootstrap.js`, installed once per
 document so it survives navigation. **`__wwt.__pure`** is its arithmetic
