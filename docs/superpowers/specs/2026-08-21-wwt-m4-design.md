@@ -145,7 +145,7 @@ M5's screencast will want the same guarantee.
 right. Closing the last tab quits, which is the same rule `q` follows and means there
 is never a browser with no page in it.
 
-**Modes across a switch.** Switching is reachable only from normal mode: `J` and `K`
+**Modes across a switch.** Switching is reachable only from normal mode: the tab keys
 are not bound in insert, where every key goes to the page, nor in hint, where every
 key is a label character. So a switch always begins and ends in normal mode and no
 rule is needed for what happens to insert mode when the page under it changes. Mode
@@ -297,17 +297,30 @@ true of the first row as well as the last.
 
 | Key | Action |
 |---|---|
-| `J` | Focus the next tab, wrapping. |
-| `K` | Focus the previous tab, wrapping. |
+| `!` … `(` | Focus the first tab through the ninth: shift and a digit. Out of range does nothing. |
 | `t` | Open the `:` line prefilled with `tabopen `, the way `o` prefills `open `. |
 | `x` | Close the focused tab. |
 
 `d` and `u` are half-page scroll, so qutebrowser's `d` is not available for close and
-`x` takes it. `J` and `K` are qutebrowser's own bindings for tab switching, which is
-what makes them the right answer here rather than a compromise.
+`x` takes it.
+
+*Amended.* Switching was `J` and `K`, qutebrowser's own bindings, cycling one tab at a
+time. It is now shift and a digit: `!` through `(` go straight to the first tab
+through the ninth. A terminal sends the shifted glyph rather than the digit, so that
+is what the table is written in, with the digit-plus-shift pair Kitty's keyboard
+protocol reports accepted alongside it. Going straight beats cycling because the tab
+you want is one keystroke away however many are open, and where each one sits is
+already on screen in the bar. Unshifted digits stay unbound, because a count prefix is
+what a digit is for in a vim-like. Past the ninth tab, `:tabnext` and `:tabprev` still
+cycle.
 
 Commands: `:tabopen <url>`, `:tabclose`, `:tabnext`, `:tabprev`. `:tabopen` normalizes
 its argument through the same `normalize_url` that `:open` uses.
+
+*Amended.* `normalize_url` no longer refuses what is not a URL. A single word with a
+dot in it, or a host and a port, is somewhere to go; anything else is a DuckDuckGo
+search for it. So `:open banana`, `:tabopen banana` and `wwt banana` all search, and
+the one thing that is still an error is nothing at all.
 
 ## 7. The profile
 

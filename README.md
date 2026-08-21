@@ -32,7 +32,7 @@ M5.
 | `space` `b` | scroll a screen |
 | `g` `G` | top, bottom |
 | `H` `L` | back, forward |
-| `J` `K` | next, previous tab |
+| `!` … `(` | go to the first tab through the ninth, which is shift and a digit |
 | `t` | open a tab |
 | `x` | close this tab |
 | `Ctrl-r` | reload |
@@ -54,8 +54,17 @@ which costs your terminal's own text selection. Most terminals hand it
 back while shift is held; `:set mouse off` is there for the ones that do
 not.
 
-Commands: `:open <url>`, `:tabopen <url>` (`:t`), `:tabclose`,
-`:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
+Shift and a digit goes straight to that tab, so the one you want is one
+keystroke away however many are open and wherever you are now. Past the
+ninth there is `:tabnext` and `:tabprev`, which still cycle.
+
+`:open` and `:tabopen` take a URL or anything else: `:open banana`
+searches DuckDuckGo for it rather than telling you it is not a URL, and
+so does `wwt banana`. A word with a dot in it, or a host and a port like
+`localhost:3000`, is still somewhere to go.
+
+Commands: `:open <url-or-search>`, `:tabopen <url-or-search>` (`:t`),
+`:tabclose`, `:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
 `:set mouse on|off`, `:quit`.
 
 wwt keeps a Chromium profile at `$XDG_DATA_HOME/wwt/profile` and the tabs

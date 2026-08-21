@@ -44,10 +44,9 @@ pub enum Action {
 
     /// Close the tab you are looking at.
     TabClose,
-    /// Look at the tab to the right, or the first one past the last.
-    TabNext,
-    /// Look at the tab to the left, or the last one before the first.
-    TabPrev,
+    /// Look at the tab at this position, counting from zero. Out of range
+    /// does nothing: the tenth tab is reachable and a tenth key is not.
+    TabAt(usize),
 
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
@@ -104,14 +103,31 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
         KeyCode::Char('t') => Some(Action::EnterCommand("tabopen ".to_string())),
         KeyCode::Char('x') => Some(Action::TabClose),
-        // qutebrowser's own bindings. vim's `gt` would mean a pending-prefix
-        // state and rebinding `g`, which is scroll-top, to buy nothing.
-        KeyCode::Char('J') => Some(Action::TabNext),
-        KeyCode::Char('K') => Some(Action::TabPrev),
         KeyCode::Char('q') => Some(Action::Quit),
+        // Shift and a digit, which a terminal sends as the shifted glyph.
+        // Going straight to a tab beats cycling to it: the tab you want is
+        // one keystroke away however many are open, and where each one sits
+        // is already on screen in the bar.
+        KeyCode::Char(c) => SHIFTED_DIGITS
+            .iter()
+            .position(|shifted| *shifted == c)
+            // Kitty's keyboard protocol reports the digit and the modifier
+            // rather than the glyph the pair produces.
+            .or_else(|| {
+                key.modifiers
+                    .contains(KeyModifiers::SHIFT)
+                    .then(|| c.to_digit(10).filter(|d| *d > 0))
+                    .flatten()
+                    .map(|digit| digit as usize - 1)
+            })
+            .map(Action::TabAt),
         _ => None,
     }
 }
+
+/// What a terminal sends for shift and each digit from one to nine, in
+/// order, so a position in this is the tab a keystroke means.
+const SHIFTED_DIGITS: [char; 9] = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
 
 fn command(key: KeyEvent) -> Option<Action> {
     match key.code {
@@ -330,5 +346,36 @@ mod tests {
         assert_eq!(action_for(&normal_mode(), key('x'), vp()), Some(Action::TabClose));
         // Insert mode types them, as it types everything.
         assert!(matches!(action_for(&Mode::Insert, key('x'), vp()), Some(Action::Send(_))));
+    }
+
+    #[test]
+    fn a_shifted_digit_goes_straight_to_that_tab() {
+        // A terminal sends the shifted glyph, not the digit, so that is what
+        // the table is written in.
+        assert_eq!(action_for(&normal_mode(), key('!'), vp()), Some(Action::TabAt(0)));
+        assert_eq!(action_for(&normal_mode(), key('@'), vp()), Some(Action::TabAt(1)));
+        assert_eq!(action_for(&normal_mode(), key('#'), vp()), Some(Action::TabAt(2)));
+        assert_eq!(action_for(&normal_mode(), key('('), vp()), Some(Action::TabAt(8)));
+    }
+
+    #[test]
+    fn a_terminal_that_reports_the_digit_and_the_shift_is_understood_too() {
+        // Kitty's keyboard protocol reports `1` with shift held rather than
+        // `!`. Both mean the same keystroke and both reach the same tab.
+        let shifted = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
+        assert_eq!(action_for(&normal_mode(), shifted, vp()), Some(Action::TabAt(0)));
+    }
+
+    #[test]
+    fn an_unshifted_digit_is_not_a_tab() {
+        // Left free: a count prefix is what a digit is for in a vim-like,
+        // and binding it here would spend it.
+        assert_eq!(action_for(&normal_mode(), key('1'), vp()), None);
+    }
+
+    #[test]
+    fn shift_j_and_shift_k_no_longer_move_between_tabs() {
+        assert_eq!(action_for(&normal_mode(), key('J'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), key('K'), vp()), None);
     }
 }

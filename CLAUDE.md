@@ -264,6 +264,22 @@ still misses the document. `Page::adopt` registers the bootstrap for the next
 document and evaluates it into the one already there; the script returns early
 when it finds itself installed.
 
+**A tab is reached by its position, not by cycling to it.** `!` through `(`, which is
+shift and a digit, focus the first tab through the ninth. The table is written in the
+shifted glyphs because that is what a terminal sends, and accepts the digit with
+`SHIFT` alongside them because that is what Kitty's keyboard protocol reports.
+Unshifted digits stay unbound: a count prefix is what a digit is for in a vim-like.
+
+**A page is not told nobody is looking.** `Page::prepare` overrides the user agent
+with the browser's own, headless marker removed. Search engines read `HeadlessChrome`
+as a crawler: with it, duckduckgo.com returns a shell with no results and its html and
+lite endpoints return a CAPTCHA. This is why `wwt-cdp` has a `user_agent` at all.
+Google is unaffected by it and blocks on the requesting address instead.
+
+**Anything that is not a URL is a search.** `normalize_url` sends a word with a dot in
+it, or a host and a port, to `https://`, and everything else to DuckDuckGo. It is the
+one place that decides, so `:open`, `:tabopen` and the command line argument all agree.
+
 **Restoring a tab is opening it, not opening then scrolling.**
 `Effect::OpenTab` carries the offset. As two effects they are two spawned
 tasks, and an extraction that wins that race reads offset zero and writes it

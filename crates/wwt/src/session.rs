@@ -486,14 +486,11 @@ impl Session {
                 let id = self.focused_id();
                 self.close_tab(id, effects);
             }
-            Action::TabNext => {
-                let index = self.neighbour(1);
-                self.focus_tab(index, effects);
-            }
-            Action::TabPrev => {
-                let index = self.neighbour(-1);
-                self.focus_tab(index, effects);
-            }
+            // Out of range does nothing rather than clamping to the last
+            // tab: `$` with three open is a tab that is not there, and
+            // landing somewhere you did not ask for is worse than landing
+            // nowhere.
+            Action::TabAt(index) => self.focus_tab(index, effects),
 
             Action::Send(key) => self.send_key(key, effects),
         }
@@ -1560,7 +1557,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
 
-        let effects = session.on(key('J'));
+        let effects = session.on(key('!'));
 
         assert_eq!(saved(&effects).map(|s| s.focus), Some(0));
     }
@@ -1701,7 +1698,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
         // Three tabs, focused on the middle one.
-        session.on(key('K'));
+        session.on(key('@'));
         assert_eq!(session.focused().id, TabId(1));
 
         let effects = session.on(key('x'));
@@ -1756,16 +1753,29 @@ mod tests {
     // Switching.
 
     #[test]
-    fn j_and_k_move_between_tabs_and_wrap() {
+    fn a_shifted_digit_looks_at_the_tab_in_that_position() {
         let mut session = ready();
         open_two_more(&mut session);
         assert_eq!(session.focused().id, TabId(2));
 
-        session.on(key('J'));
-        assert_eq!(session.focused().id, tab0(), "past the last tab is the first");
+        session.on(key('!'));
+        assert_eq!(session.focused().id, tab0(), "the first tab, whichever you were on");
 
-        session.on(key('K'));
-        assert_eq!(session.focused().id, TabId(2), "before the first is the last");
+        session.on(key('#'));
+        assert_eq!(session.focused().id, TabId(2), "and back, without passing the second");
+    }
+
+    #[test]
+    fn a_digit_past_the_last_tab_leaves_you_where_you_are() {
+        // Three tabs and a key for nine of them. The four hundredth is what
+        // `:tabnext` is still for.
+        let mut session = ready();
+        open_two_more(&mut session);
+
+        let effects = session.on(key('$'));
+
+        assert_eq!(session.focused().id, TabId(2), "there is no fourth tab to go to");
+        assert_eq!(effects, vec![], "and nothing was asked of the browser");
     }
 
     #[test]
@@ -1775,7 +1785,7 @@ mod tests {
         // the page you just left.
         let mut session = ready();
         open_two_more(&mut session);
-        let effects = session.on(key('J'));
+        let effects = session.on(key('!'));
         assert!(effects.contains(&Effect::Activate(tab0())));
     }
 
@@ -1785,7 +1795,7 @@ mod tests {
         session.focused_mut().runs = vec![run("first tab")];
         open_two_more(&mut session);
 
-        session.on(key('J'));
+        session.on(key('!'));
         let frame = session.compose();
         assert!(
             (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
@@ -1806,7 +1816,7 @@ mod tests {
         );
 
         // Switching to it spends the flag.
-        let effects = session.on(key('J'));
+        let effects = session.on(key('!'));
         assert!(effects.contains(&Effect::Extract(tab0())));
     }
 
@@ -1814,10 +1824,10 @@ mod tests {
     fn switching_to_a_tab_that_did_not_change_costs_no_round_trip() {
         let mut session = ready();
         open_two_more(&mut session);
-        session.on(key('J')); // to tab 0, spending its flag
+        session.on(key('!')); // to tab 0, spending its flag
         session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
 
-        let effects = session.on(key('K'));
+        let effects = session.on(key('#'));
         assert_eq!(
             effects,
             vec![Effect::Activate(TabId(2)), Effect::Save(session.snapshot())],
@@ -1855,9 +1865,12 @@ mod tests {
         }
 
         let mut worst = std::time::Duration::ZERO;
-        for _ in 0..200 {
+        // Alternating, because going to the tab you are already on is not a
+        // switch and would measure nothing.
+        for step in 0..200 {
+            let to = if step % 2 == 0 { key('!') } else { key('#') };
             let start = std::time::Instant::now();
-            let effects = session.on(key('J'));
+            let effects = session.on(to);
             let frame = session.compose();
             worst = worst.max(start.elapsed());
 
@@ -1878,7 +1891,7 @@ mod tests {
         open_two_more(&mut session);
 
         session.on(key('f'));
-        session.on(key('J'));
+        session.on(key('!'));
         session.on(hinted_for(TabId(2), vec![target(TargetKind::Clickable)]));
 
         assert_eq!(
