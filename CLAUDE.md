@@ -264,11 +264,35 @@ still misses the document. `Page::adopt` registers the bootstrap for the next
 document and evaluates it into the one already there; the script returns early
 when it finds itself installed.
 
-**A tab is reached by its position, not by cycling to it.** `!` through `(`, which is
-shift and a digit, focus the first tab through the ninth. The table is written in the
-shifted glyphs because that is what a terminal sends, and accepts the digit with
-`SHIFT` alongside them because that is what Kitty's keyboard protocol reports.
-Unshifted digits stay unbound: a count prefix is what a digit is for in a vim-like.
+**A tab is reached by its position, not by cycling to it.** Shift and a digit focuses
+the first tab through the ninth.
+
+**The digit is what carries that across layouts, and the glyph is muscle memory on top
+of it.** What shift and a digit prints belongs to the keyboard layout, so `keymap.rs`
+takes the digit with `SHIFT` or without and asks nothing of the terminal. Nearly every
+layout has digits on the unshifted number row, so the plain digit is that key; the ones
+that do not, French among them, are exactly the ones where shift and that key is how a
+digit is typed at all. The glyph table is US muscle memory plus the foreign glyphs that
+collide with none of it, and a collision is resolved by leaving the glyph out rather
+than guessing: `&` is a US shift-7 and a German shift-6, `"` is a German shift-2 and a
+US shift-apostrophe. Nothing is lost by leaving one out, because every layout that
+prints it has the digit.
+
+**Do not enable Kitty's keyboard protocol to read the number row.** It looks like the
+principled fix and is a regression twice over. `REPORT_ALTERNATE_KEYS` reports the
+PC-101 key beside the layout's own, which would be layout independence outright, but
+crossterm 0.29 (`parse.rs`) discards it: given `SHIFT` it takes the *shifted* codepoint,
+overwrites the keycode and clears the modifier, which is the layout-dependent glyph
+again. And `DISAMBIGUATE_ESCAPE_CODES` alone reports the unshifted key, so shift and `h`
+arrives as `Char('h')` with `SHIFT` rather than as `Char('H')`: `H`, `L` and `G` stop
+working, and insert mode types a lowercase letter and the wrong punctuation, since the
+glyph a shifted key prints is what the flag stops telling us. Typing is worth more than
+a keystroke to a tab. `supports_keyboard_enhancement` also takes the terminal's stdin
+for up to two seconds to ask.
+
+Binding a bare digit spends the count prefix a vim-like would put there. Reaching a tab
+on every layout is worth more than a count no command takes yet; `/` is kept unbound for
+find-in-page for the same reason, though it is European shift-7.
 
 **A page is not told nobody is looking.** `Page::prepare` overrides the user agent
 with the browser's own, headless marker removed. Search engines read `HeadlessChrome`

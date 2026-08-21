@@ -32,7 +32,7 @@ M5.
 | `space` `b` | scroll a screen |
 | `g` `G` | top, bottom |
 | `H` `L` | back, forward |
-| `!` … `(` | go to the first tab through the ninth, which is shift and a digit |
+| `Shift-1` … `Shift-9` | go to the first tab through the ninth |
 | `t` | open a tab |
 | `x` | close this tab |
 | `Ctrl-r` | reload |
@@ -57,6 +57,15 @@ not.
 Shift and a digit goes straight to that tab, so the one you want is one
 keystroke away however many are open and wherever you are now. Past the
 ninth there is `:tabnext` and `:tabprev`, which still cycle.
+
+The digit works on its own too, and that is what makes this the same
+keystroke on every keyboard: a number row with digits on it reaches a
+tab unshifted, and one with punctuation on it, as a French keyboard has,
+reaches it with the shift you were pressing anyway. Above the digit, the
+glyphs are the US row (`!` through `(`) and the few from other layouts
+that do not clash with it. Where two layouts do clash the glyph is left
+out rather than guessed at, so `Shift-6` on a German keyboard prints `&`
+and goes nowhere. Press `6`.
 
 `:open` and `:tabopen` take a URL or anything else: `:open banana`
 searches DuckDuckGo for it rather than telling you it is not a URL, and

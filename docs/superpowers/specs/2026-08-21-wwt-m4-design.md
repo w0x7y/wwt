@@ -297,7 +297,7 @@ true of the first row as well as the last.
 
 | Key | Action |
 |---|---|
-| `!` … `(` | Focus the first tab through the ninth: shift and a digit. Out of range does nothing. |
+| shift and a digit | Focus the first tab through the ninth. Out of range does nothing. |
 | `t` | Open the `:` line prefilled with `tabopen `, the way `o` prefills `open `. |
 | `x` | Close the focused tab. |
 
@@ -305,14 +305,50 @@ true of the first row as well as the last.
 `x` takes it.
 
 *Amended.* Switching was `J` and `K`, qutebrowser's own bindings, cycling one tab at a
-time. It is now shift and a digit: `!` through `(` go straight to the first tab
-through the ninth. A terminal sends the shifted glyph rather than the digit, so that
-is what the table is written in, with the digit-plus-shift pair Kitty's keyboard
-protocol reports accepted alongside it. Going straight beats cycling because the tab
-you want is one keystroke away however many are open, and where each one sits is
-already on screen in the bar. Unshifted digits stay unbound, because a count prefix is
-what a digit is for in a vim-like. Past the ninth tab, `:tabnext` and `:tabprev` still
-cycle.
+time. It is now shift and a digit, going straight to the first tab through the ninth.
+Going straight beats cycling because the tab you want is one keystroke away however
+many are open, and where each one sits is already on screen in the bar. Past the ninth
+tab, `:tabnext` and `:tabprev` still cycle.
+
+*Amended.* Which keystroke that is depends on the keyboard layout, so `keymap.rs` takes
+the digit and the glyph alike.
+
+The digit is the one that carries, and it is taken with `SHIFT` or without. Nearly
+every layout has digits on the unshifted number row, so the plain digit is that key.
+The layouts that do not, French among them, are exactly the ones where shift and that
+key is how a digit is typed at all. Between the two, every keyboard reaches every tab
+with one keystroke and the terminal is asked nothing.
+
+Binding a bare digit spends the count prefix a vim-like puts on digits. Reaching a tab
+on every layout is worth more than a count that no command takes yet.
+
+The glyph table is what the number row prints, which is US muscle memory (`!` through
+`(`) plus the foreign glyphs that collide with none of it: `£`, `§`, `·`, `№`, `¤`. A
+collision is resolved by leaving the glyph out rather than guessing, in both
+directions. `&` is a US shift-7 and a German shift-6, so the US row keeps it; `"` and
+`)` are a German shift-2 and shift-9 and also a US shift-apostrophe and shift-0, so
+neither is bound, since binding them would move a US keyboard's tabs on a keystroke
+that means nothing here. Nothing is lost either way: every layout in this paragraph has
+the digit. `/` is a European shift-7 and stays unbound because find-in-page will want
+it.
+
+*Rejected: Kitty's keyboard protocol.* It reports the key and the modifier separately
+rather than the glyph the pair prints, which is exactly the question being asked here,
+and it makes things worse in two ways.
+
+`REPORT_ALTERNATE_KEYS` offers the PC-101 key beside the layout's own, which is layout
+independence outright, but crossterm 0.29 discards it: given the shift modifier it
+takes the *shifted* codepoint, overwrites the keycode with it and clears `SHIFT`,
+leaving the layout-dependent glyph and no modifier. That is a limit of the crate rather
+than the protocol, and worth revisiting if crossterm ever surfaces the base key.
+
+`DISAMBIGUATE_ESCAPE_CODES` alone reports the unshifted key, which costs more than it
+buys: shift and `h` arrives as `Char('h')` with `SHIFT` rather than as `Char('H')`, so
+`H`, `L` and `G` stop working, and insert mode types a lowercase letter and the wrong
+punctuation, because the glyph a shifted key prints is precisely what the flag stops
+reporting. Typing is worth more than a keystroke to a tab. `supports_keyboard_enhancement`
+also takes the terminal's stdin to ask, for up to two seconds against something that
+does not answer.
 
 Commands: `:tabopen <url>`, `:tabclose`, `:tabnext`, `:tabprev`. `:tabopen` normalizes
 its argument through the same `normalize_url` that `:open` uses.
