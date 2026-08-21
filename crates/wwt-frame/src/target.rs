@@ -39,11 +39,12 @@ impl HintTarget {
     /// reach.
     pub fn label_cell(&self, vp: &Viewport) -> CellPos {
         let grid = vp.grid();
+        let top = i64::from(vp.origin_row());
         let last_col = i64::from(grid.cols.saturating_sub(1));
-        let last_row = i64::from(grid.rows.saturating_sub(1));
+        let last_row = top + i64::from(grid.rows.saturating_sub(1));
         CellPos {
             col: vp.col_of(self.rect.x).clamp(0, last_col) as u16,
-            row: vp.row_of(self.rect.y).clamp(0, last_row) as u16,
+            row: vp.row_of(self.rect.y).clamp(top, last_row) as u16,
         }
     }
 }
@@ -87,5 +88,27 @@ mod tests {
     fn a_box_starting_past_the_grid_is_clamped_to_its_last_cell() {
         let t = target(100_000.0, 100_000.0);
         assert_eq!(t.label_cell(&vp()), CellPos { col: 79, row: 23 });
+    }
+
+    #[test]
+    fn a_label_clamps_into_the_page_rather_than_onto_the_chrome() {
+        let vp = Viewport::with_origin(
+            GridSize { cols: 80, rows: 22 },
+            CellSize { w: 9, h: 20 },
+            1,
+        );
+        // A box above the viewport keeps a reachable label, but it must not
+        // land on the tab bar, which the page does not own.
+        let t = HintTarget {
+            rect: CssRect { x: -500.0, y: -500.0, w: 40.0, h: 20.0 },
+            kind: TargetKind::Clickable,
+        };
+        assert_eq!(t.label_cell(&vp), CellPos { col: 0, row: 1 });
+
+        let t = HintTarget {
+            rect: CssRect { x: 100_000.0, y: 100_000.0, w: 40.0, h: 20.0 },
+            kind: TargetKind::Clickable,
+        };
+        assert_eq!(t.label_cell(&vp), CellPos { col: 79, row: 22 });
     }
 }

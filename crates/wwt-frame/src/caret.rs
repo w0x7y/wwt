@@ -29,8 +29,9 @@ impl Caret {
         let row = vp.row_of(self.baseline);
         let col = vp.col_of(self.x) + i64::try_from(self.offset).ok()?;
         let grid = vp.grid();
+        let top = i64::from(vp.origin_row());
         let on_grid =
-            row >= 0 && row < i64::from(grid.rows) && col >= 0 && col < i64::from(grid.cols);
+            row >= top && row < top + i64::from(grid.rows) && col >= 0 && col < i64::from(grid.cols);
         on_grid.then_some(CellPos { col: col as u16, row: row as u16 })
     }
 }
@@ -68,5 +69,27 @@ mod tests {
     fn a_caret_past_the_last_column_has_no_cell() {
         let caret = Caret { x: 700.0, baseline: 16.0, offset: 20 };
         assert_eq!(caret.cell(&vp()), None, "column 97 of an 80 column grid");
+    }
+
+    #[test]
+    fn the_caret_lands_below_a_chrome_row_that_is_above_the_page() {
+        let vp = Viewport::with_origin(
+            GridSize { cols: 80, rows: 22 },
+            CellSize { w: 9, h: 20 },
+            1,
+        );
+        let caret = Caret { x: 90.0, baseline: 16.0, offset: 0 };
+        assert_eq!(caret.cell(&vp), Some(CellPos { col: 10, row: 1 }));
+    }
+
+    #[test]
+    fn a_caret_below_the_last_page_row_still_has_no_cell() {
+        let vp = Viewport::with_origin(
+            GridSize { cols: 80, rows: 22 },
+            CellSize { w: 9, h: 20 },
+            1,
+        );
+        let caret = Caret { x: 90.0, baseline: 441.0, offset: 0 };
+        assert_eq!(caret.cell(&vp), None, "row 23 of a page ending at row 22");
     }
 }
