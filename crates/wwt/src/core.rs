@@ -95,15 +95,30 @@ pub struct Core {
     pending: Option<Snapshot>,
 }
 
+/// What the browser starts as.
+pub struct Startup {
+    pub grid: GridSize,
+    pub cell: CellSize,
+    pub snapshot: Option<Snapshot>,
+    /// A URL from the command line, opened beside whatever was restored.
+    pub open: Option<String>,
+    /// Where the session file goes, or `None` when this instance does not
+    /// own it.
+    pub session_file: Option<PathBuf>,
+}
+
 impl Core {
-    pub fn new(page: Arc<Page>, client: Arc<Client>, grid: GridSize, cell: CellSize) -> Self {
+    /// A browser with no pages in it yet. Every tab, including the first,
+    /// comes into being through `Effect::OpenTab`, so there is one path from
+    /// a url to a page rather than one for the first tab and one for the
+    /// rest.
+    pub fn new(client: Arc<Client>, startup: Startup) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         let input = InputPump::spawn(jobs_tx.clone());
-        let session = Session::new(grid, cell);
-        let pages = HashMap::from([(session.focused_id(), page)]);
+        let session = Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
 
         Self {
-            pages,
+            pages: HashMap::new(),
             opening: HashMap::new(),
             client,
             renderer: Renderer::new(),
@@ -111,7 +126,7 @@ impl Core {
             jobs_tx,
             jobs_rx,
             input,
-            session_file: None,
+            session_file: startup.session_file,
             pending: None,
         }
     }
@@ -340,15 +355,24 @@ impl Core {
                     })
                 }),
 
-                Effect::OpenTab { id, url } => {
+                Effect::OpenTab { id, url, scroll_y } => {
                     let vp = self.session.viewport();
                     let client = Arc::clone(&self.client);
                     let tx = self.jobs_tx.clone();
                     tokio::spawn(async move {
-                        let opened = Page::open(client, &url, vp)
-                            .await
-                            .map(Arc::new)
-                            .map_err(|error| error.to_string());
+                        let opened = match Page::open(client, &url, vp).await {
+                            // Before it is reported open, so the first
+                            // extraction reads the page where it was left
+                            // rather than racing the scroll to it. A page
+                            // that will not scroll there is still a page.
+                            Ok(page) => {
+                                if scroll_y > 0.0 {
+                                    let _ = page.scroll_to(scroll_y).await;
+                                }
+                                Ok(Arc::new(page))
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
                         let _ = tx.send(Finished::Opened(id, opened));
                     });
                 }

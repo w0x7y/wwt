@@ -48,6 +48,14 @@ pub struct Tab {
     /// this one comes back and changes the mode, so it needs to be known
     /// about while it is away.
     pub hinting: bool,
+    /// A target exists for this tab. False between asking for one and being
+    /// told it opened, which is the window in which effects naming this tab
+    /// are dropped.
+    pub opened: bool,
+    /// This tab has been read at least once, so its title is real and its
+    /// runs are worth painting. Until then it is read even in the background:
+    /// that first read is what makes the first switch to it instant.
+    pub read: bool,
 }
 
 impl Tab {
@@ -66,6 +74,8 @@ impl Tab {
             navigating: false,
             hints: None,
             hinting: false,
+            opened: false,
+            read: false,
         }
     }
 

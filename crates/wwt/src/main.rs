@@ -8,10 +8,9 @@ use crossterm::terminal::{
 };
 use crossterm::{cursor, execute};
 use wwt_cdp::{Chromium, Client};
-use wwt_page::Page;
 use wwt_ui::command::normalize_url;
 
-use wwt::core::Core;
+use wwt::core::{Core, Startup};
 
 /// Room for a frame of a large terminal without the buffer filling mid-paint.
 /// Overrunning it is only an extra syscall, never a wrong frame.
@@ -19,16 +18,35 @@ const FRAME_BUFFER: usize = 256 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Some(argument) = std::env::args().nth(1) else {
-        bail!("usage: wwt <url>");
+    let (new_session, argument) = parse_args()?;
+    let url = match argument {
+        Some(argument) => {
+            Some(normalize_url(&argument).map_err(|message| anyhow::anyhow!(message))?)
+        }
+        None => None,
     };
-    let url = normalize_url(&argument).map_err(|message| anyhow::anyhow!(message))?;
 
     let (grid, cell) = wwt_term::probe().context("measure the terminal")?;
 
     // Everything that can fail loudly happens before we touch the terminal,
     // so a failure leaves the user's screen exactly as it was.
-    let browser = Chromium::launch(None).await.context("launch chromium")?;
+    //
+    // The profile is the lock. Chromium refuses a user-data-dir another
+    // Chromium holds, so a second wwt needs no lock file of ours to go stale
+    // after a crash: it gets a temporary profile, is told so, and writes no
+    // session file. The instance holding the profile owns that file.
+    let profile = wwt::store::profile_path();
+    let (browser, private) = match profile.as_deref() {
+        Some(path) => match Chromium::launch(Some(path)).await {
+            Ok(browser) => (browser, false),
+            Err(_) => (
+                Chromium::launch(None).await.context("launch chromium")?,
+                true,
+            ),
+        },
+        None => (Chromium::launch(None).await.context("launch chromium")?, true),
+    };
+
     let client = Arc::new(
         Client::connect(browser.ws_url())
             .await
@@ -40,8 +58,15 @@ async fn main() -> Result<()> {
         .auto_attach()
         .await
         .context("watch for tabs the page opens")?;
-    let vp = wwt::session::page_viewport(grid, cell);
-    let page = Arc::new(Page::open(Arc::clone(&client), &url, vp).await?);
+
+    let session_file = (!private).then(wwt::store::session_path).flatten();
+    let (snapshot, session_error) = match (&session_file, new_session) {
+        (Some(path), false) => match wwt::store::load(path) {
+            Ok(snapshot) => (snapshot, None),
+            Err(message) => (None, Some(message)),
+        },
+        _ => (None, None),
+    };
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
@@ -50,9 +75,26 @@ async fn main() -> Result<()> {
     // would make one refusal cost the whole session.
     let mouse = execute!(stdout(), EnableMouseCapture).is_ok();
 
-    let mut core = Core::new(page, client, grid, cell);
+    let mut core = Core::new(
+        client,
+        Startup {
+            grid,
+            cell,
+            snapshot,
+            open: url,
+            session_file,
+        },
+    );
+    // The statusline holds one notice, so the last of these is the one you
+    // see: least worth knowing first. A session you cannot save is worth
+    // more than a mouse you cannot use.
     if !mouse {
         core.notice("mouse unavailable");
+    }
+    if private {
+        core.notice("private session: another wwt has the profile");
+    } else if let Some(message) = session_error {
+        core.notice(&format!("session file: {message}"));
     }
     // `stdout()` is a `LineWriter`, so a full repaint's `\r\n` between rows
     // costs a write syscall each: forty on a forty-row terminal, for one
@@ -67,4 +109,20 @@ async fn main() -> Result<()> {
     execute!(stdout(), cursor::Show, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result
+}
+
+/// `wwt`, `wwt <url>`, `wwt --new [url]`. Hand-rolled, because the whole
+/// surface is one flag.
+fn parse_args() -> Result<(bool, Option<String>)> {
+    let mut new_session = false;
+    let mut url = None;
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--new" => new_session = true,
+            "-h" | "--help" => bail!("usage: wwt [--new] [url]"),
+            other if other.starts_with('-') => bail!("unknown option: {other}"),
+            other => url = Some(other.to_string()),
+        }
+    }
+    Ok((new_session, url))
 }

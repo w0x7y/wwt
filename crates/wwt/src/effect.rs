@@ -28,9 +28,18 @@ pub enum Effect {
     /// changed; this is the page catching up. Emitted once per tab, because
     /// a background tab has to be the right size already when you reach it.
     SetViewport(TabId, Viewport),
-    /// Create a target for a tab the session has already made room for, and
-    /// navigate it.
-    OpenTab { id: TabId, url: String },
+    /// Create a target for a tab the session has already made room for,
+    /// navigate it, and leave it at `scroll_y`.
+    ///
+    /// The offset is part of opening rather than an effect of its own
+    /// because restoring means both. As two effects they are two spawned
+    /// tasks, and an extraction that wins that race reads offset zero and
+    /// saves it, losing the position being restored.
+    OpenTab {
+        id: TabId,
+        url: String,
+        scroll_y: f64,
+    },
     /// Prepare a target the browser already attached us to, as the tab the
     /// session has just made for it. It is already loading somewhere of its
     /// own choosing, so unlike `OpenTab` there is no url to give it.

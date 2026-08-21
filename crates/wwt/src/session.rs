@@ -79,8 +79,21 @@ pub fn page_cell(vp: &Viewport, column: u16, row: u16) -> Option<CellPos> {
 }
 
 impl Session {
+    /// A session with one tab that already has a page. Tests and nothing
+    /// else, now that every real tab comes into being through an effect.
     pub fn new(grid: GridSize, cell: CellSize) -> Self {
-        let mut session = Self {
+        let mut session = Self::empty(grid, cell);
+        let id = session.mint();
+        let mut tab = Tab::new(id, String::new());
+        tab.opened = true;
+        session.tabs.push(tab);
+        session
+    }
+
+    /// The shape of a session with nothing in it. Never handed out: a
+    /// browser with no tab is not a state, and both constructors put one in.
+    fn empty(grid: GridSize, cell: CellSize) -> Self {
+        Self {
             grid,
             cell,
             vp: page_viewport(grid, cell),
@@ -88,9 +101,51 @@ impl Session {
             tabs: Vec::new(),
             focus: 0,
             next_id: 0,
-        };
-        let id = session.mint();
-        session.tabs.push(Tab::new(id, String::new()));
+        }
+    }
+
+    /// The tabs a restart should come back to, plus whatever was asked for
+    /// on the command line.
+    ///
+    /// The snapshot is data from disk and is not trusted: an empty tab list
+    /// and a focus index past the end both have to produce a browser you can
+    /// use, because the alternative is a crash on launch you cannot get past
+    /// without finding the file yourself.
+    pub fn restore(
+        grid: GridSize,
+        cell: CellSize,
+        snapshot: Option<Snapshot>,
+        open: Option<String>,
+    ) -> Self {
+        let mut session = Self::empty(grid, cell);
+
+        let (focus, saved) = snapshot.map_or((0, Vec::new()), |s| (s.focus, s.tabs));
+        for restored in saved {
+            let id = session.mint();
+            let mut tab = Tab::new(id, restored.url);
+            // The title from the file, so the bar reads as the tabs you left
+            // rather than as a row of blanks until each one loads.
+            tab.title = restored.title;
+            tab.scroll_y = restored.scroll_y;
+            tab.navigating = true;
+            session.tabs.push(tab);
+        }
+        session.focus = focus.min(session.tabs.len().saturating_sub(1));
+
+        if let Some(url) = open {
+            let id = session.mint();
+            let mut tab = Tab::new(id, url);
+            tab.navigating = true;
+            session.tabs.push(tab);
+            session.focus = session.tabs.len() - 1;
+        }
+
+        if session.tabs.is_empty() {
+            let id = session.mint();
+            let mut tab = Tab::new(id, "about:blank".to_string());
+            tab.navigating = true;
+            session.tabs.push(tab);
+        }
         session
     }
 
@@ -140,7 +195,11 @@ impl Session {
         tab.navigating = true;
         self.tabs.push(tab);
         self.focus = self.tabs.len() - 1;
-        effects.push(Effect::OpenTab { id, url });
+        effects.push(Effect::OpenTab {
+            id,
+            url,
+            scroll_y: 0.0,
+        });
         self.save(effects);
     }
 
@@ -246,10 +305,24 @@ impl Session {
         (self.focus as isize + steps).rem_euclid(count) as usize
     }
 
-    /// The first read of a page nobody has looked at yet.
+    /// The first thing a browser does: ask for the pages it does not have,
+    /// and read the ones it does.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        self.start_extract(self.focused_id(), &mut effects);
+        // Collected first, because opening a tab is decided per tab and
+        // `start_extract` borrows the whole session.
+        let wanted: Vec<(TabId, String, f64, bool)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, tab.url.clone(), tab.scroll_y, tab.opened))
+            .collect();
+        for (id, url, scroll_y, opened) in wanted {
+            if opened {
+                self.start_extract(id, &mut effects);
+            } else {
+                effects.push(Effect::OpenTab { id, url, scroll_y });
+            }
+        }
         effects
     }
 
@@ -514,7 +587,11 @@ impl Session {
         // Reading a page nobody is looking at is a round trip for a frame
         // nobody will see, and spec section 3 is explicit that an idle
         // background tab must cost what an idle foreground tab costs.
-        if !focused {
+        //
+        // The exception is a tab nobody has read yet: reading it once is what
+        // puts a real title in the bar and makes the first switch to it a
+        // repaint rather than a round trip. Idling means after that.
+        if !focused && tab.read {
             return;
         }
         tab.extracting = true;
@@ -610,6 +687,7 @@ impl Session {
                 // per dirty signal.
                 let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
                 tab.extracting = false;
+                tab.read = true;
                 tab.progress = progress;
                 tab.scroll_y = extraction.scroll_y;
                 tab.runs = extraction.runs;
@@ -680,12 +758,15 @@ impl Session {
             }
             Job::Opened(_, Ok(())) => {
                 let tab = self.tab_mut(id).expect("resolved above");
+                tab.opened = true;
                 tab.navigating = false;
                 tab.state = State::Ready;
                 tab.mark_dirty();
                 if self.focused_id() == id {
                     effects.push(Effect::Activate(id));
                 }
+                // The page is already at the offset it was restored to;
+                // `Effect::OpenTab` carried it, so this reads what is there.
                 self.start_extract(id, effects);
             }
             Job::Opened(_, Err(message)) => {
@@ -1301,6 +1382,136 @@ mod tests {
         }
     }
 
+    // Restore.
+
+    fn snapshot_of(urls: &[&str], focus: usize) -> Snapshot {
+        Snapshot {
+            version: crate::store::VERSION,
+            focus,
+            tabs: urls
+                .iter()
+                .map(|url| SavedTab {
+                    url: (*url).to_string(),
+                    title: "saved".to_string(),
+                    scroll_y: 120.0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn restoring_asks_for_every_tab_that_was_open() {
+        let mut session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 1)),
+            None,
+        );
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().url, "https://two.test", "you come back where you were");
+        assert_eq!(
+            session.begin(),
+            vec![
+                Effect::OpenTab {
+                    id: TabId(0),
+                    url: "https://one.test".to_string(),
+                    scroll_y: 120.0
+                },
+                Effect::OpenTab {
+                    id: TabId(1),
+                    url: "https://two.test".to_string(),
+                    scroll_y: 120.0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_url_on_the_command_line_is_a_new_tab_beside_the_restored_ones() {
+        // Nothing you had is lost by typing `wwt example.com` out of habit,
+        // which is the failure mode that actually costs something.
+        let session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test"], 0)),
+            Some("https://asked.test".to_string()),
+        );
+
+        assert_eq!(session.tabs().len(), 2);
+        assert_eq!(session.focused().url, "https://asked.test");
+    }
+
+    #[test]
+    fn no_snapshot_and_no_url_is_one_blank_tab() {
+        let session = Session::restore(GRID, CELL, None, None);
+
+        assert_eq!(session.tabs().len(), 1);
+        assert_eq!(session.focused().url, "about:blank");
+    }
+
+    #[test]
+    fn a_snapshot_with_no_tabs_in_it_still_leaves_you_a_browser() {
+        let empty = Snapshot { version: crate::store::VERSION, focus: 0, tabs: Vec::new() };
+
+        let session = Session::restore(GRID, CELL, Some(empty), None);
+
+        assert_eq!(session.tabs().len(), 1, "a browser with no page in it is not a state");
+    }
+
+    #[test]
+    fn a_focus_index_past_the_end_of_the_snapshot_lands_on_a_real_tab() {
+        // The file is data from disk and is not trusted.
+        let session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 99)),
+            None,
+        );
+
+        assert_eq!(session.focused().url, "https://two.test");
+    }
+
+    #[test]
+    fn a_restored_tab_is_asked_for_at_the_offset_it_was_left_at() {
+        // Asked for as part of opening, not scrolled to afterwards: the two
+        // as separate effects are two spawned tasks, and an extraction that
+        // wins that race reads offset zero and writes it down.
+        let mut session =
+            Session::restore(GRID, CELL, Some(snapshot_of(&["https://one.test"], 0)), None);
+
+        let effects = session.begin();
+
+        assert_eq!(
+            effects,
+            vec![Effect::OpenTab {
+                id: tab0(),
+                url: "https://one.test".to_string(),
+                scroll_y: 120.0
+            }]
+        );
+    }
+
+    #[test]
+    fn every_restored_tab_is_read_once_so_the_bar_has_real_titles() {
+        let mut session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot_of(&["https://one.test", "https://two.test"], 1)),
+            None,
+        );
+        session.begin();
+
+        // Tab 0 is in the background and has never been read. It is read
+        // anyway, once, which is what makes the first switch to it instant.
+        let effects = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
+        assert!(effects.contains(&Effect::Extract(tab0())));
+
+        // And having been read, it goes quiet.
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://one.test")))));
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
+    }
+
     // The session file.
 
     fn saved(effects: &[Effect]) -> Option<&Snapshot> {
@@ -1419,7 +1630,8 @@ mod tests {
             vec![
                 Effect::OpenTab {
                     id: TabId(1),
-                    url: "https://example.org".to_string()
+                    url: "https://example.org".to_string(),
+                    scroll_y: 0.0
                 },
                 Effect::Save(session.snapshot()),
             ]
