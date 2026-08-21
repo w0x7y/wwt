@@ -20,7 +20,7 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Arrives back as a `Runtime.bindingCalled` event.
 pub const DIRTY_BINDING: &str = "__wwt_dirty";
 
-/// The shape `extract.js` returns.
+/// The shape `bootstrap.js` returns from `window.__wwt.extract()`.
 #[derive(Debug, Deserialize)]
 struct RawExtraction {
     runs: Vec<RawRun>,
@@ -429,16 +429,13 @@ impl Page {
         self.scroll_to_expression(&y.to_string()).await
     }
 
+    /// Through `js` rather than around it. Built by hand, this evaluated the
+    /// same command ten lines from the one place that inspects
+    /// `exceptionDetails`, and so reported success for a scroll that threw:
+    /// `Effect::Scroll` maps a failure to `Job::Failed`, which these three
+    /// paths could therefore never produce, and the page simply did not move.
     async fn scroll_to_expression(&self, y_expression: &str) -> Result<()> {
-        self.client
-            .call_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({
-                    "expression": format!("window.scrollTo(0, {y_expression})"),
-                    "returnByValue": true,
-                }),
-            )
+        self.js(&format!("window.scrollTo(0, {y_expression})"))
             .await
             .context("scroll to a document position")?;
         Ok(())
@@ -498,8 +495,12 @@ impl Page {
     /// Evaluate an expression in the page and return its value.
     ///
     /// Deliberately not how anything reads the page: that is `extract`,
-    /// once, in one round trip. The two callers here are commands this crate
+    /// once, in one round trip. The callers here are commands this crate
     /// issues rather than reads it performs.
+    ///
+    /// It is also the one place that inspects `exceptionDetails`, so
+    /// evaluating around it is how a command comes to report success for an
+    /// expression that threw.
     async fn js(&self, expression: &str) -> Result<serde_json::Value> {
         let mut result = self
             .client

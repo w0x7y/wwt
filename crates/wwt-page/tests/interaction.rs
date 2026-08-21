@@ -800,6 +800,34 @@ fn scrolling_to_an_offset_lands_there() {
 }
 
 #[test]
+fn a_scroll_that_threw_is_a_failure_and_not_a_silence() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "tall.html").await;
+
+        // A page may replace anything on `window`, so a scroll command can
+        // throw for reasons that are the page's business rather than ours.
+        // What matters is that we hear about it: `Effect::Scroll` turns a
+        // failure into `Job::Failed` and a stale-but-labeled frame, and this
+        // path used to report `Ok` for a page that had not moved, so that
+        // job could never arrive from it.
+        page.eval("window.scrollTo = () => { throw new Error('nope') }")
+            .await
+            .expect("replace the page's own scrollTo");
+
+        let scrolled = page.scroll_to(400.0).await;
+        assert!(scrolled.is_err(), "a scroll that threw reported success");
+
+        let extraction = page.extract().await.expect("extract");
+        assert!(
+            extraction.scroll_y < 1.0,
+            "the page did not move, which is the half that was always true: {}",
+            extraction.scroll_y
+        );
+    });
+}
+
+#[test]
 fn two_pages_on_one_browser_read_their_own_documents() {
     // One client, one websocket, one event stream. Every command a page
     // issues is `call_on` its own session, and this is what says so: two
