@@ -890,6 +890,26 @@ fn activating_a_page_makes_it_the_one_the_browser_has_in_front() {
 }
 
 #[test]
+fn a_page_does_not_announce_itself_as_headless() {
+    // Not cosmetic. A user agent saying HeadlessChrome is what search
+    // engines turn away: with it, duckduckgo.com returns a shell with no
+    // results in it and its html and lite endpoints return a CAPTCHA.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open_url(&h, "about:blank").await;
+
+        let reported = page.eval("navigator.userAgent").await.expect("read the user agent");
+        let reported = reported.as_str().expect("a string");
+
+        assert!(!reported.contains("Headless"), "sites turn this away: {reported}");
+        assert!(
+            reported.contains("Chrome/"),
+            "still the browser it actually is: {reported}"
+        );
+    });
+}
+
+#[test]
 fn a_tab_the_page_opened_for_itself_is_adopted_with_our_script_in_it() {
     let h = harness();
     runtime().block_on(async {

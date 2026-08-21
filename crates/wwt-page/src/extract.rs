@@ -197,6 +197,18 @@ impl Page {
             )
             .await
             .context("install the dirty-signal binding")?;
+        // Before anything is navigated to, so the first request already
+        // carries it. A page that loads as HeadlessChrome is a page a search
+        // engine answers with a CAPTCHA or an empty shell.
+        let user_agent = page.client.user_agent().await?;
+        page.client
+            .call_on(
+                &page.session_id,
+                "Network.setUserAgentOverride",
+                json!({ "userAgent": user_agent }),
+            )
+            .await
+            .context("set the user agent")?;
         page.install_bootstrap().await?;
         page.set_viewport(vp).await?;
         Ok(page)

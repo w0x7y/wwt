@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
@@ -42,6 +43,16 @@ pub struct Client {
     outgoing: mpsc::UnboundedSender<String>,
     pending: Pending,
     subscribers: Subscribers,
+    /// The browser's user agent, once anything has asked for it.
+    user_agent: OnceLock<String>,
+}
+
+/// A user agent with Chromium's headless marker taken out.
+///
+/// Kept apart from the round trip that fetches one so it can be asserted on
+/// with data.
+fn without_headless(reported: &str) -> String {
+    reported.replace("HeadlessChrome/", "Chrome/")
 }
 
 impl Client {
@@ -73,6 +84,7 @@ impl Client {
             outgoing: tx,
             pending,
             subscribers,
+            user_agent: OnceLock::new(),
         })
     }
 
@@ -104,6 +116,33 @@ impl Client {
         .await
         .context("turn on auto-attach")?;
         Ok(())
+    }
+
+    /// What this browser should tell sites it is.
+    ///
+    /// Its own user agent with the headless marker taken out, so the version
+    /// is never invented: we really are that Chromium, and the only untrue
+    /// part of what it says by default is the claim that nobody is looking.
+    /// Sites read `HeadlessChrome` as a crawler and answer accordingly, which
+    /// costs a person driving this browser their search results.
+    ///
+    /// Asked once and remembered. A racing caller asks twice and the answers
+    /// agree, which is cheaper than holding a lock across a round trip.
+    pub async fn user_agent(&self) -> Result<String> {
+        if let Some(known) = self.user_agent.get() {
+            return Ok(known.clone());
+        }
+        let version = self
+            .call("Browser.getVersion", json!({}))
+            .await
+            .context("ask the browser what it is")?;
+        let reported = version["userAgent"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Browser.getVersion returned no userAgent"))?;
+        Ok(self
+            .user_agent
+            .get_or_init(|| without_headless(reported))
+            .clone())
     }
 
     /// The target this event says the browser attached us to, if it is a
@@ -378,6 +417,26 @@ mod tests {
             Client::opened_by_a_page(&theirs),
             Some(Attached { target: TargetId("T2".to_string()), session: "S2".to_string() })
         );
+    }
+
+    #[test]
+    fn the_headless_marker_comes_out_of_the_user_agent() {
+        assert_eq!(
+            without_headless(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 HeadlessChrome/151.0.0.0 Safari/537.36"
+            ),
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/151.0.0.0 Safari/537.36"
+        );
+    }
+
+    #[test]
+    fn a_user_agent_that_never_claimed_to_be_headless_is_left_alone() {
+        // The version is the browser's own, so this must not invent one.
+        let real = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                    Chrome/141.0.0.0 Safari/537.36";
+        assert_eq!(without_headless(real), real);
     }
 
     #[test]
