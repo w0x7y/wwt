@@ -230,7 +230,8 @@ pub enum Job {
     Failed(TabId, String),
     Hints(TabId, Result<Vec<HintTarget>, String>),
     Resized(TabId),
-    Noted(String),
+    Noted(TabId, String),
+    Unsaved(String),
 }
 ```
 
@@ -259,6 +260,14 @@ now goes on the tab you are left looking at, and nowhere when there is none.
 `Job::InputFailed` is renamed `Job::Noted`. It always meant "this failed after the
 loop had moved on, so say so in the statusline and change nothing", and M4 gives it
 two users that are not input: a close that failed and a save that failed.
+
+*Amended.* `Job::Noted` names its tab, like every other job that came from a page, and
+the save that fails is `Job::Unsaved`. Carrying no tab, it landed on whichever one
+happened to be in front, so a target that would not activate reported the failure on
+the tab you had just left; and it cost `on_job` a variant it had to prove could not
+reach the bottom of its own match. The session file is the one thing that fails without
+a tab to fail on, because the tabs are what it is made of, and it still goes on the
+statusline in front because that is the only statusline there is.
 
 **A tab with no page yet.** Between `Effect::OpenTab` and `Job::Opened` the session
 has a tab and `Core` has no page for it. `Core` drops effects naming a page it does
@@ -416,7 +425,7 @@ costs one write rather than one per frame, and writes temp-then-rename in the sa
 directory so a crash mid-write cannot truncate what was already there. Quitting
 flushes once more before exiting.
 
-A save that fails is a `Job::Noted`. It is never a reason to change the frame or to
+A save that fails is a `Job::Unsaved`. It is never a reason to change the frame or to
 stop browsing.
 
 ## 9. Restore
@@ -474,8 +483,8 @@ at.
 | A restored tab fails to navigate | It stays a tab showing its error page, like any failed navigation. |
 | `Target.createTarget` fails | `Job::Opened` carries the error, the tab is removed, and the statusline says so. The focused tab is untouched. |
 | A job returns for a closed tab | Dropped. This is what the non-reusing `TabId` is for. |
-| `Target.closeTarget` fails | `Job::Noted`. The tab is already gone from the session's view; a leaked target is not worth a visible failure. |
-| A save fails | `Job::Noted`. Browsing continues; the previous file is intact because the write was temp-then-rename. |
+| `Target.closeTarget` fails | `Job::Noted`, naming the tab it was. The tab is already gone from the session's view; a leaked target is not worth a visible failure. |
+| A save fails | `Job::Unsaved`. Browsing continues; the previous file is intact because the write was temp-then-rename. |
 | An adopted target cannot be prepared | It is closed rather than kept, so there is never a tab whose document has no bootstrap in it. |
 | A background tab hangs | It hangs alone. The foreground stays responsive, which is the visible payoff of every page operation being spawned. |
 

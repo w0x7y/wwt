@@ -50,6 +50,16 @@ pub enum Job {
     /// itself never reaches the session; `Core` keeps it.
     Opened(TabId, Result<(), String>),
     /// Something failed after the loop had moved on: a keystroke, a click, a
-    /// blur. Say so in the statusline and change nothing else.
-    Noted(String),
+    /// blur, a target that would not come to the front. Say so and change
+    /// nothing else.
+    ///
+    /// It names its tab like every other page operation. It did not, and the
+    /// message landed on whichever tab happened to be in front, so a target
+    /// that would not activate reported the failure on the tab you had just
+    /// left. The exception also cost `on_job` a variant it had to prove
+    /// could not reach the bottom of the match.
+    Noted(TabId, String),
+    /// The session file could not be written. The one thing that fails
+    /// without a tab to fail on, because the tabs are what it is made of.
+    Unsaved(String),
 }

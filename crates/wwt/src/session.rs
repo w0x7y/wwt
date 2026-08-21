@@ -663,12 +663,12 @@ impl Session {
             | Job::Failed(id, _)
             | Job::Settled(id)
             | Job::Hints(id, _)
-            | Job::Resized(id) => *id,
-            // The frame stays exactly as it was; only the statusline
-            // changes. Spec section 8. Deliberately not `Job::Failed`: that
-            // one clears the extraction and navigation flags, and a
-            // keystroke that failed has finished neither of those.
-            Job::Noted(message) => {
+            | Job::Resized(id)
+            | Job::Noted(id, _) => *id,
+            // The one job with no tab: the session file is made of all of
+            // them. It goes on the tab in front because that is the only
+            // statusline there is.
+            Job::Unsaved(message) => {
                 self.focused_mut().state = State::Error(message.clone());
                 return;
             }
@@ -805,7 +805,14 @@ impl Session {
                 // changes. Section 8: never blank the frame you are looking at.
                 tab.state = State::Error(message);
             }
-            Job::Noted(_) => unreachable!("answered above"),
+            // The frame stays exactly as it was; only the statusline changes.
+            // Spec section 8. Deliberately not `Job::Failed`: that one clears
+            // the extraction and navigation flags, and a keystroke that
+            // failed has finished neither of those.
+            Job::Noted(_, message) => {
+                self.tab_mut(id).expect("resolved above").state = State::Error(message);
+            }
+            Job::Unsaved(_) => unreachable!("answered above"),
         }
     }
 }
@@ -952,7 +959,7 @@ mod tests {
     fn a_keystroke_that_failed_leaves_the_page_alone() {
         let mut session = ready();
         session.on(Event::Dirty(tab0()));
-        let mid_extraction = session.on(Event::Done(Job::Noted("no".to_string())));
+        let mid_extraction = session.on(Event::Done(Job::Noted(tab0(), "no".to_string())));
 
         assert_eq!(session.state(), &State::Error("no".to_string()));
         assert_eq!(mid_extraction, vec![], "an extraction was in flight and still is");
@@ -1715,6 +1722,40 @@ mod tests {
         assert_eq!(session.tabs().len(), 1, "a tab with no page is not a tab");
         assert_eq!(session.focused().id, tab0());
         assert!(matches!(session.state(), State::Error(_)));
+    }
+
+    #[test]
+    fn a_failure_on_a_background_tab_does_not_land_on_the_one_in_front() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen example.org");
+        session.on(code(KeyCode::Enter));
+        session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        session.on(key('!'));
+        assert_eq!(session.focused().id, tab0(), "back on the first tab");
+
+        // A target that would not come to the front, reported while you are
+        // looking at something else. It is the second tab's failure and it
+        // says so there.
+        session.on(Event::Done(Job::Noted(
+            TabId(1),
+            "would not activate".to_string(),
+        )));
+
+        assert!(
+            !matches!(session.state(), State::Error(_)),
+            "the tab in front did not fail: {:?}",
+            session.state()
+        );
+        let background = session
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == TabId(1))
+            .expect("the tab is still open");
+        assert!(
+            matches!(background.state, State::Error(_)),
+            "the tab that failed says nothing about it: {:?}",
+            background.state
+        );
     }
 
     #[test]

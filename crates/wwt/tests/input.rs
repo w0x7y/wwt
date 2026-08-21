@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wwt::event::Job;
 use wwt::input::InputPump;
+use wwt::tab::TabId;
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::{Input, KeyInput, Page};
@@ -59,6 +60,7 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
     for c in typed.chars() {
         // No await between sends: the pump is what keeps these in order.
         pump.send(
+            TabId(0),
             Arc::clone(&page),
             Input::Key(if c == ' ' { space() } else { letter(c) }),
         );

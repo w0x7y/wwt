@@ -143,7 +143,7 @@ impl Core {
         let tx = self.jobs_tx.clone();
         tokio::task::spawn_blocking(move || {
             if let Err(error) = crate::store::save(&path, &snapshot) {
-                let _ = tx.send(Finished::Job(Job::Noted(error)));
+                let _ = tx.send(Finished::Job(Job::Unsaved(error)));
             }
         });
     }
@@ -302,7 +302,7 @@ impl Core {
 
                 Effect::Send(id, input) => {
                     if let Some(page) = self.pages.get(&id) {
-                        self.input.send(Arc::clone(page), input);
+                        self.input.send(id, Arc::clone(page), input);
                     }
                 }
 
@@ -326,8 +326,8 @@ impl Core {
                     ))
                 }),
 
-                Effect::Blur(id) => self.spawn(id, |page| async move {
-                    page.blur().await.err().map(|e| Job::Noted(e.to_string()))
+                Effect::Blur(id) => self.spawn(id, move |page| async move {
+                    page.blur().await.err().map(|e| Job::Noted(id, e.to_string()))
                 }),
 
                 Effect::Scroll(id, scroll) => {
@@ -402,17 +402,17 @@ impl Core {
                         let tx = self.jobs_tx.clone();
                         tokio::spawn(async move {
                             if let Err(error) = page.close().await {
-                                let _ = tx.send(Finished::Job(Job::Noted(error.to_string())));
+                                let _ = tx.send(Finished::Job(Job::Noted(id, error.to_string())));
                             }
                         });
                     }
                 }
 
-                Effect::Activate(id) => self.spawn(id, |page| async move {
+                Effect::Activate(id) => self.spawn(id, move |page| async move {
                     page.activate()
                         .await
                         .err()
-                        .map(|e| Job::Noted(e.to_string()))
+                        .map(|e| Job::Noted(id, e.to_string()))
                 }),
 
                 Effect::SetViewport(id, vp) => {
