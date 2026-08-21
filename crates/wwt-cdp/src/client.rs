@@ -1,7 +1,9 @@
 //! A minimal CDP client: request/response correlation over one websocket.
 //!
-//! M1 discards protocol events. The event pump that feeds the extraction loop
-//! is M2; it hooks into `read_loop` below without changing this API.
+//! Protocol events are broadcast rather than discarded: `read_loop` below
+//! answers a call by its id and hands anything else to every subscriber, so
+//! the dirty signal that drives re-extraction and the attach that reports a
+//! new target both arrive through `subscribe`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
