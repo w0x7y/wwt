@@ -70,7 +70,10 @@ fn the_command_line_opens_fills_and_closes() {
     let effects = session.on(Event::Key(code(KeyCode::Enter)));
     assert_eq!(
         effects,
-        vec![Effect::Navigate(Navigation::Open("https://example.com".to_string()))]
+        vec![Effect::Navigate(
+            wwt::tab::TabId(0),
+            Navigation::Open("https://example.com".to_string())
+        )]
     );
     assert_eq!(session.mode(), &Mode::Normal, "Enter closes the line it ran");
 }
@@ -88,7 +91,7 @@ fn a_letter_is_a_command_in_normal_mode_and_a_keystroke_in_insert_mode() {
     assert_eq!(insert.mode(), &Mode::Insert, "`i` is what makes q a letter");
 
     let effects = insert.on(Event::Key(key('q')));
-    let [Effect::Send(Input::Key(sent))] = effects.as_slice() else {
+    let [Effect::Send(_, Input::Key(sent))] = effects.as_slice() else {
         panic!("insert mode should send the key, got {effects:?}");
     };
     assert_eq!(sent.text, "q");

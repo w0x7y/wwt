@@ -113,10 +113,20 @@ impl Session {
         self.focused().id
     }
 
+    /// The tab a job is about, or `None` if it has since been closed.
+    ///
+    /// A page operation outlives the state that asked for it. Looking the id
+    /// up rather than assuming the focused tab is what lets a slow load in a
+    /// backgrounded tab land in that tab, and a load in a closed one land
+    /// nowhere.
+    fn tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|tab| tab.id == id)
+    }
+
     /// The first read of a page nobody has looked at yet.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        self.start_extract(&mut effects);
+        self.start_extract(self.focused_id(), &mut effects);
         effects
     }
 
@@ -182,9 +192,11 @@ impl Session {
             Event::Key(key) => self.on_key(key, &mut effects),
             Event::Mouse(mouse) => self.on_mouse(mouse, &mut effects),
             Event::Resized(grid, cell) => self.on_resize(grid, cell, &mut effects),
-            Event::Dirty => {
-                self.focused_mut().mark_dirty();
-                self.start_extract(&mut effects);
+            Event::Dirty(id) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.mark_dirty();
+                }
+                self.start_extract(id, &mut effects);
             }
             Event::Done(job) => self.on_job(job, &mut effects),
         }
@@ -208,17 +220,18 @@ impl Session {
                 // `f` pressed twice before the first answer comes back is
                 // one question, not two.
                 None if !self.focused().hinting => {
+                    let id = self.focused_id();
                     self.focused_mut().hinting = true;
-                    effects.push(Effect::Hints);
+                    effects.push(Effect::Hints(id));
                 }
                 None => {}
             },
 
             // Scrolling does not settle the way a navigation does; the
             // page's own scroll listener reports when it has moved.
-            Action::Scroll(dy) => effects.push(Effect::Scroll(Scroll::By(dy))),
-            Action::ScrollTop => effects.push(Effect::Scroll(Scroll::Top)),
-            Action::ScrollEnd => effects.push(Effect::Scroll(Scroll::End)),
+            Action::Scroll(dy) => effects.push(Effect::Scroll(self.focused_id(), Scroll::By(dy))),
+            Action::ScrollTop => effects.push(Effect::Scroll(self.focused_id(), Scroll::Top)),
+            Action::ScrollEnd => effects.push(Effect::Scroll(self.focused_id(), Scroll::End)),
             Action::Back => self.navigate(Navigation::Back, effects),
             Action::Forward => self.navigate(Navigation::Forward, effects),
             Action::Reload => self.navigate(Navigation::Reload, effects),
@@ -229,7 +242,7 @@ impl Session {
                 // keyboard is still yours: taking it back must never depend
                 // on the page.
                 if self.mode == Mode::Insert {
-                    effects.push(Effect::Blur);
+                    effects.push(Effect::Blur(self.focused_id()));
                 }
                 self.mode = Mode::Normal;
             }
@@ -282,7 +295,7 @@ impl Session {
     /// worse than a missing keystroke, because the page acts on it.
     fn send_key(&self, key: KeyEvent, effects: &mut Vec<Effect>) {
         if let Some(input) = keys::describe(key) {
-            effects.push(Effect::Send(Input::Key(input)));
+            effects.push(Effect::Send(self.focused_id(), Input::Key(input)));
         }
     }
 
@@ -313,10 +326,11 @@ impl Session {
         if self.focused().navigating {
             return;
         }
+        let id = self.focused_id();
         let tab = self.focused_mut();
         tab.navigating = true;
         tab.state = State::Loading;
-        effects.push(Effect::Navigate(navigation));
+        effects.push(Effect::Navigate(id, navigation));
     }
 
     fn on_mouse(&mut self, event: MouseEvent, effects: &mut Vec<Effect>) {
@@ -337,17 +351,25 @@ impl Session {
             // no context menu to open and no tab to middle-click into.
             _ => return,
         };
-        effects.push(Effect::Send(Input::Mouse(mouse)));
+        effects.push(Effect::Send(self.focused_id(), Input::Mouse(mouse)));
     }
 
-    fn start_extract(&mut self, effects: &mut Vec<Effect>) {
-        let tab = self.focused_mut();
+    fn start_extract(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let focused = self.focused_id() == id;
+        let Some(tab) = self.tab_mut(id) else { return };
         if tab.extracting || !tab.dirty {
+            return;
+        }
+        // A background tab keeps its flag and spends it when focus arrives.
+        // Reading a page nobody is looking at is a round trip for a frame
+        // nobody will see, and spec section 3 is explicit that an idle
+        // background tab must cost what an idle foreground tab costs.
+        if !focused {
             return;
         }
         tab.extracting = true;
         tab.dirty = false;
-        effects.push(Effect::Extract);
+        effects.push(Effect::Extract(id));
     }
 
     fn enter_hints(&mut self, targets: Vec<HintTarget>) {
@@ -373,8 +395,9 @@ impl Session {
 
     fn activate(&mut self, target: HintTarget, effects: &mut Vec<Effect>) {
         let at = target.center();
-        effects.push(Effect::Send(Input::Mouse(MouseInput::press(at))));
-        effects.push(Effect::Send(Input::Mouse(MouseInput::release(at))));
+        let id = self.focused_id();
+        effects.push(Effect::Send(id, Input::Mouse(MouseInput::press(at))));
+        effects.push(Effect::Send(id, Input::Mouse(MouseInput::release(at))));
         // Clicking a text field is the beginning of typing into it, so that
         // is where the mode goes. Anything else is finished when the click
         // lands.
@@ -394,14 +417,35 @@ impl Session {
         // The page genuinely reflows: it is being told the window changed
         // size. Extraction waits for `Job::Resized`, because reading the
         // page before it has been resized reads the old layout.
-        effects.push(Effect::SetViewport(self.vp));
+        effects.push(Effect::SetViewport(self.focused_id(), self.vp));
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
+        let id = match &job {
+            Job::Extracted(id, _)
+            | Job::Failed(id, _)
+            | Job::Settled(id)
+            | Job::Hints(id, _)
+            | Job::Resized(id) => *id,
+            // The frame stays exactly as it was; only the statusline
+            // changes. Spec section 8. Deliberately not `Job::Failed`: that
+            // one clears the extraction and navigation flags, and a
+            // keystroke that failed has finished neither of those.
+            Job::Noted(message) => {
+                self.focused_mut().state = State::Error(message.clone());
+                return;
+            }
+        };
+        if self.tab_mut(id).is_none() {
+            // The tab was closed while this was in flight. Its id is never
+            // reused, so there is no page this could belong to instead.
+            return;
+        }
+
         match job {
-            Job::Extracted(extraction) => {
+            Job::Extracted(_, extraction) => {
                 let progress = extraction.scroll_progress();
-                let tab = self.focused_mut();
+                let tab = self.tab_mut(id).expect("resolved above");
                 tab.extracting = false;
                 tab.progress = progress;
                 tab.scroll_y = extraction.scroll_y;
@@ -412,7 +456,7 @@ impl Session {
                 // Chromium answers a DNS or connection failure by navigating
                 // to its own error page rather than failing the command, so a
                 // navigation can "succeed" into one. Its error page is more
-                // use than a stale frame — it says what went wrong — but the
+                // use than a stale frame, it says what went wrong, but the
                 // statusline must not go on claiming the page is fine.
                 if extraction.url.starts_with(CHROME_ERROR_SCHEME) {
                     // The statusline prints the URL itself, so naming it here
@@ -425,14 +469,15 @@ impl Session {
                     }
                 }
                 // The page may have changed again while we were extracting.
-                self.start_extract(effects);
+                self.start_extract(id, effects);
             }
-            Job::Hints(result) => {
+            Job::Hints(_, result) => {
                 // However it went, the query is over and `f` must work again.
-                self.focused_mut().hinting = false;
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.hinting = false;
                 match result {
                     Ok(targets) => {
-                        self.focused_mut().hints = Some(targets.clone());
+                        tab.hints = Some(targets.clone());
                         // A query is a round trip, and the keystroke that
                         // asked for it was normal mode's. Landing the answer
                         // in whatever mode you have since entered would take
@@ -441,33 +486,29 @@ impl Session {
                             self.enter_hints(targets);
                         }
                     }
-                    Err(message) => self.focused_mut().state = State::Error(message),
+                    Err(message) => tab.state = State::Error(message),
                 }
             }
-            Job::Settled => {
-                let tab = self.focused_mut();
+            Job::Settled(_) => {
+                let tab = self.tab_mut(id).expect("resolved above");
                 tab.navigating = false;
                 tab.state = State::Ready;
                 tab.mark_dirty();
-                self.start_extract(effects);
+                self.start_extract(id, effects);
             }
-            Job::Resized => {
-                self.focused_mut().mark_dirty();
-                self.start_extract(effects);
+            Job::Resized(_) => {
+                self.tab_mut(id).expect("resolved above").mark_dirty();
+                self.start_extract(id, effects);
             }
-            // The frame stays exactly as it was; only the statusline
-            // changes. Spec section 8. Deliberately not `Job::Failed`: that
-            // one clears the extraction and navigation flags, and a
-            // keystroke that failed has finished neither of those.
-            Job::InputFailed(message) => self.focused_mut().state = State::Error(message),
-            Job::Failed(message) => {
-                let tab = self.focused_mut();
+            Job::Failed(_, message) => {
+                let tab = self.tab_mut(id).expect("resolved above");
                 tab.extracting = false;
                 tab.navigating = false;
                 // The frame stays exactly as it was; only the statusline
                 // changes. Section 8: never blank the frame you are looking at.
                 tab.state = State::Error(message);
             }
+            Job::Noted(_) => unreachable!("answered above"),
         }
     }
 }
@@ -486,11 +527,16 @@ mod tests {
         Session::new(GRID, CELL)
     }
 
+    /// The id of the tab a fresh session starts with.
+    fn tab0() -> TabId {
+        TabId(0)
+    }
+
     /// A session past its first extraction, the state most keys are pressed in.
     fn ready() -> Session {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(Box::new(extraction("https://example.com")))));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
         session
     }
 
@@ -524,7 +570,7 @@ mod tests {
 
     /// The page answering a hint query.
     fn hinted(targets: Vec<HintTarget>) -> Event {
-        Event::Done(Job::Hints(Ok(targets)))
+        Event::Done(Job::Hints(tab0(), Ok(targets)))
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
@@ -542,29 +588,29 @@ mod tests {
 
     #[test]
     fn the_first_thing_a_session_does_is_read_the_page() {
-        assert_eq!(session().begin(), vec![Effect::Extract]);
+        assert_eq!(session().begin(), vec![Effect::Extract(tab0())]);
     }
 
     #[test]
     fn a_dirty_signal_during_an_extraction_re_runs_it_once_not_twice() {
         let mut session = session();
-        assert_eq!(session.begin(), vec![Effect::Extract]);
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
 
         // Three signals arrive while that extraction is still in flight.
         for _ in 0..3 {
-            assert_eq!(session.on(Event::Dirty), vec![], "a second extraction would race it");
+            assert_eq!(session.on(Event::Dirty(tab0())), vec![], "a second extraction would race it");
         }
 
         // Finishing it starts exactly one more, covering all three.
-        let effects = session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank")))));
-        assert_eq!(effects, vec![Effect::Extract]);
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank")))));
+        assert_eq!(effects, vec![Effect::Extract(tab0())]);
     }
 
     #[test]
     fn a_page_that_stopped_changing_stops_being_read() {
         let mut session = ready();
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank"))))),
             vec![],
             "an idle page must cost nothing"
         );
@@ -574,8 +620,8 @@ mod tests {
     fn a_failed_extraction_lets_the_next_one_start() {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Failed("boom".to_string())));
-        assert_eq!(session.on(Event::Dirty), vec![Effect::Extract]);
+        session.on(Event::Done(Job::Failed(tab0(), "boom".to_string())));
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0())]);
     }
 
     // What a finished job says about the page.
@@ -583,8 +629,8 @@ mod tests {
     #[test]
     fn a_chrome_error_url_is_an_error_without_becoming_the_url() {
         let mut session = ready();
-        session.on(Event::Dirty);
-        session.on(Event::Done(Job::Extracted(Box::new(extraction(
+        session.on(Event::Dirty(tab0()));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction(
             "chrome-error://chromewebdata/",
         )))));
 
@@ -598,14 +644,14 @@ mod tests {
     #[test]
     fn a_keystroke_that_failed_leaves_the_page_alone() {
         let mut session = ready();
-        session.on(Event::Dirty);
-        let mid_extraction = session.on(Event::Done(Job::InputFailed("no".to_string())));
+        session.on(Event::Dirty(tab0()));
+        let mid_extraction = session.on(Event::Done(Job::Noted("no".to_string())));
 
         assert_eq!(session.state(), &State::Error("no".to_string()));
         assert_eq!(mid_extraction, vec![], "an extraction was in flight and still is");
         // The one already running still finishes, and finds nothing to do.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(Box::new(extraction("about:blank"))))),
+            session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank"))))),
             vec![]
         );
     }
@@ -614,7 +660,7 @@ mod tests {
     fn a_failure_never_blanks_the_frame() {
         let mut session = ready();
         let before = session.compose();
-        session.on(Event::Done(Job::Failed("the page went away".to_string())));
+        session.on(Event::Done(Job::Failed(tab0(), "the page went away".to_string())));
         let after = session.compose();
 
         let rows = |f: &Frame| (0..23).map(|r| f.row_text(r)).collect::<Vec<_>>();
@@ -630,7 +676,7 @@ mod tests {
         session.on(key('i'));
         assert_eq!(session.mode(), &Mode::Insert);
 
-        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur]);
+        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur(tab0())]);
         assert_eq!(
             session.mode(),
             &Mode::Normal,
@@ -650,11 +696,11 @@ mod tests {
     fn the_page_never_sees_an_escape_it_was_not_sent_on_purpose() {
         let mut session = ready();
         session.on(key('i'));
-        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur], "ours, always");
+        assert_eq!(session.on(code(KeyCode::Esc)), vec![Effect::Blur(tab0())], "ours, always");
 
         session.on(key('i'));
         let sent = session.on(ctrl(']'));
-        let [Effect::Send(Input::Key(sent))] = sent.as_slice() else {
+        let [Effect::Send(_, Input::Key(sent))] = sent.as_slice() else {
             panic!("Ctrl-] should reach the page, got {sent:?}");
         };
         assert_eq!(sent.key, "Escape");
@@ -669,7 +715,7 @@ mod tests {
         let mut sent = Vec::new();
         for c in "abc".chars() {
             for effect in session.on(key(c)) {
-                if let Effect::Send(Input::Key(key)) = effect {
+                if let Effect::Send(_, Input::Key(key)) = effect {
                     sent.push(key.text);
                 }
             }
@@ -687,7 +733,7 @@ mod tests {
         let effects = session.on(code(KeyCode::Enter));
         assert_eq!(
             effects,
-            vec![Effect::Navigate(Navigation::Open("https://example.co".to_string()))],
+            vec![Effect::Navigate(tab0(), Navigation::Open("https://example.co".to_string()))],
             "backspace rubbed out the m"
         );
     }
@@ -714,18 +760,18 @@ mod tests {
     #[test]
     fn a_second_navigation_while_one_is_in_flight_is_dropped() {
         let mut session = ready();
-        assert_eq!(session.on(key('H')), vec![Effect::Navigate(Navigation::Back)]);
+        assert_eq!(session.on(key('H')), vec![Effect::Navigate(tab0(), Navigation::Back)]);
         assert_eq!(session.on(key('L')), vec![], "one navigation at a time");
 
-        session.on(Event::Done(Job::Settled));
-        assert_eq!(session.on(key('L')), vec![Effect::Navigate(Navigation::Forward)]);
+        session.on(Event::Done(Job::Settled(tab0())));
+        assert_eq!(session.on(key('L')), vec![Effect::Navigate(tab0(), Navigation::Forward)]);
     }
 
     #[test]
     fn a_settled_navigation_reads_the_new_page() {
         let mut session = ready();
         session.on(key('H'));
-        assert_eq!(session.on(Event::Done(Job::Settled)), vec![Effect::Extract]);
+        assert_eq!(session.on(Event::Done(Job::Settled(tab0()))), vec![Effect::Extract(tab0())]);
         assert_eq!(session.state(), &State::Ready);
     }
 
@@ -733,9 +779,9 @@ mod tests {
     fn scrolling_asks_the_page_to_move_and_waits_to_be_told_it_did() {
         let mut session = ready();
         // One row of 20 CSS pixels.
-        assert_eq!(session.on(key('j')), vec![Effect::Scroll(Scroll::By(20.0))]);
-        assert_eq!(session.on(key('g')), vec![Effect::Scroll(Scroll::Top)]);
-        assert_eq!(session.on(key('G')), vec![Effect::Scroll(Scroll::End)]);
+        assert_eq!(session.on(key('j')), vec![Effect::Scroll(tab0(), Scroll::By(20.0))]);
+        assert_eq!(session.on(key('g')), vec![Effect::Scroll(tab0(), Scroll::Top)]);
+        assert_eq!(session.on(key('G')), vec![Effect::Scroll(tab0(), Scroll::End)]);
     }
 
     // Hints: cached until the page moves, and a text field lands in insert.
@@ -743,7 +789,7 @@ mod tests {
     #[test]
     fn f_queries_the_page_once_and_then_uses_what_it_said() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
 
         session.on(hinted(vec![target(TargetKind::Clickable)]));
         assert!(matches!(session.mode(), Mode::Hint(_)));
@@ -760,10 +806,10 @@ mod tests {
         session.on(hinted(vec![target(TargetKind::Clickable)]));
         session.on(code(KeyCode::Esc));
 
-        session.on(Event::Dirty);
+        session.on(Event::Dirty(tab0()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints],
+            vec![Effect::Hints(tab0())],
             "hints are geometry, so a page that moved has invalidated them"
         );
     }
@@ -791,8 +837,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                Effect::Send(Input::Mouse(MouseInput::press(at))),
-                Effect::Send(Input::Mouse(MouseInput::release(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::press(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::release(at))),
             ]
         );
         assert_eq!(session.mode(), &Mode::Insert, "clicking a field is the start of typing in it");
@@ -809,8 +855,8 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                Effect::Send(Input::Mouse(MouseInput::press(at))),
-                Effect::Send(Input::Mouse(MouseInput::release(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::press(at))),
+                Effect::Send(tab0(), Input::Mouse(MouseInput::release(at))),
             ]
         );
         assert_eq!(session.mode(), &Mode::Normal, "a link is finished when the click lands");
@@ -819,7 +865,7 @@ mod tests {
     #[test]
     fn a_query_still_in_flight_is_not_asked_again() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
         assert_eq!(session.on(key('f')), vec![], "one question, not two");
     }
 
@@ -848,12 +894,12 @@ mod tests {
     fn a_query_that_failed_leaves_f_working() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(Err("the page went away".to_string()))));
+        session.on(Event::Done(Job::Hints(tab0(), Err("the page went away".to_string()))));
 
         assert_eq!(session.state(), &State::Error("the page went away".to_string()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints],
+            vec![Effect::Hints(tab0())],
             "a failed query that never cleared its flag would kill `f` for the session"
         );
     }
@@ -893,7 +939,7 @@ mod tests {
         let mut session = ready();
         let effects = session.on(mouse(MouseEventKind::Down(MouseButton::Left), 4, 2));
         let at = session.viewport().to_css(CellPos { col: 4, row: 2 });
-        assert_eq!(effects, vec![Effect::Send(Input::Mouse(MouseInput::press(at)))]);
+        assert_eq!(effects, vec![Effect::Send(tab0(), Input::Mouse(MouseInput::press(at)))]);
     }
 
     #[test]
@@ -908,7 +954,7 @@ mod tests {
         let mut session = ready();
         let effects = session.on(mouse(MouseEventKind::ScrollDown, 0, 1));
         let at = session.viewport().to_css(CellPos { col: 0, row: 1 });
-        assert_eq!(effects, vec![Effect::Send(Input::Mouse(MouseInput::wheel(at, 60.0)))]);
+        assert_eq!(effects, vec![Effect::Send(tab0(), Input::Mouse(MouseInput::wheel(at, 60.0)))]);
     }
 
     #[test]
@@ -925,10 +971,10 @@ mod tests {
         let grid = GridSize { cols: 100, rows: 30 };
         let effects = session.on(Event::Resized(grid, CELL));
 
-        assert_eq!(effects, vec![Effect::SetViewport(page_viewport(grid, CELL))]);
+        assert_eq!(effects, vec![Effect::SetViewport(tab0(), page_viewport(grid, CELL))]);
         assert_eq!(
-            session.on(Event::Done(Job::Resized)),
-            vec![Effect::Extract],
+            session.on(Event::Done(Job::Resized(tab0()))),
+            vec![Effect::Extract(tab0())],
             "reading before the page has reflowed reads the old layout"
         );
     }
@@ -948,7 +994,7 @@ mod tests {
 
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(Box::new(with_caret))));
+        session.on(Event::Done(Job::Extracted(tab0(), Box::new(with_caret))));
         assert_eq!(
             session.compose().cursor(),
             None,
@@ -994,5 +1040,27 @@ mod tests {
         let vp = page_viewport(GRID, CELL);
         assert_eq!(page_cell(&vp, 5, 0), None);
         assert_eq!(page_cell(&vp, 5, 23), None);
+    }
+
+    #[test]
+    fn every_effect_says_which_page_it_is_for() {
+        let mut session = session();
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
+
+        let mut session = ready();
+        assert_eq!(
+            session.on(key('j')),
+            vec![Effect::Scroll(tab0(), Scroll::By(20.0))]
+        );
+    }
+
+    #[test]
+    fn a_job_for_a_tab_that_is_gone_is_dropped_rather_than_painted() {
+        // Nothing can close a tab yet, but the guard is what makes Task 8
+        // safe, and a job carrying an unknown id must never be looked up.
+        let mut session = ready();
+        let stale = Job::Extracted(TabId(999), Box::new(extraction("https://elsewhere.test")));
+        assert_eq!(session.on(Event::Done(stale)), vec![]);
+        assert_eq!(session.focused().url, "https://example.com", "the frame is untouched");
     }
 }

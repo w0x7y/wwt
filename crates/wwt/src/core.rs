@@ -6,6 +6,7 @@
 //! start lives on the other side of that seam, where it can be tested
 //! without a browser.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -26,13 +27,14 @@ use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::input::InputPump;
 use crate::session::Session;
+use crate::tab::TabId;
 
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 
 pub struct Core {
-    page: Arc<Page>,
+    pages: HashMap<TabId, Arc<Page>>,
     client: Arc<Client>,
     renderer: Renderer,
     session: Session,
@@ -40,20 +42,22 @@ pub struct Core {
     jobs_tx: mpsc::UnboundedSender<Job>,
     jobs_rx: mpsc::UnboundedReceiver<Job>,
 
-    /// Ordered delivery of keys and clicks to the page.
+    /// Ordered delivery of keys and clicks, across every page.
     input: InputPump,
 }
 
 impl Core {
     pub fn new(page: Arc<Page>, client: Arc<Client>, grid: GridSize, cell: CellSize) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let input = InputPump::spawn(Arc::clone(&page), jobs_tx.clone());
+        let input = InputPump::spawn(jobs_tx.clone());
+        let session = Session::new(grid, cell);
+        let pages = HashMap::from([(session.focused_id(), page)]);
 
         Self {
-            page,
+            pages,
             client,
             renderer: Renderer::new(),
-            session: Session::new(grid, cell),
+            session,
             jobs_tx,
             jobs_rx,
             input,
@@ -94,7 +98,11 @@ impl Core {
                     _ => None,
                 },
 
-                Some(event) = cdp.recv() => self.page.is_dirty(&event).then_some(Event::Dirty),
+                Some(event) = cdp.recv() => self
+                    .pages
+                    .iter()
+                    .find(|(_, page)| page.is_dirty(&event))
+                    .map(|(id, _)| Event::Dirty(*id)),
 
                 Some(job) = self.jobs_rx.recv() => Some(Event::Done(job)),
 
@@ -137,12 +145,16 @@ impl Core {
                     }
                 }
 
-                Effect::Send(input) => self.input.send(input),
+                Effect::Send(id, input) => {
+                    if let Some(page) = self.pages.get(&id) {
+                        self.input.send(Arc::clone(page), input);
+                    }
+                }
 
-                Effect::Extract => self.spawn(|page| async move {
+                Effect::Extract(id) => self.spawn(id, move |page| async move {
                     Some(match page.extract().await {
-                        Ok(extraction) => Job::Extracted(Box::new(extraction)),
-                        Err(error) => Job::Failed(error.to_string()),
+                        Ok(extraction) => Job::Extracted(id, Box::new(extraction)),
+                        Err(error) => Job::Failed(id, error.to_string()),
                     })
                 }),
 
@@ -152,27 +164,30 @@ impl Core {
                 // those. Nor can it go unreported, or the session would
                 // believe a query was still in flight and `f` would be dead
                 // for the rest of the run.
-                Effect::Hints => self.spawn(|page| async move {
-                    Some(Job::Hints(page.hints().await.map_err(|e| e.to_string())))
+                Effect::Hints(id) => self.spawn(id, move |page| async move {
+                    Some(Job::Hints(
+                        id,
+                        page.hints().await.map_err(|e| e.to_string()),
+                    ))
                 }),
 
-                Effect::Blur => self.spawn(|page| async move {
-                    page.blur().await.err().map(|e| Job::InputFailed(e.to_string()))
+                Effect::Blur(id) => self.spawn(id, |page| async move {
+                    page.blur().await.err().map(|e| Job::Noted(e.to_string()))
                 }),
 
-                Effect::Scroll(scroll) => {
+                Effect::Scroll(id, scroll) => {
                     let vp = self.session.viewport();
-                    self.spawn(move |page| async move {
+                    self.spawn(id, move |page| async move {
                         let done = match scroll {
                             Scroll::By(dy) => page.scroll_by(dy, vp).await,
                             Scroll::Top => page.scroll_to_top().await,
                             Scroll::End => page.scroll_to_end().await,
                         };
-                        done.err().map(|e| Job::Failed(e.to_string()))
+                        done.err().map(|e| Job::Failed(id, e.to_string()))
                     });
                 }
 
-                Effect::Navigate(navigation) => self.spawn(move |page| async move {
+                Effect::Navigate(id, navigation) => self.spawn(id, move |page| async move {
                     let done = match navigation {
                         Navigation::Open(url) => page.navigate(&url).await,
                         Navigation::Back => page.back().await.map(|_| ()),
@@ -180,28 +195,28 @@ impl Core {
                         Navigation::Reload => page.reload().await,
                     };
                     Some(match done {
-                        Ok(()) => Job::Settled,
-                        Err(error) => Job::Failed(error.to_string()),
+                        Ok(()) => Job::Settled(id),
+                        Err(error) => Job::Failed(id, error.to_string()),
                     })
                 }),
 
-                Effect::SetViewport(vp) => {
+                Effect::SetViewport(id, vp) => {
                     // A diff against a frame of different dimensions is
                     // meaningless.
                     self.renderer.invalidate();
-                    self.resize_page(vp);
+                    self.resize_page(id, vp);
                 }
             }
         }
         Ok(false)
     }
 
-    /// Tell the page how big its window is now.
-    fn resize_page(&self, vp: Viewport) {
-        self.spawn(move |page| async move {
+    /// Tell one page how big its window is now.
+    fn resize_page(&self, id: TabId, vp: Viewport) {
+        self.spawn(id, move |page| async move {
             Some(match page.set_viewport(vp).await {
-                Ok(()) => Job::Resized,
-                Err(error) => Job::Failed(error.to_string()),
+                Ok(()) => Job::Resized(id),
+                Err(error) => Job::Failed(id, error.to_string()),
             })
         });
     }
@@ -211,13 +226,19 @@ impl Core {
     /// The one place anything is spawned. A thirty-second load still leaves
     /// keys responsive because nothing here is awaited by the loop, and each
     /// operation says for itself what its failure means by choosing the
-    /// `Job` it reports — or reporting none.
-    fn spawn<F, Fut>(&self, make: F)
+    /// `Job` it reports, or reporting none.
+    ///
+    /// An effect naming a page we do not hold is dropped. That is reachable
+    /// only between asking for a tab and being told it opened, where the tab
+    /// is marked loading and nothing could have expected to land.
+    fn spawn<F, Fut>(&self, id: TabId, make: F)
     where
         F: FnOnce(Arc<Page>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Option<Job>> + Send,
     {
-        let page = Arc::clone(&self.page);
+        let Some(page) = self.pages.get(&id).map(Arc::clone) else {
+            return;
+        };
         let tx = self.jobs_tx.clone();
         tokio::spawn(async move {
             if let Some(job) = make(page).await {

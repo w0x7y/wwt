@@ -16,23 +16,27 @@ use crate::event::Job;
 
 /// The sending half of the pump. The core holds one.
 pub struct InputPump {
-    tx: mpsc::UnboundedSender<Input>,
+    tx: mpsc::UnboundedSender<(Arc<Page>, Input)>,
 }
 
 impl InputPump {
-    /// Start the pump for a page.
+    /// Start the pump.
+    ///
+    /// One pump for every page, not one per page: keys typed either side of
+    /// a tab switch must not overtake each other, and two channels would make
+    /// their order a matter of which task woke first.
     ///
     /// Failures are reported as a `Job` rather than returned: by the time a
     /// keystroke fails, whoever typed it has typed three more. They go on
     /// the channel every other finished page operation goes on, so the loop
     /// has one thing to select on rather than two.
-    pub fn spawn(page: Arc<Page>, jobs: mpsc::UnboundedSender<Job>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
+    pub fn spawn(jobs: mpsc::UnboundedSender<Job>) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<(Arc<Page>, Input)>();
 
         tokio::spawn(async move {
-            while let Some(input) = rx.recv().await {
+            while let Some((page, input)) = rx.recv().await {
                 if let Err(error) = page.dispatch(&input).await {
-                    let _ = jobs.send(Job::InputFailed(error.to_string()));
+                    let _ = jobs.send(Job::Noted(error.to_string()));
                 }
             }
         });
@@ -42,7 +46,7 @@ impl InputPump {
 
     /// Queue one input. Never blocks, never fails: a closed channel means
     /// the pump task is gone, which only happens on the way out.
-    pub fn send(&self, input: Input) {
-        let _ = self.tx.send(input);
+    pub fn send(&self, page: Arc<Page>, input: Input) {
+        let _ = self.tx.send((page, input));
     }
 }

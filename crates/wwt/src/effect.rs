@@ -8,21 +8,24 @@
 use wwt_frame::Viewport;
 use wwt_page::Input;
 
+use crate::tab::TabId;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Read the page.
-    Extract,
+    Extract(TabId),
     /// Ask the page for its interactive boxes.
-    Hints,
-    Scroll(Scroll),
-    Navigate(Navigation),
+    Hints(TabId),
+    Scroll(TabId, Scroll),
+    Navigate(TabId, Navigation),
     /// Send one key or click to the page, in order with the others.
-    Send(Input),
+    Send(TabId, Input),
     /// Take focus off whatever has it.
-    Blur,
+    Blur(TabId),
     /// Tell the page the window is this size. The terminal has already
-    /// changed; this is the page catching up.
-    SetViewport(Viewport),
+    /// changed; this is the page catching up. Emitted once per tab, because
+    /// a background tab has to be the right size already when you reach it.
+    SetViewport(TabId, Viewport),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,
