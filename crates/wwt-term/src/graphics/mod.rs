@@ -5,5 +5,6 @@
 //! what the protocol looks like, which is why it can be tested with no
 //! terminal anywhere.
 
+pub mod detect;
 pub mod diacritics;
 pub mod protocol;
