@@ -156,9 +156,17 @@ the protocol's table. A cell with no diacritics continues from the one before it
 only the first cell of each row spends them.
 
 **A new frame rewrites no cells.** The image id is fixed for the life of a pixel-mode
-session, so a frame is one transmission and the placeholders already on screen re-render
-against the new data. Entering pixel mode, a resize and a tab switch write placeholders;
-scrolling a page does not. This is what keeps a pixel frame from costing a full repaint.
+session, so a frame is a transmission and a placement, and the placeholders already on
+screen re-render against the new data. Entering pixel mode, a resize and a tab switch
+write placeholders; scrolling a page does not. This is what keeps a pixel frame from
+costing a full repaint.
+
+The placement is not optional and is the part that had to be measured rather than
+assumed. Transmitting to an id that already has one destroys it: the picture vanishes
+and the placeholder cells show the terminal's background through where it was, because
+they are addressing a placement that is no longer there. Re-issuing `a=p` brings it back
+without a cell being touched, so the cost of a frame is two escape sequences rather than
+one, and still not a repaint.
 
 ## 5. Detection and what happens without it
 
@@ -280,10 +288,12 @@ terminal is, and what cannot is honest about needing one.
 
 ## 12. Open questions
 
-1. **Re-transmission to a live image id.** Whether transmitting new data to an id that
-   has a virtual placement updates it in place, or whether the placement must be deleted
-   and recreated. It changes what a frame costs, not the shape of anything, and it is the
-   first thing the implementation settles with a throwaway probe against a real Kitty.
+1. ~~**Re-transmission to a live image id.**~~ **Closed, 2026-08-22.** Measured against
+   a real Kitty: transmitting to an id that already has a virtual placement destroys the
+   placement. The picture disappears and the cells addressing it show background, which
+   is a more visible failure than a stale picture and so at least fails loudly. Re-issuing
+   `a=p` after each transmission restores it with no cell rewritten. A frame is therefore
+   two sequences and no repaint, and section 4 says so.
 2. **Snapshot version strictness.** `store::load` now rejects any version that is not
    ours, which is right for a file from the future and heavy-handed for a field added to
    an old one. M5 does not touch the snapshot, so it does not have to answer this; the

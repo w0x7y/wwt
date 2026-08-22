@@ -8,7 +8,9 @@
 
 use std::io::Write;
 
-use wwt_frame::{CellPos, Frame, Style};
+use wwt_frame::{CellPos, CellRect, Frame, Image, Style};
+
+use crate::graphics::protocol;
 
 /// Write the whole frame, leaving the terminal with default attributes.
 pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
@@ -83,11 +85,18 @@ fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
 #[derive(Debug, Default)]
 pub struct Renderer {
     last: Option<Frame>,
+    /// What the terminal is currently holding: the generation on screen and
+    /// the area it covers. A frame that changed neither costs no sequence,
+    /// and a frame that changed only its data costs no cells.
+    shown: Option<(u64, CellRect)>,
 }
 
 impl Renderer {
     pub fn new() -> Self {
-        Self { last: None }
+        Self {
+            last: None,
+            shown: None,
+        }
     }
 
     /// Discard the cached frame, so the next render repaints everything.
@@ -95,6 +104,9 @@ impl Renderer {
     /// behind our back.
     pub fn invalidate(&mut self) {
         self.last = None;
+        // The terminal has been written to behind our back, so nothing can
+        // be assumed to still be placed where we left it.
+        self.shown = None;
     }
 
     pub fn render(&mut self, frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
@@ -111,16 +123,60 @@ impl Renderer {
             true
         };
 
+        // Cells first, image second. The transmission is what the
+        // placeholders on screen re-render against, so sending it first
+        // would show this frame's picture through the last frame's cells
+        // for one paint.
+        let touched_image = self.paint_image(frame.image(), out)?;
+
         // Writing cells leaves the terminal's cursor wherever the last cell
         // went, so anything painted has to be followed by putting it back.
         let moved = self.last.as_ref().map(Frame::cursor) != Some(frame.cursor());
-        if wrote || moved {
+        if wrote || moved || touched_image {
             place_cursor(frame, out)?;
             out.flush()?;
         }
 
         self.last = Some(frame.clone());
         Ok(())
+    }
+
+    /// Bring the terminal's idea of the image up to date with this frame's.
+    ///
+    /// Returns whether anything was written. Three cases, and they are the
+    /// whole protocol policy: no image is a delete if one was showing, an
+    /// unchanged generation is nothing at all, and a new generation is a
+    /// transmission and a placement, plus the cells addressing it only when
+    /// the area moved.
+    ///
+    /// The placement is not optional. Transmitting to an id that already has
+    /// one destroys it, and the cells addressing it then show the terminal's
+    /// background until it is re-issued. That was measured rather than
+    /// assumed; see the M5 spec, section 4.
+    fn paint_image(&mut self, image: Option<&Image>, out: &mut impl Write) -> std::io::Result<bool> {
+        let Some(image) = image else {
+            if self.shown.take().is_some() {
+                protocol::delete(out)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+
+        if self.shown == Some((image.generation, image.area)) {
+            return Ok(false);
+        }
+
+        let moved = self.shown.map(|(_, area)| area) != Some(image.area);
+        protocol::transmit(&image.payload, out)?;
+        protocol::place(image.area, out)?;
+        // Only when the area moved. A scroll re-renders the placeholders
+        // already on screen, which is what keeps a frame from costing a
+        // repaint.
+        if moved {
+            protocol::placeholders(image.area, out)?;
+        }
+        self.shown = Some((image.generation, image.area));
+        Ok(true)
     }
 
     /// Emit the cells that changed. Returns whether anything was written.
@@ -169,7 +225,9 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wwt_frame::{CellSize, CssRect, Frame, GridSize, Rgb, Style, TextRun, Viewport};
+    use wwt_frame::{
+        CellRect, CellSize, CssRect, Frame, GridSize, Image, Rgb, Style, TextRun, Viewport,
+    };
 
     fn vp() -> Viewport {
         Viewport::new(GridSize { cols: 10, rows: 2 }, CellSize { w: 10, h: 20 })
@@ -188,6 +246,118 @@ mod tests {
             },
         );
         f
+    }
+
+    fn image_at(generation: u64, payload: &str) -> Image {
+        Image {
+            generation,
+            payload: payload.to_string(),
+            area: CellRect { col: 0, row: 1, cols: 4, rows: 2 },
+        }
+    }
+
+    fn framed(image: Option<Image>) -> Frame {
+        let mut frame = Frame::new(GridSize { cols: 4, rows: 4 });
+        frame.set_image(image);
+        frame
+    }
+
+    fn rendered(renderer: &mut Renderer, frame: &Frame) -> String {
+        let mut out = Vec::new();
+        renderer.render(frame, &mut out).expect("render");
+        String::from_utf8(out).expect("utf-8")
+    }
+
+    #[test]
+    fn the_first_image_is_transmitted_placed_and_given_placeholders() {
+        let mut renderer = Renderer::new();
+        let sent = rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+
+        assert!(sent.contains("a=t,f=100"), "transmitted");
+        assert!(sent.contains("a=p,U=1"), "placed");
+        assert!(
+            sent.contains(protocol::PLACEHOLDER),
+            "the cells addressing it were written"
+        );
+    }
+
+    #[test]
+    fn a_new_frame_is_a_transmission_and_a_placement_and_no_cells() {
+        // The latency claim of pixel mode. The placement is re-issued
+        // because transmitting destroys it, which was measured against a
+        // real Kitty, but not one placeholder cell is touched.
+        let mut renderer = Renderer::new();
+        rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+
+        let sent = rendered(&mut renderer, &framed(Some(image_at(2, "BBBB"))));
+        assert!(sent.contains("BBBB"), "the new data went out");
+        assert!(sent.contains("a=p,U=1"), "and was placed again");
+        assert!(
+            !sent.contains(protocol::PLACEHOLDER),
+            "but no cell was rewritten"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_generation_sends_no_image_at_all() {
+        let mut renderer = Renderer::new();
+        let frame = framed(Some(image_at(1, "AAAA")));
+        rendered(&mut renderer, &frame);
+
+        let sent = rendered(&mut renderer, &frame);
+        assert!(!sent.contains("\x1b_G"), "nothing about graphics was said");
+    }
+
+    #[test]
+    fn a_changed_area_writes_placeholders_again() {
+        // A resize. The placement covers a different number of cells, so the
+        // cells referring to it have to be laid down again.
+        let mut renderer = Renderer::new();
+        rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+
+        let mut wider = Frame::new(GridSize { cols: 8, rows: 6 });
+        let mut image = image_at(2, "BBBB");
+        image.area = CellRect { col: 0, row: 1, cols: 8, rows: 4 };
+        wider.set_image(Some(image));
+
+        let sent = rendered(&mut renderer, &wider);
+        assert!(sent.contains("a=p,U=1"), "re-placed at the new size");
+        assert!(sent.contains(protocol::PLACEHOLDER), "and re-addressed");
+    }
+
+    #[test]
+    fn dropping_the_image_deletes_it_from_the_terminal() {
+        // Leaving pixel mode. Nothing is left in the terminal's memory for a
+        // mode nobody is in.
+        let mut renderer = Renderer::new();
+        rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+
+        let sent = rendered(&mut renderer, &framed(None));
+        assert!(sent.contains("a=d,d=i"));
+    }
+
+    #[test]
+    fn a_text_frame_says_nothing_about_graphics() {
+        // Text mode is every frame this codebase built before M5 and must
+        // cost exactly what it cost then.
+        let mut renderer = Renderer::new();
+        let sent = rendered(&mut renderer, &framed(None));
+        assert!(!sent.contains("\x1b_G"));
+    }
+
+    #[test]
+    fn invalidating_forgets_what_the_terminal_was_holding() {
+        // After a resize the terminal has been written to behind our back,
+        // so the next frame must place and address the image again rather
+        // than assume it survived.
+        let mut renderer = Renderer::new();
+        let frame = framed(Some(image_at(1, "AAAA")));
+        rendered(&mut renderer, &frame);
+        renderer.invalidate();
+
+        let sent = rendered(&mut renderer, &frame);
+        assert!(sent.contains("a=t,f=100"), "transmitted again");
+        assert!(sent.contains(protocol::PLACEHOLDER), "and addressed again");
     }
 
     fn render_to_string(f: &Frame) -> String {
