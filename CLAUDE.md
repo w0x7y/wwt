@@ -18,7 +18,7 @@ Currently at **M4** (tabs and sessions). Milestones M1–M7 are defined in
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 307 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 330 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan

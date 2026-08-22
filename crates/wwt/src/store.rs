@@ -78,9 +78,21 @@ pub fn load(path: &Path) -> Result<Option<Snapshot>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|error| format!("{}: {error}", path.display()))
+    let snapshot: Snapshot = serde_json::from_str(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+
+    // A version we do not know is a malformed file by another name. What a
+    // later wwt means by its fields is not knowable from here, and restoring
+    // a guess would open tabs nobody asked for and then save them over the
+    // snapshot the wwt that wrote it is still using.
+    if snapshot.version != VERSION {
+        return Err(format!(
+            "{}: session file version {}, expected {VERSION}",
+            path.display(),
+            snapshot.version
+        ));
+    }
+    Ok(Some(snapshot))
 }
 
 /// Write a snapshot, atomically.
@@ -175,6 +187,24 @@ mod tests {
         assert!(
             load(&path).is_err(),
             "a corrupt file must be a notice, not silence"
+        );
+    }
+
+    #[test]
+    fn a_session_file_from_a_newer_wwt_is_a_notice_rather_than_a_guess() {
+        // Section 8 of the M4 spec puts a future version beside a malformed
+        // file: a notice and one tab. What a later wwt means by its fields is
+        // not knowable from here, and restoring a guess would open tabs
+        // nobody asked for and then overwrite the real snapshot with them.
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("session.json");
+        let mut ahead = snapshot();
+        ahead.version = VERSION + 1;
+        save(&path, &ahead).expect("write it");
+
+        assert!(
+            load(&path).is_err(),
+            "a version we do not know must be a notice, not a guess"
         );
     }
 
