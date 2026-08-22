@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M4** (tabs and sessions). Milestones M1–M7 are defined in
+Currently at **M5** (pixel mode). Milestones M1–M7 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 330 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 395 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -27,6 +27,7 @@ Currently at **M4** (tabs and sessions). Milestones M1–M7 are defined in
     cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
     cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
     cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
+    cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture              # what a picture costs
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -325,6 +326,76 @@ Eviction of background targets past a limit, and the lazy restore that shares
 its machinery, are deferred to M7. They introduce the one state this design
 does not have, a tab that exists without a target.
 
+## Pixel mode
+
+`p` swaps the page between its runs and a picture of itself. The viewport,
+the scroll offset and the focus are untouched, which is what makes the toggle
+instant: the same state composes both ways.
+
+**The bytes never leave base64.** `Page.screencastFrame` carries base64 PNG
+and the Kitty graphics protocol wants base64 PNG, so a frame is forwarded
+from the websocket to stdout as the string it arrived as. This is why M5 adds
+no dependency, and it is why half-block degradation is M6's: half a cell
+needs a foreground and a background colour, which needs real samples, which
+needs an inflate and an unfilter that nothing else here would ever use.
+
+**The grid wins over the image.** Unicode placeholders make placement cell
+content, so a cell holding a glyph shows the glyph and a cell holding a
+placeholder shows the picture. Hint labels over a pixel page therefore cost
+nothing to arrange. Whether a cell is one or the other is decided as it is
+written, not in a pass of its own, which is what makes a label arriving and a
+label going away the same event: a cell that changed, which the diff already
+writes.
+
+**Every placeholder cell spends its own two diacritics.** A cell without them
+continues from the cell before it, so an overlay in the middle of a row
+orphans every placeholder after it and the picture tears from there to the
+right edge. Surviving an overlay is the requirement, not an optimisation to
+trade against, since overlays are why this design uses placeholders at all.
+
+**Two image ids, alternating.** Transmitting to an id tears down its
+placement for as long as the transmission lasts, and a full-page PNG is
+dozens of chunks, so aimed at the id on screen that window is a visible
+flicker. A frame goes into the id that is *not* on screen, is placed, has the
+cells pointed at it, and only then is the other deleted. A test image in one
+sequence shows none of this; it took a real page to find.
+
+**A frame therefore rewrites the cells, and that is the cheaper half.**
+`measure_pixel_frame`: ~38KB of cells against ~410KB of payload, under a
+millisecond. `Frame` carries the image and `Cell` does not, because a cell
+holding combining diacritics would put a terminal protocol inside the one
+crate whose hard rule is that it knows about nothing.
+
+**The ack is the frame rate.** Chromium sends the next picture only once the
+last is answered, so holding the ack back for `FRAME_INTERVAL` paces the
+stream with the protocol's own flow control: nothing polls and nothing is
+buffered. It has to be paced at all because `--disable-frame-rate-limit`
+means an animating page paints as fast as the compositor can, and every one
+of those is a full-page PNG for the terminal to decode. A still page produces
+no frames and pays nothing.
+
+**Every frame is acked, including the ones dropped**: one for a background
+tab, one that was in flight when pixel mode was left. Chromium counts acks
+and not paints, so a frame dropped without one stops the screencast and shows
+up later as a picture that never moves. A frame for a *closed* tab is the
+exception, since `Core` drops effects naming a page it does not hold.
+
+**A switch in pixel mode is a round trip.** M4's repaint guarantee, and
+`measure_switch`, are text mode's. The previous picture stays up under the
+new tab's chrome until the first frame arrives, because the alternative is
+blanking the frame you are looking at.
+
+**Pixel mode is global and is not saved.** Only the focused tab screencasts
+either way, so per-tab would buy a preference rather than a cost, and a new
+field in `Snapshot` is a version bump that costs every existing session file
+its tabs on upgrade.
+
+**Detection is asked once**, before raw mode and before the first paint,
+which is the one moment stdin belongs to nobody. `VMIN`/`VTIME` give the read
+a real timeout: a plain read would block forever on exactly the terminals the
+question exists to find. Without graphics, `p` is a notice and the frame you
+are looking at stands.
+
 ## Performance
 
 The goal above is a latency goal, and the numbers that back it are in the tests
@@ -368,9 +439,10 @@ them there:
 - **The frame rate is uncapped.** `--disable-frame-rate-limit`, because headless
   otherwise paces frames at the display's rate and a scroll is not visible to the
   page until the frame it lands on. It was two thirds of the scroll latency. An idle
-  page produces no frames, so this costs nothing at idle, and that was measured. It
-  is worth re-measuring when M5 puts `Page.startScreencast` on the same viewport,
-  since an uncapped compositor is free only while nobody is asking it for frames.
+  page produces no frames, so this costs nothing at idle, and that was measured. M5
+  asks the compositor for frames and found the other half of that trade: an
+  animating page outruns what a terminal can decode. The flag stays and the ack is
+  held back instead, because text is the mode wwt is in almost always.
 - **Nothing deep-copies a payload.** An extraction is every run on screen;
   `Client::send` and `Page::js` take their `Value` rather than clone it, or the whole
   of it is copied twice on the way to the caller.

@@ -508,6 +508,53 @@ mod tests {
         assert!(sent.contains("a=d,d=i"));
     }
 
+    /// What a pixel frame costs to write. Run with:
+    ///
+    ///     cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture
+    ///
+    /// A realistic payload: a PNG of a full page is a few hundred kilobytes,
+    /// which is about 400KB of base64. The claim in section 4 of the M5 spec
+    /// is that repointing the cells is the smaller half of what a frame
+    /// costs, so this asserts the ratio as well as printing the time.
+    #[test]
+    fn measure_pixel_frame() {
+        let mut renderer = Renderer::new();
+        let payload = "A".repeat(400 * 1024);
+        let area = CellRect { col: 0, row: 1, cols: 120, rows: 38 };
+        let mut frame = Frame::new(GridSize { cols: 120, rows: 40 });
+        frame.set_image(Some(Image { generation: 1, payload: payload.clone(), area }));
+        renderer.render(&frame, &mut Vec::new()).expect("the first frame");
+
+        let mut worst = std::time::Duration::ZERO;
+        let mut wrote = 0;
+        for generation in 2..102 {
+            let mut frame = Frame::new(GridSize { cols: 120, rows: 40 });
+            frame.set_image(Some(Image {
+                generation,
+                payload: payload.clone(),
+                area,
+            }));
+            let mut out = Vec::with_capacity(payload.len() * 2);
+
+            let start = std::time::Instant::now();
+            renderer.render(&frame, &mut out).expect("a later frame");
+            worst = worst.max(start.elapsed());
+            wrote = out.len();
+        }
+
+        let cells = wrote - payload.len();
+        eprintln!(
+            "pixel frame, worst of 100: {worst:?}; {} bytes, of which {cells} are cells",
+            wrote
+        );
+        assert!(
+            cells < payload.len(),
+            "repointing the cells must be the smaller half: {cells} against {}",
+            payload.len()
+        );
+        assert!(worst < std::time::Duration::from_millis(20), "frame took {worst:?}");
+    }
+
     #[test]
     fn a_text_frame_says_nothing_about_graphics() {
         // Text mode is every frame this codebase built before M5 and must

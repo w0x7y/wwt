@@ -4,12 +4,13 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M4, tabs and sessions.** It renders a page, scrolls it,
-follows history, opens other URLs, reaches every link from the keyboard,
-types into forms, and clicks with the mouse. It keeps many pages open at
-once under one Chromium, follows the links that want a new tab, and
-comes back to the same tabs, still logged in, tomorrow. Pixel mode is
-M5.
+**Status: M5, pixel mode.** It renders a page, scrolls it, follows
+history, opens other URLs, reaches every link from the keyboard, types
+into forms, and clicks with the mouse. It keeps many pages open at once
+under one Chromium, follows the links that want a new tab, and comes
+back to the same tabs, still logged in, tomorrow. And on a keypress it
+shows you the page as it really looks, pixels and all, with the
+keyboard still yours. Reader mode is M6.
 
 ## Requirements
 
@@ -40,9 +41,17 @@ M5.
 | `:` | command line |
 | `i` | hand the keyboard to the page |
 | `f` | label every link and button; type a label to click it |
+| `p` | show the page as it really looks |
 | `Esc` | take the keyboard back |
 | `Ctrl-]` | send the page a literal Escape |
 | `q` | quit |
+
+`p` swaps the page between text and true pixels without moving it: the
+same viewport, the same scroll offset, the same tab, and hint labels
+still readable on top of the picture. It needs a terminal that speaks
+the Kitty graphics protocol, which wwt asks about once at startup;
+without one it says so and leaves your text where it was. `:set pixel
+on` and `:set pixel off` do the same from the command line.
 
 `Esc` is never forwarded to the page, so the keyboard is always one key
 away from being yours again. `Ctrl-]` exists for pages that want an
@@ -78,7 +87,7 @@ so does `wwt banana`. A word with a dot in it, or a host and a port like
 
 Commands: `:open <url-or-search>`, `:tabopen <url-or-search>` (`:t`),
 `:tabclose`, `:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
-`:set mouse on|off`, `:quit`.
+`:set mouse on|off`, `:set pixel on|off`, `:quit`.
 
 wwt keeps a Chromium profile at `$XDG_DATA_HOME/wwt/profile` and the tabs
 you had open at `$XDG_DATA_HOME/wwt/session.json`. The profile is what
@@ -99,6 +108,8 @@ it, so it runs private, not logged in, and writes no session file.
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M5 design: `docs/superpowers/specs/2026-08-22-wwt-m5-design.md`
+- M5 plan: `docs/superpowers/plans/2026-08-22-wwt-m5-pixel-mode.md`
 - M4 design: `docs/superpowers/specs/2026-08-21-wwt-m4-design.md`
 - M4 plan: `docs/superpowers/plans/2026-08-21-wwt-m4-tabs-and-sessions.md`
 - M3 design: `docs/superpowers/specs/2026-08-19-wwt-m3-design.md`

@@ -54,10 +54,25 @@ the page knows about neither chrome row. The shift down lives in `Viewport`
 as an **origin row** rather than as a `+1` wherever a cell is painted, so
 `to_cell(to_css(c)) == c` holds at every origin. `session::page_viewport`.
 
-**Frame** — a full grid of cells, plus where the terminal's cursor belongs.
-The single output type every rendering mode produces, so text mode and later
-pixel and reader modes cannot diverge in how they reach the screen.
-`wwt_frame::Frame`.
+**Frame** — a full grid of cells, plus where the terminal's cursor belongs
+and, in pixel mode, the **image** behind them. The single output type every
+rendering mode produces, so text mode and pixel mode, and later reader mode,
+cannot diverge in how they reach the screen. `wwt_frame::Frame`.
+
+**Image** — a picture of the page on its way to the terminal: base64 PNG,
+which is how CDP sends it and how the graphics protocol wants it, so nothing
+in wwt ever decodes one. Carries a **generation**, which is what the
+renderer diffs on, because two frames can encode identically and comparing
+the payloads would mean comparing a megabyte to answer what a counter
+answers. `wwt_frame::Image`.
+
+**Placeholder** — a cell carrying U+10EEEE, which shows part of an image
+rather than a glyph. The image id rides in its foreground colour and its
+position in two combining diacritics. A cell holding a real glyph shows the
+glyph instead, which is how a hint label lands on top of a picture, and it
+is why every cell spends its own diacritics: a cell without them continues
+from the one before it, so an overlay in the middle of a row would orphan
+everything after it.
 
 **Chrome** — the two rows that are ours: the **tab bar** on top, and at the
 bottom the statusline, or the `:` line when one is open. Both unconditional,
@@ -68,6 +83,20 @@ reason to blank the frame.
 ## What the browser is doing
 
 **Mode** — what keys mean right now: normal, insert, hint, or the `:` line.
+
+**Pixel mode** — the page shown as a picture of itself rather than
+reconstructed from its runs, entered with `p`. Global rather than per-tab,
+and only the focused tab screencasts. The viewport, the scroll offset and
+the focus are the same in both modes, which is what makes the toggle
+instant.
+
+**Screencast frame** — one picture of a page as CDP sends it. Not to be
+confused with a `Frame`, which is the grid of cells; this one is a
+`ScreencastFrame` and ends up as the image on one. **Ack id** is the integer
+it must be answered with: CDP calls it `sessionId` and it is not a CDP
+session id, it counts screencasts on one target. Chromium sends the next
+picture only once the last is acked, which is what makes the ack the place
+to set the frame rate.
 Changes only in response to a keystroke; a page cannot move you between
 modes, which is what makes handing it the keyboard safe. `wwt_ui::Mode`.
 
