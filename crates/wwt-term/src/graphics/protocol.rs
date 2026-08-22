@@ -72,21 +72,9 @@ pub fn delete(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b_Gq=2,a=d,d=i,i={IMAGE_ID}\x1b\\")
 }
 
-/// Fill `area` with placeholder cells addressing the placement.
-///
-/// The image id rides in the foreground colour, and every cell carries its
-/// own row and column as combining diacritics.
-///
-/// Addressing only the first cell of each row and letting the rest continue
-/// from it would be smaller, and it is wrong: a cell with no diacritics
-/// continues from the cell before it, so a hint label painted into the
-/// middle of a row orphans every placeholder after it and the picture tears
-/// from the label to the right edge. Overlays are the whole reason this
-/// design uses placeholders rather than placing the image directly, so they
-/// have to survive one. The cost is paid when placeholders are written,
-/// which is on entering pixel mode, on a resize and on a switch, and never
-/// on a frame.
-pub fn placeholders(area: CellRect, out: &mut impl Write) -> io::Result<()> {
+/// The foreground colour a placeholder cell must carry: the image id, in
+/// three bytes.
+pub fn image_fg(out: &mut impl Write) -> io::Result<()> {
     let id = IMAGE_ID;
     write!(
         out,
@@ -94,26 +82,34 @@ pub fn placeholders(area: CellRect, out: &mut impl Write) -> io::Result<()> {
         (id >> 16) & 0xff,
         (id >> 8) & 0xff,
         id & 0xff
-    )?;
+    )
+}
+
+/// One placeholder cell, addressing `row` and `col` of the placement.
+///
+/// Every cell carries its own row and column. Addressing only the first cell
+/// of each row and letting the rest continue from it is smaller and is
+/// wrong: a cell with no diacritics continues from the cell before it, so a
+/// hint label painted into the middle of a row orphans every placeholder
+/// after it and the picture tears from the label to the right edge. Overlays
+/// are the whole reason this design uses placeholders rather than placing
+/// the image directly, so surviving one is the requirement.
+///
+/// `None` when the position is past what the diacritic table can address,
+/// which means the terminal is bigger than the protocol can name and those
+/// cells simply show no image.
+pub fn placeholder(row: u16, col: u16, out: &mut impl Write) -> io::Result<bool> {
+    let (Some(row_mark), Some(col_mark)) =
+        (diacritics::for_index(row), diacritics::for_index(col))
+    else {
+        return Ok(false);
+    };
 
     let mut buf = [0u8; 4];
-    for row in 0..area.rows {
-        // A terminal bigger than the table can address gets no placeholders
-        // for the part past the end rather than wrong ones.
-        let Some(row_mark) = diacritics::for_index(row) else {
-            break;
-        };
-        write!(out, "\x1b[{};{}H", area.row + row + 1, area.col + 1)?;
-        for col in 0..area.cols {
-            let Some(col_mark) = diacritics::for_index(col) else {
-                break;
-            };
-            out.write_all(PLACEHOLDER.encode_utf8(&mut buf).as_bytes())?;
-            out.write_all(row_mark.encode_utf8(&mut buf).as_bytes())?;
-            out.write_all(col_mark.encode_utf8(&mut buf).as_bytes())?;
-        }
-    }
-    write!(out, "\x1b[0m")
+    out.write_all(PLACEHOLDER.encode_utf8(&mut buf).as_bytes())?;
+    out.write_all(row_mark.encode_utf8(&mut buf).as_bytes())?;
+    out.write_all(col_mark.encode_utf8(&mut buf).as_bytes())?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -191,47 +187,32 @@ mod tests {
     }
 
     #[test]
-    fn every_placeholder_cell_carries_its_own_row_and_column() {
+    fn a_placeholder_cell_carries_its_own_row_and_column() {
         // A cell with no diacritics continues from the cell before it, so a
         // label painted into the middle of a row would orphan every cell
         // after it. Overlays are why this design uses placeholders at all.
-        let sent = bytes(|out| placeholders(area(), out));
-        let cells = sent.matches(PLACEHOLDER).count();
-        assert_eq!(cells, 8, "one per cell");
-
-        let marks: usize = diacritics::CODES
-            .iter()
-            .map(|mark| sent.matches(*mark).count())
-            .sum();
-        assert_eq!(marks, cells * 2, "a row and a column for every one of them");
+        let sent = bytes(|out| placeholder(0, 0, out).map(|_| ()));
+        assert_eq!(sent.chars().count(), 3, "the cell and its two marks");
+        assert!(sent.starts_with(PLACEHOLDER));
     }
 
     #[test]
     fn placeholders_carry_the_image_id_in_the_foreground_bytes() {
-        let one = CellRect { col: 0, row: 0, cols: 1, rows: 1 };
-        let sent = bytes(|out| placeholders(one, out));
-        assert!(sent.starts_with("\x1b[38;2;119;119;116m"), "{sent:?}");
+        assert_eq!(bytes(image_fg), "\x1b[38;2;119;119;116m");
     }
 
     #[test]
-    fn a_grid_taller_than_the_table_stops_rather_than_addressing_wrongly() {
-        let tall = CellRect { col: 0, row: 0, cols: 1, rows: 400 };
-        let sent = bytes(|out| placeholders(tall, out));
-        assert_eq!(sent.matches(PLACEHOLDER).count(), 297);
+    fn a_position_past_the_table_addresses_nothing_rather_than_addressing_wrongly() {
+        let mut out = Vec::new();
+        assert!(!placeholder(297, 0, &mut out).expect("write"), "no row for it");
+        assert!(!placeholder(0, 297, &mut out).expect("write"), "no column for it");
+        assert!(out.is_empty(), "and nothing was written");
     }
 
     #[test]
-    fn a_grid_wider_than_the_table_stops_at_the_edge_of_what_it_can_address() {
-        let wide = CellRect { col: 0, row: 0, cols: 400, rows: 1 };
-        let sent = bytes(|out| placeholders(wide, out));
-        assert_eq!(sent.matches(PLACEHOLDER).count(), 297);
-    }
-
-    #[test]
-    fn placeholders_are_addressed_from_the_areas_own_origin() {
-        // The page does not start at the top of the screen: the tab bar is
-        // row 0, and terminal addressing is 1-based on top of that.
-        let one = CellRect { col: 0, row: 1, cols: 1, rows: 1 };
-        assert!(bytes(|out| placeholders(one, out)).contains("\x1b[2;1H"));
+    fn a_position_within_the_table_is_written() {
+        let mut out = Vec::new();
+        assert!(placeholder(296, 296, &mut out).expect("write"));
+        assert!(!out.is_empty());
     }
 }

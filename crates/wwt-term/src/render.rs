@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use wwt_frame::{CellPos, CellRect, Frame, Image, Style};
+use wwt_frame::{Cell, CellPos, CellRect, Frame, Image, Style};
 
 use crate::graphics::protocol;
 
@@ -25,21 +25,62 @@ pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
             write!(out, "\r\n")?;
         }
         for col in 0..grid.cols {
-            let cell = frame
-                .cell(CellPos { col, row })
-                .expect("cell within the frame's own grid");
-            if active != Some(cell.style) {
-                write_style(out, &cell.style)?;
-                active = Some(cell.style);
-            }
-            let mut buf = [0u8; 4];
-            out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
+            let pos = CellPos { col, row };
+            let cell = *frame.cell(pos).expect("cell within the frame's own grid");
+            active = write_cell(frame, pos, &cell, active, out)?;
         }
         // Erase anything the previous frame left beyond our last column.
         write!(out, "\x1b[K")?;
     }
     write!(out, "\x1b[0m")?;
     out.flush()
+}
+
+/// Write one cell, as a glyph or as the picture behind it.
+///
+/// A blank cell inside the image's area is where the picture shows through,
+/// and anything else is a glyph that wins over it. That is the whole of "the
+/// grid wins over the image", and putting it here rather than in a pass of
+/// its own is what makes a label appearing and a label going away the same
+/// event: both are a cell that changed, and the diff already writes those.
+///
+/// Returns the style now active, which is `None` after a placeholder,
+/// because a placeholder sets a foreground of its own.
+fn write_cell(
+    frame: &Frame,
+    pos: CellPos,
+    cell: &Cell,
+    active: Option<Style>,
+    out: &mut impl Write,
+) -> std::io::Result<Option<Style>> {
+    if cell.ch == ' '
+        && let Some(image) = frame.image()
+        && let Some((row, col)) = within(image.area, pos)
+    {
+        protocol::image_fg(out)?;
+        if protocol::placeholder(row, col, out)? {
+            return Ok(None);
+        }
+        // Past what the diacritic table can address. Fall through and write
+        // the blank, so the cell is at least the colour it should be.
+    }
+
+    let active = if active == Some(cell.style) {
+        active
+    } else {
+        write_style(out, &cell.style)?;
+        Some(cell.style)
+    };
+    let mut buf = [0u8; 4];
+    out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
+    Ok(active)
+}
+
+/// Where `pos` sits inside `area`, if it does at all.
+fn within(area: CellRect, pos: CellPos) -> Option<(u16, u16)> {
+    let row = pos.row.checked_sub(area.row).filter(|r| *r < area.rows)?;
+    let col = pos.col.checked_sub(area.col).filter(|c| *c < area.cols)?;
+    Some((row, col))
 }
 
 /// A steady vertical bar (DECSCUSR 6): a caret between two characters
@@ -110,10 +151,17 @@ impl Renderer {
     }
 
     pub fn render(&mut self, frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
-        let reusable = self
-            .last
-            .as_ref()
-            .is_some_and(|prev| prev.grid() == frame.grid());
+        // The image appearing, going away, or moving is a repaint for the
+        // same reason a changed grid is: the cells that show the picture
+        // through are decided per cell, and a diff only writes the cells
+        // that changed. Entering pixel mode over an already-blank page
+        // changes no cell, so without this nothing would lay the
+        // placeholders down and the picture would never appear. It happens
+        // on `p`, on a resize and on a switch, and never on a frame.
+        let area_of = |frame: &Frame| frame.image().map(|image| image.area);
+        let reusable = self.last.as_ref().is_some_and(|prev| {
+            prev.grid() == frame.grid() && area_of(prev) == area_of(frame)
+        });
 
         let wrote = if reusable {
             self.diff(frame, out)?
@@ -166,17 +214,10 @@ impl Renderer {
             return Ok(false);
         }
 
-        let moved = self.shown.map(|(_, area)| area) != Some(image.area);
         // One action: transmitting destroys the placement, so as two
         // sequences there is a window in which the cells on screen address
         // nothing, and that window is visible as flicker.
         protocol::transmit_and_place(&image.payload, image.area, out)?;
-        // Only when the area moved. A scroll re-renders the placeholders
-        // already on screen, which is what keeps a frame from costing a
-        // repaint.
-        if moved {
-            protocol::placeholders(image.area, out)?;
-        }
         self.shown = Some((image.generation, image.area));
         Ok(true)
     }
@@ -204,16 +245,11 @@ impl Renderer {
                 let mut active: Option<Style> = None;
                 while col < grid.cols {
                     let pos = CellPos { col, row };
-                    let cell = frame.cell(pos).expect("cell within the frame's own grid");
-                    if Some(cell) == prev.cell(pos) {
+                    let cell = *frame.cell(pos).expect("cell within the frame's own grid");
+                    if Some(&cell) == prev.cell(pos) {
                         break;
                     }
-                    if active != Some(cell.style) {
-                        write_style(out, &cell.style)?;
-                        active = Some(cell.style);
-                    }
-                    let mut buf = [0u8; 4];
-                    out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
+                    active = write_cell(frame, pos, &cell, active, out)?;
                     col += 1;
                 }
                 write!(out, "\x1b[0m")?;
@@ -280,6 +316,10 @@ mod tests {
             sent.contains(protocol::PLACEHOLDER),
             "the cells addressing it were written"
         );
+        assert!(
+            sent.contains("\x1b[38;2;119;119;116m"),
+            "carrying the image id as their foreground"
+        );
     }
 
     #[test]
@@ -324,6 +364,39 @@ mod tests {
         let sent = rendered(&mut renderer, &wider);
         assert!(sent.contains("c=8,r=4"), "re-placed at the new size");
         assert!(sent.contains(protocol::PLACEHOLDER), "and re-addressed");
+    }
+
+    #[test]
+    fn a_label_over_the_picture_is_a_glyph_and_the_rest_stay_placeholders() {
+        let mut renderer = Renderer::new();
+        rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+
+        let mut labelled = framed(Some(image_at(2, "AAAA")));
+        labelled.paint_text(
+            CellPos { col: 1, row: 1 },
+            "x",
+            Style::default(),
+        );
+        let sent = rendered(&mut renderer, &labelled);
+        assert!(sent.contains('x'), "the label was written");
+    }
+
+    #[test]
+    fn a_label_going_away_gives_its_cell_back_to_the_picture() {
+        // The bug this exists for: the diff wrote a space where the label
+        // had been, and nothing put the placeholder back, so leaving hint
+        // mode left a hole in the picture for every label that had been on
+        // it.
+        let mut renderer = Renderer::new();
+        let mut labelled = framed(Some(image_at(1, "AAAA")));
+        labelled.paint_text(CellPos { col: 1, row: 1 }, "x", Style::default());
+        rendered(&mut renderer, &labelled);
+
+        let sent = rendered(&mut renderer, &framed(Some(image_at(2, "AAAA"))));
+        assert!(
+            sent.contains(protocol::PLACEHOLDER),
+            "the cell the label had is picture again, not a blank"
+        );
     }
 
     #[test]
