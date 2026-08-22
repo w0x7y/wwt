@@ -141,32 +141,35 @@ down rather than assumed.
 
 Three escape sequences and one rule.
 
-**Transmit.** `a=t` (transmit without placing), `f=100` (PNG), `t=d` (payload is base64
-in the escape), `i=<id>`, and `m=1` on every chunk but the last. Chunks are 4096 bytes of
-payload. `q=2` on every sequence, which suppresses both the success and the error
-replies: a terminal answering into our stdin is a keystroke we would have to know to
-throw away.
+**Transmit and place, in one action.** `a=T` with `U=1`, `f=100` (PNG), `t=d` (payload
+is base64 in the escape), `i=<id>`, `p=1` naming the placement so it replaces itself, and
+`m=1` on every chunk but the last. Chunks are 4096 bytes of payload. `q=2` on every
+sequence, which suppresses both the success and the error replies: a terminal answering
+into our stdin is a keystroke we would have to know to throw away.
 
-**Place.** `a=p,U=1,i=<id>,c=<cols>,r=<rows>,q=2` creates a virtual placement, which is
-the placement unicode placeholders refer to.
+Not a transmission followed by a separate `a=p`. Transmitting to an id that already has a
+virtual placement destroys it, so as two sequences there is a window in which the cells
+on screen address nothing and show the terminal's background through the picture. At a
+scroll's frame rate that window is visible as flicker, and now and then as the whole
+image blinking out. This was found by running it, not by reading the protocol.
 
 **Paint.** The page area is filled with U+10EEEE, the foreground colour carrying the
-image id in its three bytes, and the row and column carried by combining diacritics from
-the protocol's table. A cell with no diacritics continues from the one before it, so
-only the first cell of each row spends them.
+image id in its three bytes, and **every cell carrying its own row and column** as
+combining diacritics from the protocol's table.
+
+Addressing only the first cell of each row and letting the rest continue from it is
+smaller and is wrong. A cell with no diacritics continues from the cell before it, so a
+hint label painted into the middle of a row orphans every placeholder after it and the
+picture tears from the label to the right edge. Overlays are the whole reason this design
+uses placeholders rather than placing the image directly, so surviving one is the
+requirement, not an optimisation to trade against. The cost is paid only when
+placeholders are written, which is on entering pixel mode, on a resize and on a switch,
+and never on a frame.
 
 **A new frame rewrites no cells.** The image id is fixed for the life of a pixel-mode
-session, so a frame is a transmission and a placement, and the placeholders already on
-screen re-render against the new data. Entering pixel mode, a resize and a tab switch
-write placeholders; scrolling a page does not. This is what keeps a pixel frame from
-costing a full repaint.
-
-The placement is not optional and is the part that had to be measured rather than
-assumed. Transmitting to an id that already has one destroys it: the picture vanishes
-and the placeholder cells show the terminal's background through where it was, because
-they are addressing a placement that is no longer there. Re-issuing `a=p` brings it back
-without a cell being touched, so the cost of a frame is two escape sequences rather than
-one, and still not a repaint.
+session, so a frame is one action and the placeholders already on screen re-render
+against the new data. Entering pixel mode, a resize and a tab switch write placeholders;
+scrolling a page does not. This is what keeps a pixel frame from costing a full repaint.
 
 ## 5. Detection and what happens without it
 

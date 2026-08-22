@@ -167,8 +167,10 @@ impl Renderer {
         }
 
         let moved = self.shown.map(|(_, area)| area) != Some(image.area);
-        protocol::transmit(&image.payload, out)?;
-        protocol::place(image.area, out)?;
+        // One action: transmitting destroys the placement, so as two
+        // sequences there is a window in which the cells on screen address
+        // nothing, and that window is visible as flicker.
+        protocol::transmit_and_place(&image.payload, image.area, out)?;
         // Only when the area moved. A scroll re-renders the placeholders
         // already on screen, which is what keeps a frame from costing a
         // repaint.
@@ -273,8 +275,7 @@ mod tests {
         let mut renderer = Renderer::new();
         let sent = rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
 
-        assert!(sent.contains("a=t,f=100"), "transmitted");
-        assert!(sent.contains("a=p,U=1"), "placed");
+        assert!(sent.contains("a=T,U=1"), "transmitted and placed at once");
         assert!(
             sent.contains(protocol::PLACEHOLDER),
             "the cells addressing it were written"
@@ -291,7 +292,7 @@ mod tests {
 
         let sent = rendered(&mut renderer, &framed(Some(image_at(2, "BBBB"))));
         assert!(sent.contains("BBBB"), "the new data went out");
-        assert!(sent.contains("a=p,U=1"), "and was placed again");
+        assert!(sent.contains("a=T,U=1"), "and was placed again in the same breath");
         assert!(
             !sent.contains(protocol::PLACEHOLDER),
             "but no cell was rewritten"
@@ -321,7 +322,7 @@ mod tests {
         wider.set_image(Some(image));
 
         let sent = rendered(&mut renderer, &wider);
-        assert!(sent.contains("a=p,U=1"), "re-placed at the new size");
+        assert!(sent.contains("c=8,r=4"), "re-placed at the new size");
         assert!(sent.contains(protocol::PLACEHOLDER), "and re-addressed");
     }
 
@@ -356,7 +357,7 @@ mod tests {
         renderer.invalidate();
 
         let sent = rendered(&mut renderer, &frame);
-        assert!(sent.contains("a=t,f=100"), "transmitted again");
+        assert!(sent.contains("a=T,U=1"), "transmitted and placed again");
         assert!(sent.contains(protocol::PLACEHOLDER), "and addressed again");
     }
 
