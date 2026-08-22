@@ -129,13 +129,18 @@ shows up later as a picture that never moves rather than as an error.
 paints and not on a clock, so the rule that an idle page costs ~zero CPU survives pixel
 mode, and no tick loop appears anywhere.
 
-**The frame rate limit has to be re-measured here.** `--disable-frame-rate-limit` was
-added in M2 because headless otherwise paces frames at the display rate and a scroll was
-not visible to the page until the next one. `CLAUDE.md` records that it is free only
-while nobody is asking the compositor for frames, and M5 is exactly the milestone that
-starts asking. The implementation measures pixel-mode CPU on an animated page with the
-flag and without it, and whichever way that goes, the answer and its number are written
-down rather than assumed.
+**The frame rate is set by holding the ack back.** `--disable-frame-rate-limit` was added
+in M2 because headless otherwise paces frames at the display rate and a scroll was not
+visible to the page until the next one. `CLAUDE.md` records that it is free only while
+nobody is asking the compositor for frames, and M5 is exactly the milestone that starts
+asking: on an animated page the compositor outruns what a terminal can decode, and the
+picture flickers.
+
+The flag stays. Instead the ack is held back for `FRAME_INTERVAL`, which sets the rate
+using the flow control the protocol already has, since Chromium sends the next frame only
+once the last is answered. Nothing polls, nothing is buffered, and a still page produces
+no frames and pays nothing. Throttling what we ask for is cheaper than giving up a
+scroll's latency in text mode, which is the mode wwt is in almost always.
 
 ## 4. The image on the way out
 
@@ -302,6 +307,15 @@ terminal is, and what cannot is honest about needing one.
    an old one. M5 does not touch the snapshot, so it does not have to answer this; the
    milestone that first adds a field does, and the answer is probably to accept anything
    at or below `VERSION` and let serde default what is missing.
-3. **Animated pages.** An uncapped compositor and a page playing video is the worst case
-   for this design, and `everyNthFrame` is the knob nobody has turned yet. Section 3's
-   measurement is what decides whether it needs turning.
+3. ~~**Animated pages.**~~ **Closed, 2026-08-22.** It needed turning, and observation
+   answered it before any measurement did: on a page that animates, an uncapped
+   compositor produces frames faster than the terminal can decode a full-page PNG, and
+   the picture visibly flickers. A still page is steady, which is what told us the rate
+   was the cause.
+
+   The knob is not `everyNthFrame`, which is a fraction of an unbounded rate and so is
+   still unbounded. It is the ack: Chromium sends the next frame only once the last is
+   answered, so holding the ack back for `FRAME_INTERVAL` sets the rate using the
+   protocol's own flow control, with nothing polling and nothing buffered.
+   `--disable-frame-rate-limit` stays, because M2's scroll latency in text mode rests on
+   it and throttling our own asking is the cheaper half of that trade.

@@ -41,6 +41,21 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 /// would be a syscall per frame for a file nobody reads until the next launch.
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
+/// The shortest gap between two pictures of a page.
+///
+/// Chromium sends the next screencast frame only once the last is acked, so
+/// holding the ack back is how the rate is set: the flow control is the
+/// protocol's own and there is no timer polling anything.
+///
+/// It has to be set at all because `--disable-frame-rate-limit` means a page
+/// that animates paints as fast as the compositor can go, and every one of
+/// those frames is a full-page PNG down the pty for the terminal to decode.
+/// Unthrottled, an animation outruns the terminal and the picture visibly
+/// flickers; a still page produces no frames and pays nothing either way.
+/// The flag stays, because M2's scroll latency in text mode rests on it and
+/// this is the cheaper half of the trade.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
 /// What arrives on the loop's one result channel.
 ///
 /// Most of it is a `Job` on its way to the session unchanged. A target that
@@ -93,6 +108,8 @@ pub struct Core {
     session_file: Option<PathBuf>,
     /// The most recent snapshot not yet written.
     pending: Option<Snapshot>,
+    /// When the next picture may be asked for. See `FRAME_INTERVAL`.
+    framed_at: Instant,
 }
 
 /// What the browser starts as.
@@ -134,6 +151,7 @@ impl Core {
             input,
             session_file: startup.session_file,
             pending: None,
+            framed_at: Instant::now(),
         }
     }
 
@@ -455,15 +473,24 @@ impl Core {
                     None
                 }),
 
-                Effect::AckFrame(id, ack) => self.spawn(id, move |page| async move {
-                    // A failed ack stops the screencast, which shows up as a
-                    // picture that stopped moving rather than as an error,
-                    // so it is worth naming.
-                    page.ack_frame(ack)
-                        .await
-                        .err()
-                        .map(|e| Job::Noted(id, e.to_string()))
-                }),
+                Effect::AckFrame(id, ack) => {
+                    // Ask for the next picture no sooner than the terminal
+                    // can absorb this one. Waiting happens in the spawned
+                    // task, never in the loop, so keys stay answered while
+                    // the screencast is being held back.
+                    let earliest = self.framed_at + FRAME_INTERVAL;
+                    self.framed_at = Instant::now().max(earliest);
+                    self.spawn(id, move |page| async move {
+                        sleep_until(earliest).await;
+                        // A failed ack stops the screencast, which shows up
+                        // as a picture that stopped moving rather than as an
+                        // error, so it is worth naming.
+                        page.ack_frame(ack)
+                            .await
+                            .err()
+                            .map(|e| Job::Noted(id, e.to_string()))
+                    });
+                }
 
                 Effect::SetViewport(id, vp) => {
                     // A diff against a frame of different dimensions is
