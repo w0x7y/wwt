@@ -294,6 +294,9 @@ impl Session {
         // has taken its index, which is where the eye already is.
         self.focus = index.min(self.tabs.len() - 1);
         let id = self.focused_id();
+        // No stop for the tab that went: it is being closed, and its target
+        // goes with it.
+        self.follow_focus(None, effects);
         effects.push(Effect::Activate(id));
         self.start_extract(id, effects);
     }
@@ -307,8 +310,10 @@ impl Session {
         if index >= self.tabs.len() || index == self.focus {
             return;
         }
+        let leaving = self.focused_id();
         self.focus = index;
         let id = self.focused_id();
+        self.follow_focus(Some(leaving), effects);
         // The browser's foreground and ours have to be the same target, or
         // input lands on the page you just left.
         effects.push(Effect::Activate(id));
@@ -378,6 +383,23 @@ impl Session {
             self.picture = None;
             effects.push(Effect::StopScreencast(id));
         }
+    }
+
+    /// Move the screencast to whatever tab is focused now.
+    ///
+    /// Called wherever the focus changes or the viewport does, and does
+    /// nothing at all in text mode. The picture is deliberately not
+    /// cleared: a switch in pixel mode is a round trip, and the previous
+    /// picture under the new tab's chrome is what "never blank the frame
+    /// you are looking at" means here.
+    fn follow_focus(&mut self, leaving: Option<TabId>, effects: &mut Vec<Effect>) {
+        if !self.pixel {
+            return;
+        }
+        if let Some(leaving) = leaving {
+            effects.push(Effect::StopScreencast(leaving));
+        }
+        effects.push(Effect::StartScreencast(self.focused_id()));
     }
 
     /// Say something in the statusline.
@@ -506,7 +528,14 @@ impl Session {
 
     fn run_action(&mut self, action: Action, effects: &mut Vec<Effect>) {
         match action {
-            Action::Quit => effects.push(Effect::Quit),
+            Action::Quit => {
+                // Stop before quitting, so the browser is not left painting
+                // for a terminal that has gone.
+                if self.pixel {
+                    effects.push(Effect::StopScreencast(self.focused_id()));
+                }
+                effects.push(Effect::Quit);
+            }
             Action::TogglePixel => self.set_pixel(!self.pixel, effects),
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
@@ -754,6 +783,20 @@ impl Session {
         for tab in &self.tabs {
             effects.push(Effect::SetViewport(tab.id, self.vp));
         }
+
+        // Whatever picture is still up covers the page area it has now, or
+        // the placeholders would address a placement of the wrong shape
+        // until the next frame lands. A new generation with it, because the
+        // renderer diffs on that and this image has to be placed again.
+        if let Some(image) = &mut self.picture {
+            self.generations += 1;
+            image.generation = self.generations;
+            image.area = CellRect::of(self.vp.grid(), self.vp.origin_row());
+        }
+        // The same tab, restarted at the new size: a screencast is started
+        // with a viewport and does not learn about a later one.
+        let focused = self.focused_id();
+        self.follow_focus(Some(focused), effects);
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
@@ -2204,6 +2247,119 @@ mod tests {
         typed(&mut session, ":set pixel on");
         session.on(code(KeyCode::Enter));
         assert!(!session.pixel);
+    }
+
+    #[test]
+    fn switching_tabs_moves_the_screencast_with_the_focus() {
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+        let leaving = session.focused_id();
+
+        // Alt and a digit, which is how a tab is reached: the bare number
+        // row is kept for the count prefix a vim-like puts on it.
+        let effects = session.on(alt('1'));
+        let arriving = session.focused_id();
+        assert_ne!(leaving, arriving);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::StopScreencast(id) if *id == leaving))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::StartScreencast(id) if *id == arriving))
+        );
+    }
+
+    #[test]
+    fn switching_tabs_in_text_mode_asks_for_no_screencast() {
+        // The whole helper is a no-op in text mode, or every switch would
+        // start a screencast nobody asked for.
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+
+        let effects = session.on(alt('1'));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::StartScreencast(_) | Effect::StopScreencast(_)))
+        );
+    }
+
+    #[test]
+    fn the_previous_picture_stays_up_until_the_new_tabs_first_frame() {
+        // Never blank the frame you are looking at. A switch in pixel mode
+        // is a round trip, and until it lands the old picture under the new
+        // tab's chrome is better than nothing at all.
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+        session.on(frame_for(session.focused_id(), "OLD"));
+
+        session.on(alt('1'));
+        assert_eq!(
+            session.compose().image().map(|i| i.payload.as_str()),
+            Some("OLD"),
+            "the picture stands until a new one arrives"
+        );
+    }
+
+    #[test]
+    fn a_resize_restarts_the_screencast_at_the_new_size() {
+        // A screencast is started with a viewport and does not learn about a
+        // later one, so the same tab has to be stopped and started again.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let effects = session.on(Event::Resized(
+            GridSize { cols: 100, rows: 30 },
+            CellSize { w: 9, h: 20 },
+        ));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StopScreencast(_))));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(_))));
+    }
+
+    #[test]
+    fn a_resize_moves_the_picture_to_the_area_it_now_covers() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+        session.on(Event::Resized(
+            GridSize { cols: 100, rows: 30 },
+            CellSize { w: 9, h: 20 },
+        ));
+
+        let composed = session.compose();
+        let image = composed.image().expect("the picture is still up");
+        assert_eq!(image.area.cols, 100);
+        assert_eq!(image.area.rows, 30 - CHROME_ROWS);
+    }
+
+    #[test]
+    fn quitting_from_pixel_mode_stops_the_screencast_first() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let effects = session.on(key('q'));
+        let stopped = effects
+            .iter()
+            .position(|e| matches!(e, Effect::StopScreencast(_)));
+        let quit = effects.iter().position(|e| matches!(e, Effect::Quit));
+        assert!(stopped.is_some(), "the browser is not left painting");
+        assert!(stopped < quit, "and it is stopped before the loop ends");
+    }
+
+    #[test]
+    fn closing_the_focused_tab_moves_the_screencast_to_the_next_one() {
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+
+        let effects = session.on(key('x'));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(_))));
+        // Nothing is stopped: the tab is being closed and its target goes
+        // with it.
+        assert!(!effects.iter().any(|e| matches!(e, Effect::StopScreencast(_))));
     }
 
     // Switching.
