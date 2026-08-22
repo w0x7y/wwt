@@ -113,9 +113,17 @@ the ack must quote back. It is called `sessionId` in the protocol and it is not 
 session id; this document and the code call it the **ack id**, because `wwt-cdp` already
 means something else by session and a third meaning would make the glossary useless.
 
-**A late frame is dropped, never queued.** If a frame arrives while one is still on its
-way to the terminal, the older is discarded and only the newest is written. Acks are not
-dropped: a frame that is not drawn is still acked, or Chromium stops sending.
+**At most one frame is ever in flight, so nothing coalesces.** Chromium sends the next
+frame only once the last is acked, which means the ack is the backpressure and there is
+no queue to drain. A buffer here would be machinery guarding a case the protocol already
+prevents. If a page ever does outrun the loop, the knob is `everyNthFrame` on the
+screencast rather than a buffer: a frame we have already been sent has cost us the frame
+either way.
+
+**A frame is acked whatever becomes of it.** One that arrives for a tab you have
+switched away from, or after pixel mode was left, is answered and discarded. Chromium
+counts acks and not paints, so a frame dropped without one stops the screencast, and it
+shows up later as a picture that never moves rather than as an error.
 
 **An idle page still costs nothing.** Chromium emits a screencast frame when the page
 paints and not on a clock, so the rule that an idle page costs ~zero CPU survives pixel
@@ -247,7 +255,7 @@ Section 8 of the parent spec holds throughout: never blank the frame you are loo
 | A frame arrives for a tab that is not focused | Acked and dropped. Focus moved while it was in flight. |
 | A frame arrives for a tab that is gone | Dropped, like every other job naming a closed tab. |
 | Writing the image to stdout fails | The same failure any render has: reported, and the next frame tries again. |
-| A frame arrives while pixel mode is off | Acked and dropped. Stopping is not instant and a frame in flight is normal. |
+| A frame arrives while pixel mode is off | Acked and dropped. Stopping is not instant, and one frame in flight is the most there can be. |
 | The terminal is resized mid-transmission | The chunks in flight finish, the image is deleted and retransmitted at the new size. |
 
 ## 11. Testing
