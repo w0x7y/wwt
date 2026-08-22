@@ -11,6 +11,12 @@ use wwt_frame::Viewport;
 
 use crate::extract::Page;
 
+/// The CDP event a picture arrives as.
+///
+/// Exposed so a caller can ask the cheap question first: one string compare
+/// against the method, before iterating every page to ask whose it is.
+pub const SCREENCAST_FRAME: &str = "Page.screencastFrame";
+
 /// One picture of a page, on its way to the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreencastFrame {
@@ -81,7 +87,7 @@ impl Page {
     /// subscription.
     pub fn screencast_frame(&self, event: &Event) -> Option<ScreencastFrame> {
         if event.session_id.as_deref() != Some(self.session_id())
-            || event.method != "Page.screencastFrame"
+            || event.method != SCREENCAST_FRAME
         {
             return None;
         }

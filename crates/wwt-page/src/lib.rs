@@ -5,4 +5,4 @@ pub mod screencast;
 
 pub use extract::{DIRTY_BINDING, Extraction, Page};
 pub use input::{Input, KeyInput, MouseAction, MouseInput};
-pub use screencast::ScreencastFrame;
+pub use screencast::{SCREENCAST_FRAME, ScreencastFrame};

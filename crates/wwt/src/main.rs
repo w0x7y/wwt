@@ -68,6 +68,11 @@ async fn main() -> Result<()> {
         _ => (None, None),
     };
 
+    // Asked before raw mode, before the alternate screen and before the
+    // first paint: the one moment stdin belongs to nobody. After the input
+    // pump exists, the terminal's reply would arrive as a keystroke.
+    let graphics = wwt_term::graphics::detect::query(wwt_term::graphics::detect::WINDOW);
+
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
     // Its own call, because a terminal that refuses mouse capture is still a
@@ -83,6 +88,7 @@ async fn main() -> Result<()> {
             snapshot,
             open: url,
             session_file,
+            graphics,
         },
     );
     // The statusline holds one notice, so the last of these is the one you

@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use wwt::effect::{Effect, Navigation};
 use wwt::event::{Event, Job};
 use wwt::session::{Session, page_viewport};
+use wwt::tab::TabId;
 use wwt_cdp::{Chromium, Client};
 use wwt_frame::{CellSize, Frame, GridSize};
 use wwt_page::{Input, Page};
@@ -84,6 +85,70 @@ async fn text_lands_in_the_first_row_the_page_owns() {
 /// command line, typing fills it, and Enter turns it into a navigation the
 /// loop would perform. The session is the thing under test, not a
 /// hand-rolled imitation of it.
+/// A real picture of a real page, all the way to a composed frame.
+///
+/// The one path this exercises that no other test does is the predicate the
+/// loop routes on: `screencast_frame` decides whose picture an event is, and
+/// only then does the session turn it into an image. Everything between a
+/// browser painting and a terminal being handed bytes is here, except the
+/// `select!` arm itself.
+#[tokio::test]
+async fn a_real_screencast_frame_becomes_the_picture_on_a_frame() {
+    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
+    client.auto_attach().await.expect("turn on auto-attach");
+
+    let page = Page::open(
+        Arc::clone(&client),
+        &fixture_url("skeleton.html"),
+        page_viewport(GRID, CELL),
+    )
+    .await
+    .expect("open the fixture");
+    page.activate().await.expect("bring it to the front");
+
+    let mut events = client.subscribe();
+    page.start_screencast(page_viewport(GRID, CELL))
+        .await
+        .expect("start the screencast");
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("the browser is still there");
+            if let Some(frame) = page.screencast_frame(&event) {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("a frame within ten seconds");
+
+    let mut session = Session::new(GRID, CELL);
+    session.set_graphics(true);
+    session.on(Event::Key(key('p')));
+    let effects = session.on(Event::Frame(TabId(0), Box::new(frame)));
+
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::AckFrame(_, _))),
+        "the picture is answered, or the next one never comes"
+    );
+
+    let composed = session.compose();
+    let image = composed.image().expect("pixel mode composes an image");
+    assert!(
+        image.payload.starts_with("iVBOR"),
+        "a real frame is base64 PNG and stays that way"
+    );
+    // The page does not start at the top of the screen: the tab bar has the
+    // first row and the statusline the last.
+    assert_eq!(image.area.row, 1);
+    assert_eq!(image.area.rows, GRID.rows - 2);
+
+    page.stop_screencast().await.expect("stop");
+}
+
 #[test]
 fn the_command_line_opens_fills_and_closes() {
     let mut session = Session::new(GridSize { cols: 40, rows: 3 }, CellSize { w: 9, h: 20 });

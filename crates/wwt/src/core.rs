@@ -105,6 +105,10 @@ pub struct Startup {
     /// Where the session file goes, or `None` when this instance does not
     /// own it.
     pub session_file: Option<PathBuf>,
+    /// Whether the terminal answered that it can show a picture. Asked once,
+    /// before raw mode, because after the input pump exists a reply would be
+    /// a keystroke.
+    pub graphics: bool,
 }
 
 impl Core {
@@ -115,7 +119,9 @@ impl Core {
     pub fn new(client: Arc<Client>, startup: Startup) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         let input = InputPump::spawn(jobs_tx.clone());
-        let session = Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
+        let mut session =
+            Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
+        session.set_graphics(startup.graphics);
 
         Self {
             pages: HashMap::new(),
@@ -188,8 +194,22 @@ impl Core {
                 // Two questions of one event, in this order: a target we
                 // never asked for belongs to no page yet, so asking the pages
                 // about it first would only ever answer no.
+                // Three questions of one event, cheapest first. A target we
+                // never asked for belongs to no page yet, so asking the
+                // pages about it first would only ever answer no. Then the
+                // method name, which is one string compare, before
+                // iterating every page to ask whose picture this is: in
+                // pixel mode a frame is much the most frequent event there
+                // is, and every other event would pay for that walk.
                 Some(event) = cdp.recv() => match Client::opened_by_a_page(&event) {
                     Some(attached) => Some(Incoming::Event(Event::TargetOpened(attached))),
+                    None if event.method == wwt_page::SCREENCAST_FRAME => self
+                        .pages
+                        .iter()
+                        .find_map(|(id, page)| {
+                            page.screencast_frame(&event)
+                                .map(|frame| Incoming::Event(Event::Frame(*id, Box::new(frame))))
+                        }),
                     None => self
                         .pages
                         .iter()
