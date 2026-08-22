@@ -228,6 +228,13 @@ impl Page {
     /// foreground, so switching tabs without this would leave clicks landing
     /// on the page you just left. M5's screencast will want the same
     /// guarantee.
+    /// This page's client, for the sibling modules that make calls of
+    /// their own. Crate-visible rather than public: a `Page` is the handle,
+    /// and the browser behind it is nobody else's business.
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
+
     pub async fn activate(&self) -> Result<()> {
         self.client
             .call(

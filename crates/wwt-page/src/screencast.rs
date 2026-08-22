@@ -1,0 +1,93 @@
+//! Asking a page for a picture of itself, repeatedly.
+//!
+//! Four calls and a predicate. Nothing here decodes anything: a frame's data
+//! arrives base64 and leaves base64, which is why pixel mode costs no
+//! dependency.
+
+use anyhow::{Context, Result};
+use serde_json::json;
+use wwt_cdp::Event;
+use wwt_frame::Viewport;
+
+use crate::extract::Page;
+
+/// One picture of a page, on its way to the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreencastFrame {
+    /// Base64 PNG, exactly as CDP sent it and exactly as the graphics
+    /// protocol wants it.
+    pub data: String,
+    /// What the ack must quote back.
+    ///
+    /// CDP calls this field `sessionId` and it is not a CDP session id: it
+    /// counts screencasts on one target. `wwt-cdp` already means something
+    /// else by session, so this is the ack id.
+    pub ack: i64,
+}
+
+impl Page {
+    /// Start sending pictures of this page, at the size it is already laid
+    /// out for.
+    ///
+    /// PNG rather than JPEG: a lossy picture of text is the one thing a
+    /// browser in a terminal must not produce, and both ends of this
+    /// pipeline already speak PNG.
+    pub async fn start_screencast(&self, vp: Viewport) -> Result<()> {
+        self.client()
+            .call_on(
+                self.session_id(),
+                "Page.startScreencast",
+                json!({
+                    "format": "png",
+                    "maxWidth": vp.css_width(),
+                    "maxHeight": vp.css_height(),
+                    "everyNthFrame": 1,
+                }),
+            )
+            .await
+            .context("start the screencast")?;
+        Ok(())
+    }
+
+    pub async fn stop_screencast(&self) -> Result<()> {
+        self.client()
+            .call_on(self.session_id(), "Page.stopScreencast", json!({}))
+            .await
+            .context("stop the screencast")?;
+        Ok(())
+    }
+
+    /// Tell the page the frame arrived.
+    ///
+    /// Not optional and not batchable: Chromium sends the next frame only
+    /// after the last one is acked, so a dropped ack is a screencast that
+    /// stops after exactly one picture.
+    pub async fn ack_frame(&self, ack: i64) -> Result<()> {
+        self.client()
+            .call_on(
+                self.session_id(),
+                "Page.screencastFrameAck",
+                json!({ "sessionId": ack }),
+            )
+            .await
+            .context("ack the screencast frame")?;
+        Ok(())
+    }
+
+    /// Whether a CDP event is a picture of this page, and what is in it.
+    ///
+    /// The session id is half the question, exactly as it is for the dirty
+    /// signal: one browser serves every page and they all report on one
+    /// subscription.
+    pub fn screencast_frame(&self, event: &Event) -> Option<ScreencastFrame> {
+        if event.session_id.as_deref() != Some(self.session_id())
+            || event.method != "Page.screencastFrame"
+        {
+            return None;
+        }
+        Some(ScreencastFrame {
+            data: event.params["data"].as_str()?.to_string(),
+            ack: event.params["sessionId"].as_i64()?,
+        })
+    }
+}
