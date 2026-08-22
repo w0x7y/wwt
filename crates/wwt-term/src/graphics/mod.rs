@@ -6,3 +6,4 @@
 //! terminal anywhere.
 
 pub mod diacritics;
+pub mod protocol;
