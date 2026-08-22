@@ -7,7 +7,7 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 use wwt_cdp::Attached;
 use wwt_frame::{CellSize, GridSize, HintTarget};
-use wwt_page::Extraction;
+use wwt_page::{Extraction, ScreencastFrame};
 
 use crate::tab::TabId;
 
@@ -22,6 +22,12 @@ pub enum Event {
     /// A page says it changed under us. Which page matters: one browser
     /// serves all of them and they all report on one subscription.
     Dirty(TabId),
+    /// A picture of a page. Which page matters for the same reason a dirty
+    /// signal's does: one browser serves all of them.
+    ///
+    /// Boxed because an `Event` is moved on every keystroke and a frame's
+    /// payload is much the largest thing that can be in one.
+    Frame(TabId, Box<ScreencastFrame>),
     /// A page opened a tab for itself. The session has to make room for it
     /// before it can be prepared, because ids are minted on that side.
     TargetOpened(Attached),

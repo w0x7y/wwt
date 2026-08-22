@@ -48,6 +48,9 @@ pub enum Action {
     /// does nothing: the tenth tab is reachable and a tenth key is not.
     TabAt(usize),
 
+    /// Swap between showing the page as text and as a picture.
+    TogglePixel,
+
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
 }
@@ -124,6 +127,7 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('H') => Some(Action::Back),
         KeyCode::Char('L') => Some(Action::Forward),
         KeyCode::Char('f') => Some(Action::Hints),
+        KeyCode::Char('p') => Some(Action::TogglePixel),
         KeyCode::Char('i') => Some(Action::Insert),
         KeyCode::Char(':') => Some(Action::EnterCommand(String::new())),
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),

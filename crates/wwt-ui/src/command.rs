@@ -10,6 +10,8 @@ pub enum Setting {
     /// Terminal mouse capture. Off hands text selection back to terminals
     /// that do not give it to you with shift held.
     Mouse(bool),
+    /// Show the page as a picture of itself rather than as its runs.
+    Pixel(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +65,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 ("mouse", "on") => Ok(Command::Set(Setting::Mouse(true))),
                 ("mouse", "off") => Ok(Command::Set(Setting::Mouse(false))),
                 ("mouse", other) => Err(format!("set mouse takes on or off, not {other:?}")),
+                ("pixel", "on") => Ok(Command::Set(Setting::Pixel(true))),
+                ("pixel", "off") => Ok(Command::Set(Setting::Pixel(false))),
+                ("pixel", other) => Err(format!("set pixel takes on or off, not {other:?}")),
                 (other, _) => Err(format!("unknown setting: {other}")),
             }
         }

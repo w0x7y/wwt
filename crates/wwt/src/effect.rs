@@ -53,6 +53,13 @@ pub enum Effect {
     /// cheap and asking on every scroll frame is what keeps a crash from
     /// costing you your place.
     Save(Snapshot),
+    /// Start sending pictures of this tab. Only ever the focused one: a
+    /// background tab is idle, which is the rule extraction already follows.
+    StartScreencast(TabId),
+    StopScreencast(TabId),
+    /// Tell the page a picture arrived, so it sends the next one. Carries
+    /// the ack id from the frame, which is not a CDP session id.
+    AckFrame(TabId, i64),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

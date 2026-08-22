@@ -17,9 +17,9 @@
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_cdp::Attached;
 use wwt_frame::{
-    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
+    CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, TargetKind, Viewport,
 };
-use wwt_page::{Input, MouseInput};
+use wwt_page::{Input, MouseInput, ScreencastFrame};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
@@ -51,6 +51,24 @@ pub struct Session {
     /// Never reused, which is what makes a job from a closed tab safe to
     /// drop rather than plausible to paint.
     next_id: u32,
+
+    /// Whether the terminal can show a picture at all, asked once at
+    /// startup. A session told no refuses pixel mode rather than emitting
+    /// escapes into a terminal that would print them as text.
+    graphics: bool,
+    /// Global rather than per-tab: only the focused tab screencasts either
+    /// way, so per-tab would buy a preference rather than a cost, and it
+    /// would have to be remembered in the session file, which is a snapshot
+    /// version bump and a rejected file for everyone who upgrades.
+    pixel: bool,
+    /// The picture last received for the focused tab.
+    ///
+    /// Not on `Tab`: a background tab does not screencast, so there is never
+    /// a second one to hold.
+    picture: Option<Image>,
+    /// Counts pictures. The renderer diffs on this rather than on the
+    /// payload, so two frames that encode identically are still two frames.
+    generations: u64,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -101,6 +119,10 @@ impl Session {
             tabs: Vec::new(),
             focus: 0,
             next_id: 0,
+            graphics: false,
+            pixel: false,
+            picture: None,
+            generations: 0,
         }
     }
 
@@ -326,6 +348,38 @@ impl Session {
         effects
     }
 
+    /// Tell the session whether the terminal can show a picture.
+    ///
+    /// Asked once at startup, before raw mode, and never again.
+    pub fn set_graphics(&mut self, graphics: bool) {
+        self.graphics = graphics;
+    }
+
+    /// Enter or leave pixel mode.
+    ///
+    /// Refusing is a notice and nothing else: the mode does not change and
+    /// the frame you are looking at stands, per section 8 of the parent
+    /// spec. Half-block would have been the third answer here and is M6's.
+    fn set_pixel(&mut self, on: bool, effects: &mut Vec<Effect>) {
+        if on && !self.graphics {
+            self.notice("pixel mode needs a terminal that can show images");
+            return;
+        }
+        if on == self.pixel {
+            return;
+        }
+        self.pixel = on;
+        let id = self.focused_id();
+        if on {
+            effects.push(Effect::StartScreencast(id));
+        } else {
+            // The picture goes with the mode, so the next compose carries
+            // none and the renderer deletes it from the terminal.
+            self.picture = None;
+            effects.push(Effect::StopScreencast(id));
+        }
+    }
+
     /// Say something in the statusline.
     pub fn notice(&mut self, message: &str) {
         self.focused_mut().state = State::Notice(message.to_string());
@@ -347,7 +401,15 @@ impl Session {
     pub fn compose(&self) -> Frame {
         let mut frame = Frame::new(self.grid);
         let tab = self.focused();
-        frame.paint_runs(&self.vp, &tab.runs);
+
+        // The picture is the page. Painting runs underneath would show text
+        // through every cell the image does not cover, and in pixel mode
+        // that is every cell of the page.
+        if self.pixel {
+            frame.set_image(self.picture.clone());
+        } else {
+            frame.paint_runs(&self.vp, &tab.runs);
+        }
 
         // After the page and before the chrome: labels cover the text they
         // point at, which is what makes them readable, and the chrome still
@@ -367,6 +429,7 @@ impl Session {
                 progress: tab.progress,
                 titles: &titles,
                 focus: self.focus,
+                pixel: self.pixel,
             },
         );
 
@@ -374,6 +437,11 @@ impl Session {
         // insertion point. Splitting that between here and the chrome would
         // leave the two exclusive only by accident of paint order.
         frame.set_cursor(match &self.mode {
+            // In pixel mode the page drew its own caret into the picture,
+            // so placing ours on top of it is two carets disagreeing about
+            // where the insertion point is. The command line keeps its own:
+            // it is painted into a chrome row, which no image ever covers.
+            Mode::Insert if self.pixel => None,
             // A page can focus a field without your asking, and a caret
             // there would promise that your typing lands in it when in
             // normal mode it does not.
@@ -397,10 +465,36 @@ impl Session {
                 }
                 self.start_extract(id, &mut effects);
             }
+            Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
             Event::Done(job) => self.on_job(job, &mut effects),
         }
         effects
+    }
+
+    /// A picture arrived.
+    ///
+    /// Acked whatever becomes of it: Chromium sends the next only once this
+    /// one is answered, so a frame we drop still has to be answered or the
+    /// screencast stops with nothing to say it did. A tab that is gone is
+    /// the one exception, because there is nothing left to answer.
+    fn on_frame(&mut self, id: TabId, frame: ScreencastFrame, effects: &mut Vec<Effect>) {
+        if !self.tabs.iter().any(|tab| tab.id == id) {
+            return;
+        }
+        effects.push(Effect::AckFrame(id, frame.ack));
+
+        // A frame for a tab you have switched away from, or one that was in
+        // flight when pixel mode was left, is answered and discarded.
+        if !self.pixel || self.focused_id() != id {
+            return;
+        }
+        self.generations += 1;
+        self.picture = Some(Image {
+            generation: self.generations,
+            payload: frame.data,
+            area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
+        });
     }
 
     fn on_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
@@ -413,6 +507,7 @@ impl Session {
     fn run_action(&mut self, action: Action, effects: &mut Vec<Effect>) {
         match action {
             Action::Quit => effects.push(Effect::Quit),
+            Action::TogglePixel => self.set_pixel(!self.pixel, effects),
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
             Action::Hints => match self.focused().hints.clone() {
@@ -544,6 +639,7 @@ impl Session {
                 self.focused_mut().state =
                     State::Notice(if on { "mouse on" } else { "mouse off" }.to_string());
             }
+            Command::Set(Setting::Pixel(on)) => self.set_pixel(on, effects),
             // Handled by the caller.
             Command::Quit => {}
         }
@@ -1881,6 +1977,233 @@ mod tests {
             style: Style { fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, bold: false, reverse: false },
             z: 0,
         }
+    }
+
+    // Pixel mode.
+
+    /// A ready session on a terminal that can show pictures.
+    fn ready_with_graphics() -> Session {
+        let mut session = ready();
+        session.set_graphics(true);
+        session
+    }
+
+    fn frame_data(payload: &str) -> Event {
+        frame_for(tab0(), payload)
+    }
+
+    fn frame_for(id: TabId, payload: &str) -> Event {
+        Event::Frame(
+            id,
+            Box::new(ScreencastFrame {
+                data: payload.to_string(),
+                ack: 7,
+            }),
+        )
+    }
+
+    #[test]
+    fn p_turns_pixel_mode_on_and_asks_for_pictures() {
+        let mut session = ready_with_graphics();
+        let effects = session.on(key('p'));
+        assert!(session.pixel);
+        assert!(matches!(effects.as_slice(), [Effect::StartScreencast(_)]));
+    }
+
+    #[test]
+    fn p_again_turns_it_off_and_stops_them() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let effects = session.on(key('p'));
+        assert!(!session.pixel);
+        assert!(matches!(effects.as_slice(), [Effect::StopScreencast(_)]));
+    }
+
+    #[test]
+    fn p_without_a_terminal_that_can_show_pictures_is_a_notice() {
+        // Never blank the frame you are looking at, and never emit escapes
+        // a terminal cannot read. Section 5 of the M5 spec.
+        let mut session = ready();
+        let effects = session.on(key('p'));
+        assert!(!session.pixel);
+        assert!(effects.is_empty());
+        assert!(matches!(session.state(), State::Notice(_)), "it says why");
+    }
+
+    #[test]
+    fn a_frame_becomes_the_image_on_the_next_compose() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+
+        let frame = session.compose();
+        let image = frame.image().expect("pixel mode composes an image");
+        assert_eq!(image.payload, "AAAA");
+        assert_eq!(image.area.row, 1, "the page starts below the tab bar");
+    }
+
+    #[test]
+    fn every_frame_is_acked_so_the_next_one_comes() {
+        // Chromium sends the next only once the last is acked.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let effects = session.on(frame_data("AAAA"));
+        assert!(effects.iter().any(|e| matches!(e, Effect::AckFrame(_, 7))));
+    }
+
+    #[test]
+    fn a_frame_for_a_tab_that_is_not_focused_is_acked_and_dropped() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        open_two_more(&mut session);
+        let background = tab0();
+
+        let effects = session.on(frame_for(background, "BBBB"));
+        assert!(effects.iter().any(|e| matches!(e, Effect::AckFrame(_, 7))));
+        assert!(
+            session.compose().image().is_none_or(|i| i.payload != "BBBB"),
+            "the tab you are not looking at does not paint"
+        );
+    }
+
+    #[test]
+    fn a_frame_is_acked_even_when_pixel_mode_has_already_been_left() {
+        // Stopping is not instant: the frame in flight when p was pressed
+        // still arrives. Failing to answer it leaves the screencast stopped
+        // in a way that only shows up as a picture that never moves.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(key('p'));
+
+        let effects = session.on(frame_data("LATE"));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::AckFrame(_, 7))),
+            "a frame arriving after the mode is off is still answered"
+        );
+        assert!(session.compose().image().is_none(), "and is not shown");
+    }
+
+    #[test]
+    fn a_frame_for_a_tab_that_is_gone_is_dropped_without_a_word() {
+        // Every other job naming a closed tab is dropped, and an ack has
+        // nowhere to go: Core drops an effect naming a page it does not
+        // hold, so asking would be asking nobody.
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+        let doomed = session.focused_id();
+        session.on(key('x'));
+
+        let effects = session.on(frame_for(doomed, "GONE"));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::AckFrame(id, _) if *id == doomed)),
+            "nothing is asked of a tab that is gone"
+        );
+    }
+
+    #[test]
+    fn each_frame_composes_a_new_generation() {
+        // The renderer diffs on this. Two frames that encode identically
+        // are still two frames and both must reach the terminal.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("SAME"));
+        let first = session.compose().image().expect("an image").generation;
+        session.on(frame_data("SAME"));
+        let second = session.compose().image().expect("an image").generation;
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn pixel_mode_paints_no_runs() {
+        // The picture is the page. Painting runs underneath would show text
+        // through every cell the image does not cover.
+        let mut session = ready_with_graphics();
+        session.focused_mut().runs = vec![run("hello")];
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+
+        let frame = session.compose();
+        assert_eq!(
+            frame.cell(CellPos { col: 0, row: 1 }).map(|c| c.ch),
+            Some(' ')
+        );
+    }
+
+    #[test]
+    fn a_hint_label_is_painted_over_the_picture() {
+        // Unicode placeholders make placement cell content, so a glyph in
+        // the page area wins. This is why f keeps working in pixel mode.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+        session.on(key('f'));
+        session.on(hinted_for(tab0(), vec![target(TargetKind::Clickable)]));
+
+        let frame = session.compose();
+        assert!(frame.image().is_some(), "the picture is still there");
+        // The target sits at x=90, y=40 in a 9x20 cell, so its label lands
+        // at column 10 of the page's third row, which is frame row 3 once
+        // the tab bar has its own.
+        assert_ne!(
+            frame.cell(CellPos { col: 10, row: 3 }).map(|c| c.ch),
+            Some(' '),
+            "and the label is on top of it"
+        );
+    }
+
+    #[test]
+    fn text_mode_composes_no_image_at_all() {
+        let session = ready_with_graphics();
+        assert!(session.compose().image().is_none());
+    }
+
+    #[test]
+    fn insert_mode_over_a_picture_shows_the_pages_caret_and_not_ours() {
+        // Section 6 of the M5 spec. The page drew its own caret into the
+        // picture; a second one placed by us would disagree with it.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+        session.focused_mut().caret = Some(Caret {
+            x: 0.0,
+            baseline: 16.0,
+            offset: 0,
+        });
+        session.on(key('i'));
+        assert_eq!(session.compose().cursor(), None);
+    }
+
+    #[test]
+    fn the_command_line_keeps_its_caret_in_pixel_mode() {
+        // It is painted into a chrome row, which no image ever covers.
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(key(':'));
+        assert!(session.compose().cursor().is_some());
+    }
+
+    #[test]
+    fn set_pixel_off_leaves_pixel_mode() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        typed(&mut session, ":set pixel off");
+        session.on(code(KeyCode::Enter));
+        assert!(!session.pixel);
+        assert!(
+            session.compose().image().is_none(),
+            "and drops the picture"
+        );
+    }
+
+    #[test]
+    fn set_pixel_on_without_graphics_is_refused_like_the_key_is() {
+        let mut session = ready();
+        typed(&mut session, ":set pixel on");
+        session.on(code(KeyCode::Enter));
+        assert!(!session.pixel);
     }
 
     // Switching.

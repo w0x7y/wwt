@@ -415,6 +415,36 @@ impl Core {
                         .map(|e| Job::Noted(id, e.to_string()))
                 }),
 
+                Effect::StartScreencast(id) => {
+                    let vp = self.session.viewport();
+                    self.spawn(id, move |page| async move {
+                        // A screencast that will not start is worth saying
+                        // out loud: the mode is on and no picture is coming.
+                        page.start_screencast(vp)
+                            .await
+                            .err()
+                            .map(|e| Job::Noted(id, e.to_string()))
+                    });
+                }
+
+                Effect::StopScreencast(id) => self.spawn(id, move |page| async move {
+                    // Failing to stop is not worth a word. The mode is
+                    // already off, the image is already deleted, and any
+                    // frames that keep arriving are acked and dropped.
+                    let _ = page.stop_screencast().await;
+                    None
+                }),
+
+                Effect::AckFrame(id, ack) => self.spawn(id, move |page| async move {
+                    // A failed ack stops the screencast, which shows up as a
+                    // picture that stopped moving rather than as an error,
+                    // so it is worth naming.
+                    page.ack_frame(ack)
+                        .await
+                        .err()
+                        .map(|e| Job::Noted(id, e.to_string()))
+                }),
+
                 Effect::SetViewport(id, vp) => {
                     // A diff against a frame of different dimensions is
                     // meaningless.
