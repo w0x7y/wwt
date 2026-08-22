@@ -108,7 +108,10 @@ because where the page sits on our screen is not something the page is told.
 **Pixel mode is the same viewport.** `Page.startScreencast` at that exact size,
 blitted through the Kitty graphics protocol using unicode placeholders so images sit
 within the cell grid and scroll with it. Switching text/pixel changes nothing about
-geometry, scroll offset, or focus.
+geometry, scroll offset, or focus. `--disable-frame-rate-limit`, which M2 added because
+headless otherwise paces a scroll at the display rate, owes a measurement here: an
+uncapped compositor is free only while nobody is asking it for frames, and a screencast
+asks.
 
 **Cell size detection.** `ioctl(TIOCGWINSZ)` against the controlling tty provides
 `ws_xpixel`/`ws_ypixel`; cell size is those divided by the grid dimensions. If the
@@ -148,7 +151,8 @@ The central type. Every rendering mode produces one, and the renderer consumes i
 - A grid of styled cells (glyph, fg, bg, attributes)
 - A list of interactive boxes in **cell** coordinates, each with its backing CSS-pixel
   rect and a stable element handle for dispatch
-- An optional pixel buffer for regions rendered as graphics
+- An optional image for the page viewport, base64 on its way through rather than
+  pixels, because pixel mode is the whole viewport and never a region
 - Scroll offset and page metadata
 
 ### CDP client: hand-rolled
@@ -292,7 +296,10 @@ page viewport is the terminal grid less two. Both are unconditional, which is wh
 keeps opening a tab from reflowing every page.
 
 Each tab is a CDP target. Only the foreground tab holds an active extraction
-subscription and screencast; background tabs keep their target alive but idle. Idle
+subscription and screencast; background tabs keep their target alive but idle. A switch
+therefore costs a round trip for the first pixel frame while pixel mode is on, and the
+previous image stays on screen until it lands: the repaint-and-no-round-trip guarantee
+of section 7, and the measurement that holds it down, are text mode's. Idle
 has a precise meaning: a tab extracts once when it opens, so its title is real and the
 first switch to it is instant, and after that it re-extracts only while focused. A
 dirty signal for an unfocused tab sets a flag that is spent when focus arrives.
@@ -327,9 +334,10 @@ degrades to stale-but-labeled, never to empty.
   the degraded view against the size and placement of the milestone.
 - **Terminal resize.** Debounce 100ms, recompute the grid, push a new
   `Emulation.setDeviceMetricsOverride`, force re-extract. The page genuinely reflows.
-- **No Kitty graphics.** Pixel mode degrades to half-block unicode, then to labeled
-  placeholder blocks. Text mode is unaffected, which is the point of text being
-  the default.
+- **No Kitty graphics.** In M5 pixel mode is refused with a notice and the frame you
+  are looking at stands. From M6 it degrades to half-block unicode, then to labeled
+  placeholder blocks. Text mode is unaffected either way, which is the point of text
+  being the default.
 - **No Chromium installed.** Detected at startup with a clear prompt to either point
   at a system binary via config or fetch a pinned Chrome-for-Testing build into
   `~/.local/share/wwt/`. Never a silent download.
@@ -400,7 +408,10 @@ idling. Logins survive restarts. Adoption is part of the milestone because a bro
 with tabs that cannot follow a `target=_blank` link is not one.
 
 **M5 — Pixel mode.** `Page.startScreencast`, the Kitty graphics protocol with unicode
-placeholders, mode toggling, and the half-block degradation path.
+placeholders, and mode toggling. Without graphics the toggle is a notice rather than a
+worse picture: the half-block degradation path is M6's, because a fallback view belongs
+beside the reflow renderer and the fallback extractor rather than beside the protocol it
+is a fallback for.
 
 **M6 — Reader mode and the degradation path.** The reflow renderer, reader mode on
 top of it, and the fallback extractor that feeds it when the injected script throws.

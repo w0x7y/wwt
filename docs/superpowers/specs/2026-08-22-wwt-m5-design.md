@@ -1,0 +1,286 @@
+# wwt M5 — Pixel mode
+
+**Date:** 2026-08-22
+**Status:** Approved, pre-implementation
+**Parent spec:** `2026-08-19-wwt-design.md` (sections 3, 7 and 8 govern here).
+
+This is a delta against the system design, not a replacement for it. Where the two
+disagree the parent spec wins and this document is wrong, except for the amendments in
+section 9, which change the parent spec itself.
+
+## 1. What M5 delivers
+
+M4 made a browser you keep open. M5 makes it one you can trust about what a page
+actually looks like. Text mode reconstructs a page from its runs, which is right almost
+always and cannot be right for a chart, a map, a photograph or a CAPTCHA. Pixel mode is
+the answer to "but what does it really look like", and it is the reason the coordinate
+model was built the way it was: the same viewport, the same scroll offset, the same
+focus, painted a second way.
+
+At the end of M5, `p` swaps the page between text and true pixels without moving it,
+and `f` still labels every link with the pixels underneath.
+
+### In scope
+
+`Page.startScreencast` on the focused target, the Kitty graphics protocol with unicode
+placeholders, one-shot capability detection, the `p` toggle and `:set pixel on|off`,
+overlays that survive over an image, and the resize and tab-switch paths.
+
+### Out of scope
+
+The half-block degradation path, deferred to M6 by amendment 1 in section 9. Reader
+mode, the reflow renderer and the `DOMSnapshot` fallback extractor, which are M6.
+Eviction, which is M7. Also out: per-tab pixel mode, a saved pixel preference, image
+scaling or zoom independent of the cell size, cropping to a region, and any second
+graphics protocol (sixel, iTerm2).
+
+## 2. Architecture
+
+The seam is unchanged and so is the loop. `Session` still owns every piece of state,
+still reaches nothing, and still answers `on(Event) -> Vec<Effect>` and `compose() ->
+Frame`. `Core` is still the adapter that decides nothing. What M5 adds is a second kind
+of thing a frame can carry, and a renderer that knows one protocol.
+
+### The bytes never leave base64
+
+This is the decision the milestone is cheap because of. `Page.screencastFrame` carries
+the image as base64-encoded PNG. The Kitty graphics protocol carries an image as
+base64-encoded PNG. So a frame is forwarded from the websocket to stdout as the string
+it arrived as: chunked, never decoded, never re-encoded, never held as pixels.
+
+wwt therefore gains no image decoder and no dependency, and the fixed set in
+`Cargo.toml` stands. It is also why half-block left this milestone: half a cell needs a
+foreground and a background colour, which needs real samples, which needs an inflate
+and an unfilter that nothing else here would ever use.
+
+### The grid wins over the image
+
+Unicode placeholders mean placement *is* cell content: a cell holding the placeholder
+character shows the image behind it, and a cell holding a glyph shows the glyph. So the
+rule is one sentence, and hint labels over a pixel page cost nothing to arrange.
+
+`Frame` gains an image; `Cell` does not change. The renderer synthesizes placeholder
+cells as it writes and owns every byte of the protocol, so `wwt-frame` stays what it is:
+coordinate math, cells and painting, with no I/O and no dependencies. A `Cell` that had
+to carry combining diacritics would put a terminal protocol inside the one crate whose
+hard rule is that it knows about nothing.
+
+### Rejected alternatives
+
+**A pixel path that bypasses `Frame`.** Screencast events drive a second renderer
+directly, and pixel mode never composes a frame at all. It saves moving a string, and it
+costs the property `CLAUDE.md` states outright: `Frame` is the single output type every
+rendering mode produces, so modes cannot diverge in how they reach the screen. Two paths
+to stdout is two places to get the cursor, the chrome and the resize wrong.
+
+**Placeholders in the cell grid.** `Cell` carries the placeholder character and its
+diacritics, and the existing differ places the image for free. It is genuinely elegant
+and it is wrong twice: a cell would have to hold up to three codepoints where it holds
+one, and `wwt-frame` would have to know what a Kitty diacritic is.
+
+**Per-tab pixel mode.** Rejected in favour of a global toggle. Only the focused tab
+screencasts either way, so per-tab buys a preference rather than a cost, and it would
+have to be remembered in the session file, which is a snapshot version bump and a
+rejected file for everyone who upgrades. A single flag on `Session` is the whole state.
+
+**JPEG instead of PNG.** Smaller frames and a quality knob, and it would mean a lossy
+picture of text, which is the one thing a browser in a terminal must not blur. PNG also
+happens to be the format both ends already speak, so the choice costs nothing.
+
+### Crate deltas
+
+| Crate | Delta |
+|---|---|
+| `wwt-frame` | `Frame` gains `image: Option<Image>` and `Image { generation, payload, area }`. No protocol, no I/O. |
+| `wwt-cdp` | Nothing. `call_on` and `subscribe` already carry a screencast. |
+| `wwt-page` | `start_screencast`, `stop_screencast`, `ack_frame`, and the frame event reader. |
+| `wwt-term` | Capability detection, the graphics protocol, placeholder emission, image diffing. |
+| `wwt-ui` | `p` in the key table, `:set pixel on\|off`, and what the statusline says about the mode. |
+| `wwt` | `Session::pixel`, `Effect::StartScreencast`/`StopScreencast`/`AckFrame`, `Job::Frame`. |
+
+## 3. The screencast
+
+`Page.startScreencast` on the focused target's session, with `format: "png"` and
+`maxWidth`/`maxHeight` set to the CSS viewport the page already has, so nothing is
+scaled on the way out. It starts when pixel mode is entered and on every switch into a
+tab while pixel mode is on, and stops on the way out of both.
+
+Only the focused tab screencasts. This is the same rule as extraction and for the same
+reason: a background tab is idle, and an idle tab costs nothing.
+
+**Every frame is acked or the frames stop.** `Page.screencastFrame` carries an integer
+the ack must quote back. It is called `sessionId` in the protocol and it is not a CDP
+session id; this document and the code call it the **ack id**, because `wwt-cdp` already
+means something else by session and a third meaning would make the glossary useless.
+
+**A late frame is dropped, never queued.** If a frame arrives while one is still on its
+way to the terminal, the older is discarded and only the newest is written. Acks are not
+dropped: a frame that is not drawn is still acked, or Chromium stops sending.
+
+**An idle page still costs nothing.** Chromium emits a screencast frame when the page
+paints and not on a clock, so the rule that an idle page costs ~zero CPU survives pixel
+mode, and no tick loop appears anywhere.
+
+**The frame rate limit has to be re-measured here.** `--disable-frame-rate-limit` was
+added in M2 because headless otherwise paces frames at the display rate and a scroll was
+not visible to the page until the next one. `CLAUDE.md` records that it is free only
+while nobody is asking the compositor for frames, and M5 is exactly the milestone that
+starts asking. The implementation measures pixel-mode CPU on an animated page with the
+flag and without it, and whichever way that goes, the answer and its number are written
+down rather than assumed.
+
+## 4. The image on the way out
+
+Three escape sequences and one rule.
+
+**Transmit.** `a=t` (transmit without placing), `f=100` (PNG), `t=d` (payload is base64
+in the escape), `i=<id>`, and `m=1` on every chunk but the last. Chunks are 4096 bytes of
+payload. `q=2` on every sequence, which suppresses both the success and the error
+replies: a terminal answering into our stdin is a keystroke we would have to know to
+throw away.
+
+**Place.** `a=p,U=1,i=<id>,c=<cols>,r=<rows>,q=2` creates a virtual placement, which is
+the placement unicode placeholders refer to.
+
+**Paint.** The page area is filled with U+10EEEE, the foreground colour carrying the
+image id in its three bytes, and the row and column carried by combining diacritics from
+the protocol's table. A cell with no diacritics continues from the one before it, so
+only the first cell of each row spends them.
+
+**A new frame rewrites no cells.** The image id is fixed for the life of a pixel-mode
+session, so a frame is one transmission and the placeholders already on screen re-render
+against the new data. Entering pixel mode, a resize and a tab switch write placeholders;
+scrolling a page does not. This is what keeps a pixel frame from costing a full repaint.
+
+## 5. Detection and what happens without it
+
+**Asked once, with our own timeout.** At startup, after the cell-size probe and before
+the first paint, wwt sends the graphics query and waits ~100ms for a reply. A reply is
+support; silence is not. This is the one shape of terminal question this codebase
+accepts: `CLAUDE.md` rejects `supports_keyboard_enhancement` because it takes stdin for
+up to two seconds on every run, and the objection is the two seconds and whose the
+timeout is, not the asking. Environment sniffing was rejected as a list that is wrong
+through tmux and ssh in both directions.
+
+**Without graphics, `p` is a notice and nothing else.** The statusline says pixel mode
+needs a terminal that can show images, the mode does not change, and the frame you were
+looking at is still the frame you are looking at. Guessing and emitting the escapes
+anyway would spray a terminal that cannot read them with garbage, which is the one thing
+section 8 of the parent spec forbids. Half-block would have been the third answer here
+and is M6's.
+
+## 6. Compose
+
+In pixel mode `Session::compose` paints the tab bar and the statusline exactly as it
+does now, leaves the page rows blank, and attaches the image with the page area as its
+rect. Runs are not painted. Everything else about the frame is unchanged, which is what
+makes the toggle instant: the same state composes both ways.
+
+Overlays are painted after and win, by the rule in section 2. That is hint labels today
+and whatever M6 and M7 put on top of a page tomorrow.
+
+The caret is not one of them. `Frame::cursor` is still set only in insert mode and still
+by `compose` alone, and in pixel mode the page draws its own caret into the picture, so
+placing ours on top of it would be two carets disagreeing. Insert mode in pixel mode
+therefore shows the page's caret and not the terminal's.
+
+## 7. Keys, commands and the statusline
+
+`p` toggles pixel mode, in normal mode only, and is the only new key. `:set pixel on`
+and `:set pixel off` do the same thing from the command line, beside `:set mouse`.
+
+The statusline says `pixel` while the mode is on. It says nothing while it is off,
+because text is the default and a statusline that names the normal case wastes the row.
+
+The mode is not written to the session file. Text is what wwt is, pixel mode is a thing
+you ask for, and a new field in `Snapshot` is a version bump that costs every existing
+session file its tabs on upgrade.
+
+## 8. Tabs, resize, and what a switch costs
+
+**A switch stops one screencast and starts another.** M4's rule that switching activates
+the target already holds, and the screencast needs it for the same reason the mouse did.
+
+**A switch in pixel mode is not a repaint.** M4's guarantee is that a switch paints from
+the cached runs and costs no round trip, and `measure_switch` holds it down. That
+guarantee is text mode's. In pixel mode the new tab's first frame is a round trip, and
+until it lands the previous image stays on screen with the new tab's chrome around it,
+because the alternative is blanking the frame you are looking at. The spec says so
+rather than letting the measurement quietly become a lie.
+
+**A resize is a stop, a restart and a repaint.** The debounced resize path already
+recomputes the grid and pushes new device metrics; pixel mode adds stopping the
+screencast, deleting the image, restarting at the new size, and writing placeholders
+again. `Renderer::invalidate` already covers the cell side.
+
+**Leaving pixel mode deletes the image.** `a=d,d=i,i=<id>`, so nothing is left behind in
+the terminal's memory for a mode nobody is in.
+
+## 9. Amendments to the parent spec
+
+These change `2026-08-19-wwt-design.md` and land in the same commit as this document.
+
+1. **Section 11, M5 and M6.** The half-block degradation path moves from M5 to M6. M5 is
+   the screencast, the graphics protocol and the toggle; the fallback picture belongs
+   beside the reflow renderer and the fallback extractor, which are the milestone about
+   what wwt does when it cannot have what it wants. Without Kitty graphics, M5's pixel
+   mode is a notice rather than a worse picture.
+2. **Section 7, tabs.** "Only the foreground tab holds an active extraction subscription
+   and screencast" is unchanged in rule and gains its cost: a switch in pixel mode is a
+   round trip for the first frame, and M4's repaint guarantee is text mode's.
+3. **The Frame, section on the central type.** "An optional pixel buffer for regions
+   rendered as graphics" becomes an optional image for the page viewport. Pixel mode is
+   the whole viewport and never a region, and the buffer is base64 on its way through
+   rather than pixels.
+4. **Section 3 and the performance notes.** `--disable-frame-rate-limit` is marked as
+   owing a measurement under screencast, per section 3 above.
+
+## 10. Failure modes
+
+Section 8 of the parent spec holds throughout: never blank the frame you are looking at.
+
+| Failure | Behaviour |
+|---|---|
+| The terminal cannot do graphics | `p` is a notice, the mode does not change, the frame stands. |
+| The detection query is answered late | Treated as unsupported. A reply arriving after the window is discarded rather than read as a key. |
+| `Page.startScreencast` fails | A notice, and the mode falls back to text. The page is untouched. |
+| A frame arrives for a tab that is not focused | Acked and dropped. Focus moved while it was in flight. |
+| A frame arrives for a tab that is gone | Dropped, like every other job naming a closed tab. |
+| Writing the image to stdout fails | The same failure any render has: reported, and the next frame tries again. |
+| A frame arrives while pixel mode is off | Acked and dropped. Stopping is not instant and a frame in flight is normal. |
+| The terminal is resized mid-transmission | The chunks in flight finish, the image is deleted and retransmitted at the new size. |
+
+## 11. Testing
+
+The split is the one the repo already has: what can be tested without a browser or a
+terminal is, and what cannot is honest about needing one.
+
+- **`wwt-frame`**: an image survives a compose, and a frame with an image still answers
+  every existing property. Pure.
+- **`wwt-term`**: the protocol, with data. Chunking at the 4096 boundary and at exact
+  multiples of it, the diacritic table, placeholder rows that omit what they may omit,
+  the id in the foreground bytes, and the delete sequence. No terminal: these are
+  functions from a payload and a rect to bytes, and that is the point of writing them
+  that way.
+- **`wwt-page`**: a real Chromium, in `tests/`. A screencast starts, a frame arrives, an
+  ack keeps them arriving, and a stop stops them.
+- **`wwt`**: the session's rules. `p` toggles, `p` without graphics does not, a frame for
+  the wrong tab is dropped, a switch stops and starts, and compose paints no runs in
+  pixel mode. No browser, because these are decisions.
+- **The measurement**: `measure_pixel_frame`, printing what a frame costs from event to
+  bytes written, and the CPU comparison section 3 owes.
+
+## 12. Open questions
+
+1. **Re-transmission to a live image id.** Whether transmitting new data to an id that
+   has a virtual placement updates it in place, or whether the placement must be deleted
+   and recreated. It changes what a frame costs, not the shape of anything, and it is the
+   first thing the implementation settles with a throwaway probe against a real Kitty.
+2. **Snapshot version strictness.** `store::load` now rejects any version that is not
+   ours, which is right for a file from the future and heavy-handed for a field added to
+   an old one. M5 does not touch the snapshot, so it does not have to answer this; the
+   milestone that first adds a field does, and the answer is probably to accept anything
+   at or below `VERSION` and let serde default what is missing.
+3. **Animated pages.** An uncapped compositor and a page playing video is the worst case
+   for this design, and `everyNthFrame` is the knob nobody has turned yet. Section 3's
+   measurement is what decides whether it needs turning.
