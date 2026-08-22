@@ -12,7 +12,7 @@ use rustix::termios::{
     LocalModes, OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr,
 };
 
-use super::protocol::IMAGE_ID;
+use super::protocol::IMAGE_IDS;
 
 /// How long a terminal gets to answer.
 ///
@@ -32,7 +32,7 @@ const PROBE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR
 /// terminal that answers with an error implements the protocol but not for
 /// this image, and for our purposes that is not support.
 pub fn reply_is_support(reply: &str) -> bool {
-    reply.contains(&format!("\x1b_Gi={IMAGE_ID}")) && reply.contains("OK")
+    reply.contains(&format!("\x1b_Gi={}", IMAGE_IDS[0])) && reply.contains("OK")
 }
 
 /// Ask, and wait `timeout` for an answer. Silence is not support.
@@ -71,7 +71,12 @@ pub fn query(timeout: Duration) -> bool {
 fn ask(mut stdin: &std::io::Stdin, timeout: Duration) -> bool {
     let mut out = std::io::stdout();
     // q=0 rather than q=2: this is the one sequence whose reply we want.
-    if write!(out, "\x1b_Gi={IMAGE_ID},a=q,f=100,t=d,m=0;{PROBE_PNG}\x1b\\").is_err()
+    if write!(
+        out,
+        "\x1b_Gi={},a=q,f=100,t=d,m=0;{PROBE_PNG}\x1b\\",
+        IMAGE_IDS[0]
+    )
+    .is_err()
         || out.flush().is_err()
     {
         return false;

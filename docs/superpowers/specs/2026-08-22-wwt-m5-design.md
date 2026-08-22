@@ -146,20 +146,25 @@ scroll's latency in text mode, which is the mode wwt is in almost always.
 
 Three escape sequences and one rule.
 
-**Transmit and place, in one action.** `a=T` with `U=1`, `f=100` (PNG), `t=d` (payload
-is base64 in the escape), `i=<id>`, `p=1` naming the placement so it replaces itself, and
-`m=1` on every chunk but the last. Chunks are 4096 bytes of payload. `q=2` on every
-sequence, which suppresses both the success and the error replies: a terminal answering
-into our stdin is a keystroke we would have to know to throw away.
+**Two image ids, alternating.** A frame is transmitted with `a=t` into whichever id is
+*not* on screen, then placed with `a=p,U=1,p=1`, then the cells are pointed at it, and
+only then is the other id deleted. Chunks are 4096 bytes of payload, `f=100` is PNG, `t=d`
+puts the payload in the escape, and `q=2` goes on every sequence, suppressing both the
+success and the error replies: a terminal answering into our stdin is a keystroke we
+would have to know to throw away.
 
-Not a transmission followed by a separate `a=p`. Transmitting to an id that already has a
-virtual placement destroys it, so as two sequences there is a window in which the cells
-on screen address nothing and show the terminal's background through the picture. At a
-scroll's frame rate that window is visible as flicker, and now and then as the whole
-image blinking out. This was found by running it, not by reading the protocol.
+The second id is the part that had to be measured rather than reasoned about, and it took
+three attempts. Transmitting to an id tears down its placement for as long as the
+transmission lasts. With a small picture that arrives in one sequence the window is
+nothing and everything looks correct, which is exactly what a probe with a test image
+shows. With a real page, a few hundred kilobytes chunked into dozens of sequences, the
+window is the whole transmission, and the cells on screen spend it addressing a placement
+that is not there: the picture drops to the terminal's background and the placeholders
+show as missing glyphs. That is the flicker. Sent to the other id instead, what is on
+screen is untouched until the new picture is complete.
 
-**Paint.** The page area is filled with U+10EEEE, the foreground colour carrying the
-image id in its three bytes, and **every cell carrying its own row and column** as
+**Paint.** The page area is filled with U+10EEEE, the foreground colour carrying the id of
+the image the cell belongs to, and **every cell carrying its own row and column** as
 combining diacritics from the protocol's table.
 
 Addressing only the first cell of each row and letting the rest continue from it is
@@ -167,14 +172,19 @@ smaller and is wrong. A cell with no diacritics continues from the cell before i
 hint label painted into the middle of a row orphans every placeholder after it and the
 picture tears from the label to the right edge. Overlays are the whole reason this design
 uses placeholders rather than placing the image directly, so surviving one is the
-requirement, not an optimisation to trade against. The cost is paid only when
-placeholders are written, which is on entering pixel mode, on a resize and on a switch,
-and never on a frame.
+requirement, not an optimisation to trade against.
 
-**A new frame rewrites no cells.** The image id is fixed for the life of a pixel-mode
-session, so a frame is one action and the placeholders already on screen re-render
-against the new data. Entering pixel mode, a resize and a tab switch write placeholders;
-scrolling a page does not. This is what keeps a pixel frame from costing a full repaint.
+**A frame rewrites the cells, and that is the price of not flickering.** An earlier
+version of this section claimed the opposite, on the reasoning that a fixed id lets the
+placeholders on screen re-render against new data. They do, and doing it that way
+flickers. Because a cell says which image it belongs to in its foreground colour,
+alternating ids means repointing every cell the picture shows through: about ten bytes a
+cell, so roughly fifty kilobytes for a full screen, against a few hundred kilobytes of
+PNG for the same frame. It is the smaller half of what a frame costs, and it buys a
+picture that does not blink.
+
+The cells are still not touched by a scroll that produces no new frame, and a still page
+produces no frames at all.
 
 ## 5. Detection and what happens without it
 

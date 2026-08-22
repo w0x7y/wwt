@@ -13,7 +13,7 @@ use wwt_frame::{Cell, CellPos, CellRect, Frame, Image, Style};
 use crate::graphics::protocol;
 
 /// Write the whole frame, leaving the terminal with default attributes.
-pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
+pub fn render(frame: &Frame, id: u32, out: &mut impl Write) -> std::io::Result<()> {
     let grid = frame.grid();
     // Home the cursor rather than clearing the screen: clearing first causes a
     // visible flash on every repaint.
@@ -27,7 +27,7 @@ pub fn render(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
         for col in 0..grid.cols {
             let pos = CellPos { col, row };
             let cell = *frame.cell(pos).expect("cell within the frame's own grid");
-            active = write_cell(frame, pos, &cell, active, out)?;
+            active = write_cell(frame, pos, &cell, active, id, out)?;
         }
         // Erase anything the previous frame left beyond our last column.
         write!(out, "\x1b[K")?;
@@ -51,13 +51,14 @@ fn write_cell(
     pos: CellPos,
     cell: &Cell,
     active: Option<Style>,
+    id: u32,
     out: &mut impl Write,
 ) -> std::io::Result<Option<Style>> {
     if cell.ch == ' '
         && let Some(image) = frame.image()
         && let Some((row, col)) = within(image.area, pos)
     {
-        protocol::image_fg(out)?;
+        protocol::image_fg(id, out)?;
         if protocol::placeholder(row, col, out)? {
             return Ok(None);
         }
@@ -127,9 +128,12 @@ fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
 pub struct Renderer {
     last: Option<Frame>,
     /// What the terminal is currently holding: the generation on screen and
-    /// the area it covers. A frame that changed neither costs no sequence,
-    /// and a frame that changed only its data costs no cells.
+    /// the area it covers. A frame that changed neither costs no sequence.
     shown: Option<(u64, CellRect)>,
+    /// Which of the two image ids is the one on screen. The other is where
+    /// the next picture is assembled while this one is still being looked
+    /// at. See `protocol::IMAGE_IDS`.
+    slot: usize,
 }
 
 impl Renderer {
@@ -137,7 +141,13 @@ impl Renderer {
         Self {
             last: None,
             shown: None,
+            slot: 0,
         }
+    }
+
+    /// The image id the cells on screen are pointing at.
+    fn current_id(&self) -> u32 {
+        protocol::IMAGE_IDS[self.slot]
     }
 
     /// Discard the cached frame, so the next render repaints everything.
@@ -167,7 +177,7 @@ impl Renderer {
             self.diff(frame, out)?
         } else {
             // A diff against a frame of different dimensions is meaningless.
-            render(frame, out)?;
+            render(frame, self.current_id(), out)?;
             true
         };
 
@@ -175,7 +185,7 @@ impl Renderer {
         // placeholders on screen re-render against, so sending it first
         // would show this frame's picture through the last frame's cells
         // for one paint.
-        let touched_image = self.paint_image(frame.image(), out)?;
+        let touched_image = self.paint_image(frame, frame.image(), out)?;
 
         // Writing cells leaves the terminal's cursor wherever the last cell
         // went, so anything painted has to be followed by putting it back.
@@ -201,10 +211,15 @@ impl Renderer {
     /// one destroys it, and the cells addressing it then show the terminal's
     /// background until it is re-issued. That was measured rather than
     /// assumed; see the M5 spec, section 4.
-    fn paint_image(&mut self, image: Option<&Image>, out: &mut impl Write) -> std::io::Result<bool> {
+    fn paint_image(
+        &mut self,
+        frame: &Frame,
+        image: Option<&Image>,
+        out: &mut impl Write,
+    ) -> std::io::Result<bool> {
         let Some(image) = image else {
             if self.shown.take().is_some() {
-                protocol::delete(out)?;
+                protocol::delete(protocol::IMAGE_IDS[self.slot], out)?;
                 return Ok(true);
             }
             return Ok(false);
@@ -214,12 +229,73 @@ impl Renderer {
             return Ok(false);
         }
 
-        // One action: transmitting destroys the placement, so as two
-        // sequences there is a window in which the cells on screen address
-        // nothing, and that window is visible as flicker.
-        protocol::transmit_and_place(&image.payload, image.area, out)?;
+        // Into the slot that is not on screen, and only then onto the
+        // screen. Transmitting to an id tears down its placement for as long
+        // as the transmission lasts, and a full-page PNG is dozens of
+        // chunks: aimed at the id being looked at, that is the flicker.
+        let showing = protocol::IMAGE_IDS[self.slot];
+        let next = protocol::IMAGE_IDS[1 - self.slot];
+
+        protocol::transmit(&image.payload, next, out)?;
+        protocol::place(image.area, next, out)?;
+        // Now the cells can be pointed at it. Every blank cell in the area,
+        // because a glyph in there is an overlay and wins.
+        self.placeholders(frame, image.area, next, out)?;
+        // Last, so nothing is ever without a picture to show.
+        if self.shown.is_some() {
+            protocol::delete(showing, out)?;
+        }
+
+        self.slot = 1 - self.slot;
         self.shown = Some((image.generation, image.area));
         Ok(true)
+    }
+
+    /// Point every cell the picture shows through at `id`.
+    ///
+    /// Skips any cell carrying a glyph: that is an overlay, and the grid
+    /// wins over the image. Costs a rewrite of the page area per frame,
+    /// which the alternating ids make unavoidable, since a cell says which
+    /// image it belongs to in its foreground colour.
+    fn placeholders(
+        &self,
+        frame: &Frame,
+        area: CellRect,
+        id: u32,
+        out: &mut impl Write,
+    ) -> std::io::Result<()> {
+        protocol::image_fg(id, out)?;
+        for row in 0..area.rows {
+            write!(out, "\x1b[{};{}H", area.row + row + 1, area.col + 1)?;
+            let mut pointing = true;
+            for col in 0..area.cols {
+                let pos = CellPos {
+                    col: area.col + col,
+                    row: area.row + row,
+                };
+                let cell = match frame.cell(pos) {
+                    Some(cell) => *cell,
+                    None => break,
+                };
+                if cell.ch != ' ' {
+                    // An overlay. Write it, and remember that the
+                    // foreground is no longer the image's.
+                    write_style(out, &cell.style)?;
+                    let mut buf = [0u8; 4];
+                    out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
+                    pointing = false;
+                    continue;
+                }
+                if !pointing {
+                    protocol::image_fg(id, out)?;
+                    pointing = true;
+                }
+                if !protocol::placeholder(row, col, out)? {
+                    break;
+                }
+            }
+        }
+        write!(out, "\x1b[0m")
     }
 
     /// Emit the cells that changed. Returns whether anything was written.
@@ -249,7 +325,7 @@ impl Renderer {
                     if Some(&cell) == prev.cell(pos) {
                         break;
                     }
-                    active = write_cell(frame, pos, &cell, active, out)?;
+                    active = write_cell(frame, pos, &cell, active, self.current_id(), out)?;
                     col += 1;
                 }
                 write!(out, "\x1b[0m")?;
@@ -311,7 +387,8 @@ mod tests {
         let mut renderer = Renderer::new();
         let sent = rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
 
-        assert!(sent.contains("a=T,U=1"), "transmitted and placed at once");
+        assert!(sent.contains("a=t,f=100"), "transmitted");
+        assert!(sent.contains("a=p,U=1"), "then placed");
         assert!(
             sent.contains(protocol::PLACEHOLDER),
             "the cells addressing it were written"
@@ -323,20 +400,41 @@ mod tests {
     }
 
     #[test]
-    fn a_new_frame_is_a_transmission_and_a_placement_and_no_cells() {
-        // The latency claim of pixel mode. The placement is re-issued
-        // because transmitting destroys it, which was measured against a
-        // real Kitty, but not one placeholder cell is touched.
+    fn a_new_frame_arrives_on_the_slot_that_is_not_on_screen() {
+        // Transmitting to an id tears down its placement for as long as the
+        // transmission lasts, and a full-page PNG is dozens of chunks. Aimed
+        // at the id being looked at, that window is the flicker.
         let mut renderer = Renderer::new();
         rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+        let showing = renderer.current_id();
 
         let sent = rendered(&mut renderer, &framed(Some(image_at(2, "BBBB"))));
-        assert!(sent.contains("BBBB"), "the new data went out");
-        assert!(sent.contains("a=T,U=1"), "and was placed again in the same breath");
+        let arriving = renderer.current_id();
+        assert_ne!(showing, arriving, "the slots alternate");
         assert!(
-            !sent.contains(protocol::PLACEHOLDER),
-            "but no cell was rewritten"
+            sent.contains(&format!("i={arriving},m=0;BBBB")),
+            "the new data went to the other slot"
         );
+        assert!(sent.contains(&format!("a=p,U=1,i={arriving}")), "then placed");
+        assert!(sent.contains(protocol::PLACEHOLDER), "then the cells follow it");
+    }
+
+    #[test]
+    fn the_old_picture_is_deleted_only_after_the_new_one_is_on_screen() {
+        // Never blank the frame you are looking at, at the granularity of a
+        // single frame.
+        let mut renderer = Renderer::new();
+        rendered(&mut renderer, &framed(Some(image_at(1, "AAAA"))));
+        let showing = renderer.current_id();
+
+        let sent = rendered(&mut renderer, &framed(Some(image_at(2, "BBBB"))));
+        let deleted = sent
+            .find(&format!("a=d,d=i,i={showing}"))
+            .expect("the old one is deleted");
+        let placed = sent
+            .find(&format!("a=p,U=1,i={}", renderer.current_id()))
+            .expect("the new one is placed");
+        assert!(placed < deleted, "placed before the old one is forgotten");
     }
 
     #[test]
@@ -430,13 +528,13 @@ mod tests {
         renderer.invalidate();
 
         let sent = rendered(&mut renderer, &frame);
-        assert!(sent.contains("a=T,U=1"), "transmitted and placed again");
+        assert!(sent.contains("a=t,f=100"), "transmitted again");
         assert!(sent.contains(protocol::PLACEHOLDER), "and addressed again");
     }
 
     fn render_to_string(f: &Frame) -> String {
         let mut buf = Vec::new();
-        render(f, &mut buf).unwrap();
+        render(f, protocol::IMAGE_IDS[0], &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
