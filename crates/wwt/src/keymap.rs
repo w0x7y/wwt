@@ -86,6 +86,32 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         };
     }
 
+    // Alt and a digit goes straight to that tab. Going straight beats cycling
+    // to it: the tab you want is one keystroke away however many are open,
+    // and where each one sits is already on screen in the bar.
+    //
+    // Alt is the modifier because it is the one a terminal reports. It is
+    // sent as an Escape and then the key, so the digit arrives intact with
+    // `ALT` beside it, whatever the keyboard is. Shift is not: shift and `1`
+    // arrives as the byte `!` and nothing else, so a shift binding would be a
+    // list of glyphs, and which glyph a layout prints there is its own
+    // business.
+    //
+    // Only the digit, never the glyph above it. On a layout whose number row
+    // is punctuation, French among them, shift and that key is how a digit is
+    // typed at all, so alt and that digit is still one keystroke. Taking the
+    // glyph too would be worse than useless there: `&` is the French `1` and
+    // the US `7`, and one of the two would land on a tab nobody asked for.
+    //
+    // Nothing else is bound under alt. An unbound modifier doing what the
+    // bare key does is how a mistyped shortcut scrolls the page.
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return match key.code {
+            KeyCode::Char(c @ '1'..='9') => Some(Action::TabAt(c as usize - '1' as usize)),
+            _ => None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Scroll(line(vp))),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Scroll(-line(vp))),
@@ -104,60 +130,12 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('t') => Some(Action::EnterCommand("tabopen ".to_string())),
         KeyCode::Char('x') => Some(Action::TabClose),
         KeyCode::Char('q') => Some(Action::Quit),
-        // The number row goes straight to that tab. Going straight beats
-        // cycling to it: the tab you want is one keystroke away however many
-        // are open, and where each one sits is already on screen in the bar.
-        //
-        // The digit is what makes this work on any keyboard, and it is taken
-        // with shift or without. Nearly every layout puts digits on the
-        // unshifted number row, so the plain digit is that key; the ones that
-        // do not, French among them, are exactly the ones where shift and
-        // that key is how a digit is typed at all.
-        KeyCode::Char(c @ '1'..='9') => Some(Action::TabAt(c as usize - '1' as usize)),
-        KeyCode::Char(c) => SHIFTED_DIGITS
-            .iter()
-            .find(|(glyph, _)| *glyph == c)
-            .map(|(_, tab)| Action::TabAt(*tab)),
+        // The number row is unbound without alt, and so is the glyph above
+        // it: the digits are kept for the count prefix a vim-like puts on
+        // them, and `!` through `(` for whatever wants them next.
         _ => None,
     }
 }
-
-/// The glyph shift and a digit prints, and the tab it means. Muscle memory,
-/// on top of the digit itself: `!` is what a US keyboard has above the `1`.
-///
-/// Which glyph that is belongs to the layout, so this is a few layouts' number
-/// rows laid over each other, and only where they do not collide. The US row
-/// wins the collisions and the other spelling is simply left out rather than
-/// guessed at: `&` is shift-7 on a US keyboard and shift-6 across most of
-/// Europe, and one of the two would send you to a tab you did not ask for.
-///
-/// Left out for the same reason, in the other direction: `"` and `)` are a
-/// European shift-2 and shift-9 and also a US shift-apostrophe and shift-0, so
-/// binding them would move a US keyboard's tabs on a keystroke that means
-/// nothing here. `/` is a European shift-7 and belongs to find-in-page.
-///
-/// Nothing is lost by leaving any of them out. Every layout in this comment
-/// has digits on its unshifted number row, so the tab is one plain keystroke
-/// away whatever shift would have printed.
-const SHIFTED_DIGITS: [(char, usize); 14] = [
-    // US, and the Hebrew, Arabic and Cyrillic layouts that keep its number row.
-    ('!', 0),
-    ('@', 1),
-    ('#', 2),
-    ('$', 3),
-    ('%', 4),
-    ('^', 5),
-    ('&', 6),
-    ('*', 7),
-    ('(', 8),
-    // What the rest of the world prints there instead, where it collides with
-    // none of the above: German, UK, the Nordics, Spanish, Italian, Russian.
-    ('£', 2),
-    ('§', 2),
-    ('·', 2),
-    ('№', 2),
-    ('¤', 3),
-];
 
 fn command(key: KeyEvent) -> Option<Action> {
     match key.code {
@@ -214,6 +192,10 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
     fn normal_mode() -> Mode {
@@ -379,52 +361,47 @@ mod tests {
     }
 
     #[test]
-    fn a_shifted_digit_goes_straight_to_that_tab() {
-        // A terminal sends the glyph the pair prints rather than the digit,
-        // so that is what the table is written in.
-        assert_eq!(action_for(&normal_mode(), key('!'), vp()), Some(Action::TabAt(0)));
-        assert_eq!(action_for(&normal_mode(), key('@'), vp()), Some(Action::TabAt(1)));
-        assert_eq!(action_for(&normal_mode(), key('#'), vp()), Some(Action::TabAt(2)));
-        assert_eq!(action_for(&normal_mode(), key('('), vp()), Some(Action::TabAt(8)));
-    }
-
-    #[test]
-    fn the_digit_reaches_the_tab_on_any_keyboard() {
-        // The glyph above the number row belongs to the layout and the digit
-        // does not. Nearly every layout has digits on the unshifted row, so
-        // that is a plain keystroke; a French one has punctuation there, so
-        // shift and that key is how a digit is typed at all. Both spellings
-        // are the same tab.
-        assert_eq!(action_for(&normal_mode(), key('1'), vp()), Some(Action::TabAt(0)));
-        assert_eq!(action_for(&normal_mode(), key('9'), vp()), Some(Action::TabAt(8)));
-        let shifted = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
-        assert_eq!(action_for(&normal_mode(), shifted, vp()), Some(Action::TabAt(0)));
+    fn alt_and_a_digit_goes_straight_to_that_tab() {
+        assert_eq!(action_for(&normal_mode(), alt('1'), vp()), Some(Action::TabAt(0)));
+        assert_eq!(action_for(&normal_mode(), alt('9'), vp()), Some(Action::TabAt(8)));
         // Zero is not a tab: the bar counts from one and there is no tenth key.
-        assert_eq!(action_for(&normal_mode(), key('0'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), alt('0'), vp()), None);
     }
 
     #[test]
-    fn the_number_row_of_another_layout_reaches_the_tab_it_is_over() {
-        // German, UK, Spanish and Russian shift-3, and the Nordic shift-4.
-        assert_eq!(action_for(&normal_mode(), key('§'), vp()), Some(Action::TabAt(2)));
-        assert_eq!(action_for(&normal_mode(), key('£'), vp()), Some(Action::TabAt(2)));
-        assert_eq!(action_for(&normal_mode(), key('·'), vp()), Some(Action::TabAt(2)));
-        assert_eq!(action_for(&normal_mode(), key('№'), vp()), Some(Action::TabAt(2)));
-        assert_eq!(action_for(&normal_mode(), key('¤'), vp()), Some(Action::TabAt(3)));
+    fn the_number_row_is_unbound_without_alt() {
+        // Both halves of it. The digits are kept for a count prefix, and the
+        // glyphs above them for whatever wants them next; the point of
+        // spending a modifier is that neither is spent here.
+        for c in "1234567890".chars() {
+            assert_eq!(action_for(&normal_mode(), key(c), vp()), None, "bare {c}");
+        }
+        for c in "!@#$%^&*()".chars() {
+            assert_eq!(action_for(&normal_mode(), key(c), vp()), None, "glyph {c}");
+        }
+        // Including the one spelling a terminal will never send us: shift and
+        // a digit arrives as the glyph, and the glyph is unbound too.
+        let shifted = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::SHIFT);
+        assert_eq!(action_for(&normal_mode(), shifted, vp()), None);
     }
 
     #[test]
-    fn a_glyph_two_layouts_disagree_about_is_left_out_rather_than_guessed() {
-        // `&` is shift-7 on a US keyboard and shift-6 on a German one, and
-        // the table cannot honour both, so the US row keeps it.
-        assert_eq!(action_for(&normal_mode(), key('&'), vp()), Some(Action::TabAt(6)));
-        assert_eq!(action_for(&normal_mode(), key('('), vp()), Some(Action::TabAt(8)));
-        // The other direction: a European shift-2 and shift-9 that a US
-        // keyboard also prints, from the apostrophe and the zero. Binding
-        // them would move a US keyboard's tabs on a keystroke meaning
-        // nothing here, and every layout that prints them has the digit.
-        assert_eq!(action_for(&normal_mode(), key('"'), vp()), None);
-        assert_eq!(action_for(&normal_mode(), key(')'), vp()), None);
+    fn only_the_digit_is_a_tab_and_never_the_glyph_over_it() {
+        // `&` is the unshifted `1` of a French keyboard and the shifted `7`
+        // of a US one, so taking it would send one of the two to a tab it did
+        // not ask for. A French keyboard types its digit with the shift it
+        // was already holding.
+        assert_eq!(action_for(&normal_mode(), alt('&'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), alt('!'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), alt('§'), vp()), None);
+    }
+
+    #[test]
+    fn alt_does_not_fall_through_to_what_the_bare_key_does() {
+        // A modifier nothing is bound under must not quietly scroll the page.
+        assert_eq!(action_for(&normal_mode(), alt('j'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), alt('q'), vp()), None);
+        assert_eq!(action_for(&normal_mode(), alt('x'), vp()), None);
     }
 
     #[test]

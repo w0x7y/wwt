@@ -315,7 +315,7 @@ true of the first row as well as the last.
 
 | Key | Action |
 |---|---|
-| shift and a digit | Focus the first tab through the ninth. Out of range does nothing. |
+| alt and a digit | Focus the first tab through the ninth. Out of range does nothing. |
 | `t` | Open the `:` line prefilled with `tabopen `, the way `o` prefills `open `. |
 | `x` | Close the focused tab. |
 
@@ -323,32 +323,46 @@ true of the first row as well as the last.
 `x` takes it.
 
 *Amended.* Switching was `J` and `K`, qutebrowser's own bindings, cycling one tab at a
-time. It is now shift and a digit, going straight to the first tab through the ninth.
+time. It is now alt and a digit, going straight to the first tab through the ninth.
 Going straight beats cycling because the tab you want is one keystroke away however
 many are open, and where each one sits is already on screen in the bar. Past the ninth
 tab, `:tabnext` and `:tabprev` still cycle.
 
-*Amended.* Which keystroke that is depends on the keyboard layout, so `keymap.rs` takes
-the digit and the glyph alike.
+*Amended twice.* It was shift and a digit, taken with `SHIFT` or without, which meant a
+bare digit reached a tab and a table of glyphs did too. Both are gone and the binding is
+alt and a digit alone.
 
-The digit is the one that carries, and it is taken with `SHIFT` or without. Nearly
-every layout has digits on the unshifted number row, so the plain digit is that key.
-The layouts that do not, French among them, are exactly the ones where shift and that
-key is how a digit is typed at all. Between the two, every keyboard reaches every tab
-with one keystroke and the terminal is asked nothing.
+**The bare number row is unbound, both halves of it.** The digits are kept for the count
+prefix a vim-like puts on them, and the glyphs above them, `!` through `(`, for whatever
+wants them next. Spending a modifier is what buys that back, and the count is worth more
+than the shortest possible spelling.
 
-Binding a bare digit spends the count prefix a vim-like puts on digits. Reaching a tab
-on every layout is worth more than a count that no command takes yet.
+**Alt is the modifier because it is the one a terminal reports.** A terminal spells alt
+and a key as an Escape and then the key, which crossterm turns back into the key plus
+`ALT`, so the digit arrives intact whatever the keyboard is.
 
-The glyph table is what the number row prints, which is US muscle memory (`!` through
-`(`) plus the foreign glyphs that collide with none of it: `£`, `§`, `·`, `№`, `¤`. A
-collision is resolved by leaving the glyph out rather than guessing, in both
-directions. `&` is a US shift-7 and a German shift-6, so the US row keeps it; `"` and
-`)` are a German shift-2 and shift-9 and also a US shift-apostrophe and shift-0, so
-neither is bound, since binding them would move a US keyboard's tabs on a keystroke
-that means nothing here. Nothing is lost either way: every layout in this paragraph has
-the digit. `/` is a European shift-7 and stays unbound because find-in-page will want
-it.
+**Shift is rejected, and this is why the first attempt needed a glyph table.** A terminal
+does not report shift beside a digit at all: shift and `1` arrives as the byte `!`, and
+crossterm 0.29 sets `SHIFT` only for uppercase letters (`char_code_to_event`). So "shift
+and a digit" can only be written down as the glyph the pair prints, which is layout
+dependent by construction, and a layout the table cannot spell would have had no
+keystroke.
+
+**Only the digit is taken, never the glyph over it.** On a layout whose number row is
+punctuation, French among them, shift and that key is how a digit is typed at all, so alt
+and that digit is one keystroke there too. Taking the glyph as well would be worse than
+useless: `&` is the unshifted `1` of a French keyboard and the shifted `7` of a US one,
+so alt and one keyboard's first tab is alt and the other's seventh. Leaving the glyph out
+is what makes the binding mean the same thing on every layout, and it is what leaves `!`
+through `(` free.
+
+Nothing else is bound under alt. An unbound modifier falling through to what the bare key
+does is how a mistyped shortcut scrolls the page, so alt returns early the way control
+does.
+
+The cost is the terminal emulator: some bind alt and a digit themselves, Konsole among
+them, and there the binding never reaches us. That is a setting on their side and there
+is nothing to do about it here.
 
 *Rejected: Kitty's keyboard protocol.* It reports the key and the modifier separately
 rather than the glyph the pair prints, which is exactly the question being asked here,

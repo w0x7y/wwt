@@ -871,6 +871,11 @@ mod tests {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
 
+    /// Alt and a digit, which is how a tab is reached.
+    fn alt(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+    }
+
     fn target(kind: TargetKind) -> HintTarget {
         HintTarget { rect: CssRect { x: 90.0, y: 40.0, w: 90.0, h: 20.0 }, kind }
     }
@@ -1591,7 +1596,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
 
-        let effects = session.on(key('!'));
+        let effects = session.on(alt('1'));
 
         assert_eq!(saved(&effects).map(|s| s.focus), Some(0));
     }
@@ -1733,7 +1738,7 @@ mod tests {
         typed(&mut session, ":tabopen example.org");
         session.on(code(KeyCode::Enter));
         session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
-        session.on(key('!'));
+        session.on(alt('1'));
         assert_eq!(session.focused().id, tab0(), "back on the first tab");
 
         // A target that would not come to the front, reported while you are
@@ -1826,7 +1831,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
         // Three tabs, focused on the middle one.
-        session.on(key('@'));
+        session.on(alt('2'));
         assert_eq!(session.focused().id, TabId(1));
 
         let effects = session.on(key('x'));
@@ -1881,15 +1886,15 @@ mod tests {
     // Switching.
 
     #[test]
-    fn a_shifted_digit_looks_at_the_tab_in_that_position() {
+    fn alt_and_a_digit_looks_at_the_tab_in_that_position() {
         let mut session = ready();
         open_two_more(&mut session);
         assert_eq!(session.focused().id, TabId(2));
 
-        session.on(key('!'));
+        session.on(alt('1'));
         assert_eq!(session.focused().id, tab0(), "the first tab, whichever you were on");
 
-        session.on(key('#'));
+        session.on(alt('3'));
         assert_eq!(session.focused().id, TabId(2), "and back, without passing the second");
     }
 
@@ -1913,7 +1918,7 @@ mod tests {
         // the page you just left.
         let mut session = ready();
         open_two_more(&mut session);
-        let effects = session.on(key('!'));
+        let effects = session.on(alt('1'));
         assert!(effects.contains(&Effect::Activate(tab0())));
     }
 
@@ -1923,7 +1928,7 @@ mod tests {
         session.focused_mut().runs = vec![run("first tab")];
         open_two_more(&mut session);
 
-        session.on(key('!'));
+        session.on(alt('1'));
         let frame = session.compose();
         assert!(
             (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
@@ -1944,7 +1949,7 @@ mod tests {
         );
 
         // Switching to it spends the flag.
-        let effects = session.on(key('!'));
+        let effects = session.on(alt('1'));
         assert!(effects.contains(&Effect::Extract(tab0())));
     }
 
@@ -1952,10 +1957,10 @@ mod tests {
     fn switching_to_a_tab_that_did_not_change_costs_no_round_trip() {
         let mut session = ready();
         open_two_more(&mut session);
-        session.on(key('!')); // to tab 0, spending its flag
+        session.on(alt('1')); // to tab 0, spending its flag
         session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
 
-        let effects = session.on(key('#'));
+        let effects = session.on(alt('3'));
         assert_eq!(
             effects,
             vec![Effect::Activate(TabId(2)), Effect::Save(session.snapshot())],
@@ -1996,7 +2001,7 @@ mod tests {
         // Alternating, because going to the tab you are already on is not a
         // switch and would measure nothing.
         for step in 0..200 {
-            let to = if step % 2 == 0 { key('!') } else { key('#') };
+            let to = if step % 2 == 0 { alt('1') } else { alt('3') };
             let start = std::time::Instant::now();
             let effects = session.on(to);
             let frame = session.compose();
@@ -2019,7 +2024,7 @@ mod tests {
         open_two_more(&mut session);
 
         session.on(key('f'));
-        session.on(key('!'));
+        session.on(alt('1'));
         session.on(hinted_for(TabId(2), vec![target(TargetKind::Clickable)]));
 
         assert_eq!(

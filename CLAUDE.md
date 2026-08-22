@@ -274,19 +274,23 @@ still misses the document. `Page::adopt` registers the bootstrap for the next
 document and evaluates it into the one already there; the script returns early
 when it finds itself installed.
 
-**A tab is reached by its position, not by cycling to it.** Shift and a digit focuses
-the first tab through the ninth.
+**A tab is reached by its position, not by cycling to it.** Alt and a digit focuses the
+first tab through the ninth. **The bare number row does nothing**, on purpose: the digits
+are kept for the count prefix a vim-like puts on them, and `!` through `(` for whatever
+wants them next.
 
-**The digit is what carries that across layouts, and the glyph is muscle memory on top
-of it.** What shift and a digit prints belongs to the keyboard layout, so `keymap.rs`
-takes the digit with `SHIFT` or without and asks nothing of the terminal. Nearly every
-layout has digits on the unshifted number row, so the plain digit is that key; the ones
-that do not, French among them, are exactly the ones where shift and that key is how a
-digit is typed at all. The glyph table is US muscle memory plus the foreign glyphs that
-collide with none of it, and a collision is resolved by leaving the glyph out rather
-than guessing: `&` is a US shift-7 and a German shift-6, `"` is a German shift-2 and a
-US shift-apostrophe. Nothing is lost by leaving one out, because every layout that
-prints it has the digit.
+**Alt is the modifier because it is the one a terminal reports.** It is sent as an
+Escape and then the key, so the digit arrives intact with `ALT` beside it whatever the
+keyboard is. Shift is not: shift and `1` arrives as the byte `!` and nothing else, since
+crossterm sets `SHIFT` only for uppercase letters, so a shift binding could only ever be
+a table of glyphs. That table existed and is gone.
+
+**Only the digit, never the glyph over it.** On a layout whose number row is punctuation,
+French among them, shift and that key is how a digit is typed at all, so alt and that
+digit is still one keystroke there. Taking the glyph as well would be worse than useless:
+`&` is the French `1` and the US `7`, and one of the two would land on a tab nobody asked
+for. Nothing else is bound under alt, which returns early the way control does, or a
+mistyped shortcut would scroll the page.
 
 **Do not enable Kitty's keyboard protocol to read the number row.** It looks like the
 principled fix and is a regression twice over. `REPORT_ALTERNATE_KEYS` reports the
@@ -300,9 +304,7 @@ glyph a shifted key prints is what the flag stops telling us. Typing is worth mo
 a keystroke to a tab. `supports_keyboard_enhancement` also takes the terminal's stdin
 for up to two seconds to ask.
 
-Binding a bare digit spends the count prefix a vim-like would put there. Reaching a tab
-on every layout is worth more than a count no command takes yet; `/` is kept unbound for
-find-in-page for the same reason, though it is European shift-7.
+`/` is kept unbound for find-in-page, though it is a European shift-7.
 
 **A page is not told nobody is looking.** `Page::prepare` overrides the user agent
 with the browser's own, headless marker removed. Search engines read `HeadlessChrome`

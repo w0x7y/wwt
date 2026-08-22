@@ -32,7 +32,7 @@ M5.
 | `space` `b` | scroll a screen |
 | `g` `G` | top, bottom |
 | `H` `L` | back, forward |
-| `Shift-1` … `Shift-9` | go to the first tab through the ninth |
+| `Alt-1` … `Alt-9` | go to the first tab through the ninth |
 | `t` | open a tab |
 | `x` | close this tab |
 | `Ctrl-r` | reload |
@@ -54,18 +54,22 @@ which costs your terminal's own text selection. Most terminals hand it
 back while shift is held; `:set mouse off` is there for the ones that do
 not.
 
-Shift and a digit goes straight to that tab, so the one you want is one
+Alt and a digit goes straight to that tab, so the one you want is one
 keystroke away however many are open and wherever you are now. Past the
 ninth there is `:tabnext` and `:tabprev`, which still cycle.
 
-The digit works on its own too, and that is what makes this the same
-keystroke on every keyboard: a number row with digits on it reaches a
-tab unshifted, and one with punctuation on it, as a French keyboard has,
-reaches it with the shift you were pressing anyway. Above the digit, the
-glyphs are the US row (`!` through `(`) and the few from other layouts
-that do not clash with it. Where two layouts do clash the glyph is left
-out rather than guessed at, so `Shift-6` on a German keyboard prints `&`
-and goes nowhere. Press `6`.
+The number row on its own is not a tab, and neither is the punctuation
+above it. Both are being kept for what comes later. Alt is also the
+modifier a terminal will actually tell us about: shift and `1` reaches
+us as `!` and nothing more, so a shift binding would have to guess at
+which glyph your keyboard prints there, while alt and `1` is alt and `1`
+on every keyboard in the world. On a French one, where the number row is
+punctuation, `Alt-Shift` and that key is the tab, because shift is how
+you type a digit there anyway.
+
+Some terminals bind alt and a digit for their own tab switching, Konsole
+among them. If yours does, it never reaches us, and that is a setting on
+their side.
 
 `:open` and `:tabopen` take a URL or anything else: `:open banana`
 searches DuckDuckGo for it rather than telling you it is not a URL, and
