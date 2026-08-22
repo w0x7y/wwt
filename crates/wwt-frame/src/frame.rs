@@ -1,5 +1,6 @@
 use crate::cell::{Cell, Style};
 use crate::geom::{CellPos, GridSize, Viewport};
+use crate::image::Image;
 use crate::run::TextRun;
 
 /// Shrinks a box's right edge before it is mapped to a column, so an edge
@@ -16,6 +17,9 @@ pub struct Frame {
     grid: GridSize,
     cells: Vec<Cell>,
     cursor: Option<CellPos>,
+    /// The page as a picture, in pixel mode. `None` is text mode, which is
+    /// every frame this codebase built before M5.
+    image: Option<Image>,
 }
 
 impl Frame {
@@ -25,6 +29,7 @@ impl Frame {
             grid,
             cells: vec![Cell::default(); len],
             cursor: None,
+            image: None,
         }
     }
 
@@ -45,6 +50,19 @@ impl Frame {
     /// cell outside the grid is no cell at all.
     pub fn set_cursor(&mut self, pos: Option<CellPos>) {
         self.cursor = pos.filter(|&pos| self.index(pos).is_some());
+    }
+
+    /// The picture this frame wants shown behind its cells, if any.
+    ///
+    /// A frame carries it rather than painting it for the same reason it
+    /// carries the cursor: only the terminal can put an image on screen,
+    /// and this crate is not allowed to know how.
+    pub fn image(&self) -> Option<&Image> {
+        self.image.as_ref()
+    }
+
+    pub fn set_image(&mut self, image: Option<Image>) {
+        self.image = image;
     }
 
     fn index(&self, pos: CellPos) -> Option<usize> {
@@ -176,6 +194,7 @@ mod tests {
     use super::*;
     use crate::cell::{Rgb, Style};
     use crate::geom::{CellPos, CellSize, CssRect, GridSize, Viewport};
+    use crate::image::{CellRect, Image};
     use crate::run::TextRun;
 
     fn vp() -> Viewport {
@@ -190,6 +209,39 @@ mod tests {
             style: Style::default(),
             z: 0,
         }
+    }
+
+    #[test]
+    fn a_frame_carries_no_image_until_it_is_given_one() {
+        let frame = Frame::new(GridSize { cols: 10, rows: 4 });
+        assert_eq!(frame.image(), None);
+    }
+
+    #[test]
+    fn an_image_survives_being_put_on_a_frame() {
+        let mut frame = Frame::new(GridSize { cols: 10, rows: 4 });
+        let image = Image {
+            generation: 7,
+            payload: "iVBOR".into(),
+            area: CellRect { col: 0, row: 1, cols: 10, rows: 2 },
+        };
+        frame.set_image(Some(image.clone()));
+        assert_eq!(frame.image(), Some(&image));
+    }
+
+    #[test]
+    fn a_frame_with_an_image_still_paints_cells() {
+        // Pixel mode leaves the page rows blank but the chrome rows are
+        // cells like any other, so an image must not disturb painting.
+        let mut f = Frame::new(vp().grid());
+        f.set_image(Some(Image {
+            generation: 1,
+            payload: "AAAA".into(),
+            area: CellRect::of(vp().grid(), 0),
+        }));
+        f.paint_run(&vp(), &run("hi", 0.0, 14.0, 20.0));
+        assert_eq!(f.cell(CellPos { col: 0, row: 0 }).map(|c| c.ch), Some('h'));
+        assert!(f.image().is_some());
     }
 
     #[test]
