@@ -20,15 +20,20 @@ pub fn render(frame: &Frame, id: u32, out: &mut impl Write) -> std::io::Result<(
     write!(out, "\x1b[H")?;
 
     let mut active: Option<Style> = None;
+    // One line assembled and written per row, rather than a write per cell:
+    // a placeholder is three codepoints and a row is a hundred cells.
+    let mut line = String::new();
     for row in 0..grid.rows {
         if row > 0 {
             write!(out, "\r\n")?;
         }
+        line.clear();
         for col in 0..grid.cols {
             let pos = CellPos { col, row };
             let cell = *frame.cell(pos).expect("cell within the frame's own grid");
-            active = write_cell(frame, pos, &cell, active, id, out)?;
+            active = write_cell(frame, pos, &cell, active, id, &mut line);
         }
+        out.write_all(line.as_bytes())?;
         // Erase anything the previous frame left beyond our last column.
         write!(out, "\x1b[K")?;
     }
@@ -52,15 +57,15 @@ fn write_cell(
     cell: &Cell,
     active: Option<Style>,
     id: u32,
-    out: &mut impl Write,
-) -> std::io::Result<Option<Style>> {
+    line: &mut String,
+) -> Option<Style> {
     if cell.ch == ' '
         && let Some(image) = frame.image()
         && let Some((row, col)) = within(image.area, pos)
     {
-        protocol::image_fg(id, out)?;
-        if protocol::placeholder(row, col, out)? {
-            return Ok(None);
+        protocol::fg(id, line);
+        if protocol::placeholder(row, col, line) {
+            return None;
         }
         // Past what the diacritic table can address. Fall through and write
         // the blank, so the cell is at least the colour it should be.
@@ -69,12 +74,11 @@ fn write_cell(
     let active = if active == Some(cell.style) {
         active
     } else {
-        write_style(out, &cell.style)?;
+        push_style(line, &cell.style);
         Some(cell.style)
     };
-    let mut buf = [0u8; 4];
-    out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
-    Ok(active)
+    line.push(cell.ch);
+    active
 }
 
 /// Where `pos` sits inside `area`, if it does at all.
@@ -103,20 +107,21 @@ fn place_cursor(frame: &Frame, out: &mut impl Write) -> std::io::Result<()> {
     }
 }
 
-fn write_style(out: &mut impl Write, style: &Style) -> std::io::Result<()> {
+/// What a style looks like, pushed onto a line being assembled.
+///
+/// Pushing cannot fail, so the per-cell paths never handle an error, and
+/// there is still one place that knows the sequences.
+fn push_style(out: &mut String, style: &Style) {
+    use std::fmt::Write as _;
     // Reset first so that clearing bold does not need a separate sequence.
-    write!(out, "\x1b[0m")?;
+    out.push_str("\x1b[0m");
     if style.bold {
-        write!(out, "\x1b[1m")?;
+        out.push_str("\x1b[1m");
     }
     if style.reverse {
-        write!(out, "\x1b[7m")?;
+        out.push_str("\x1b[7m");
     }
-    write!(
-        out,
-        "\x1b[38;2;{};{};{}m",
-        style.fg.r, style.fg.g, style.fg.b
-    )
+    let _ = write!(out, "\x1b[38;2;{};{};{}m", style.fg.r, style.fg.g, style.fg.b);
 }
 
 /// A renderer that remembers what it last put on screen.
@@ -134,6 +139,13 @@ pub struct Renderer {
     /// the next picture is assembled while this one is still being looked
     /// at. See `protocol::IMAGE_IDS`.
     slot: usize,
+    /// One row of placeholders, built here and written in one go.
+    ///
+    /// A cell is three codepoints and a row is a hundred cells, so writing
+    /// them as they are produced is thousands of small writes a frame, each
+    /// one a capacity check to copy two or three bytes. Kept on the renderer
+    /// rather than made per row, so a frame allocates nothing.
+    scratch: String,
 }
 
 impl Renderer {
@@ -142,6 +154,7 @@ impl Renderer {
             last: None,
             shown: None,
             slot: 0,
+            scratch: String::new(),
         }
     }
 
@@ -258,42 +271,46 @@ impl Renderer {
     /// which the alternating ids make unavoidable, since a cell says which
     /// image it belongs to in its foreground colour.
     fn placeholders(
-        &self,
+        &mut self,
         frame: &Frame,
         area: CellRect,
         id: u32,
         out: &mut impl Write,
     ) -> std::io::Result<()> {
-        protocol::image_fg(id, out)?;
         for row in 0..area.rows {
-            write!(out, "\x1b[{};{}H", area.row + row + 1, area.col + 1)?;
+            // Built whole and written once. Three codepoints a cell and a
+            // hundred cells a row is thousands of small writes a frame
+            // otherwise, each of them a capacity check to copy two bytes.
+            let line = &mut self.scratch;
+            line.clear();
+            protocol::fg(id, line);
+
             let mut pointing = true;
             for col in 0..area.cols {
                 let pos = CellPos {
                     col: area.col + col,
                     row: area.row + row,
                 };
-                let cell = match frame.cell(pos) {
-                    Some(cell) => *cell,
-                    None => break,
-                };
+                let Some(cell) = frame.cell(pos) else { break };
                 if cell.ch != ' ' {
-                    // An overlay. Write it, and remember that the
-                    // foreground is no longer the image's.
-                    write_style(out, &cell.style)?;
-                    let mut buf = [0u8; 4];
-                    out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
+                    // An overlay. The grid wins over the image, and the
+                    // foreground stops being the image's.
+                    push_style(line, &cell.style);
+                    line.push(cell.ch);
                     pointing = false;
                     continue;
                 }
                 if !pointing {
-                    protocol::image_fg(id, out)?;
+                    protocol::fg(id, line);
                     pointing = true;
                 }
-                if !protocol::placeholder(row, col, out)? {
+                if !protocol::placeholder(row, col, line) {
                     break;
                 }
             }
+
+            write!(out, "\x1b[{};{}H", area.row + row + 1, area.col + 1)?;
+            out.write_all(line.as_bytes())?;
         }
         write!(out, "\x1b[0m")
     }
@@ -319,15 +336,17 @@ impl Renderer {
                 wrote = true;
 
                 let mut active: Option<Style> = None;
+                let mut line = String::new();
                 while col < grid.cols {
                     let pos = CellPos { col, row };
                     let cell = *frame.cell(pos).expect("cell within the frame's own grid");
                     if Some(&cell) == prev.cell(pos) {
                         break;
                     }
-                    active = write_cell(frame, pos, &cell, active, self.current_id(), out)?;
+                    active = write_cell(frame, pos, &cell, active, self.current_id(), &mut line);
                     col += 1;
                 }
+                out.write_all(line.as_bytes())?;
                 write!(out, "\x1b[0m")?;
             }
         }
@@ -365,7 +384,7 @@ mod tests {
     fn image_at(generation: u64, payload: &str) -> Image {
         Image {
             generation,
-            payload: payload.to_string(),
+            payload: std::sync::Arc::new(payload.to_string()),
             area: CellRect { col: 0, row: 1, cols: 4, rows: 2 },
         }
     }
@@ -519,10 +538,10 @@ mod tests {
     #[test]
     fn measure_pixel_frame() {
         let mut renderer = Renderer::new();
-        let payload = "A".repeat(400 * 1024);
+        let payload = std::sync::Arc::new("A".repeat(400 * 1024));
         let area = CellRect { col: 0, row: 1, cols: 120, rows: 38 };
         let mut frame = Frame::new(GridSize { cols: 120, rows: 40 });
-        frame.set_image(Some(Image { generation: 1, payload: payload.clone(), area }));
+        frame.set_image(Some(Image { generation: 1, payload: std::sync::Arc::clone(&payload), area }));
         renderer.render(&frame, &mut Vec::new()).expect("the first frame");
 
         let mut worst = std::time::Duration::ZERO;
@@ -531,7 +550,7 @@ mod tests {
             let mut frame = Frame::new(GridSize { cols: 120, rows: 40 });
             frame.set_image(Some(Image {
                 generation,
-                payload: payload.clone(),
+                payload: std::sync::Arc::clone(&payload),
                 area,
             }));
             let mut out = Vec::with_capacity(payload.len() * 2);

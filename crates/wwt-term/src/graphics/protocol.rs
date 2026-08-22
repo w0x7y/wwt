@@ -80,14 +80,18 @@ pub fn delete(id: u32, out: &mut impl Write) -> io::Result<()> {
 
 /// The foreground colour a placeholder cell must carry: the image id, in
 /// three bytes.
-pub fn image_fg(id: u32, out: &mut impl Write) -> io::Result<()> {
-    write!(
+///
+/// Into a string being assembled rather than to a writer: a row is built
+/// whole and written once, so nothing here handles an error per cell.
+pub fn fg(id: u32, out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = write!(
         out,
         "\x1b[38;2;{};{};{}m",
         (id >> 16) & 0xff,
         (id >> 8) & 0xff,
         id & 0xff
-    )
+    );
 }
 
 /// One placeholder cell, addressing `row` and `col` of the placement.
@@ -103,18 +107,17 @@ pub fn image_fg(id: u32, out: &mut impl Write) -> io::Result<()> {
 /// `None` when the position is past what the diacritic table can address,
 /// which means the terminal is bigger than the protocol can name and those
 /// cells simply show no image.
-pub fn placeholder(row: u16, col: u16, out: &mut impl Write) -> io::Result<bool> {
+pub fn placeholder(row: u16, col: u16, out: &mut String) -> bool {
     let (Some(row_mark), Some(col_mark)) =
         (diacritics::for_index(row), diacritics::for_index(col))
     else {
-        return Ok(false);
+        return false;
     };
 
-    let mut buf = [0u8; 4];
-    out.write_all(PLACEHOLDER.encode_utf8(&mut buf).as_bytes())?;
-    out.write_all(row_mark.encode_utf8(&mut buf).as_bytes())?;
-    out.write_all(col_mark.encode_utf8(&mut buf).as_bytes())?;
-    Ok(true)
+    out.push(PLACEHOLDER);
+    out.push(row_mark);
+    out.push(col_mark);
+    true
 }
 
 #[cfg(test)]
@@ -200,29 +203,35 @@ mod tests {
         // A cell with no diacritics continues from the cell before it, so a
         // label painted into the middle of a row would orphan every cell
         // after it. Overlays are why this design uses placeholders at all.
-        let sent = bytes(|out| placeholder(0, 0, out).map(|_| ()));
-        assert_eq!(sent.chars().count(), 3, "the cell and its two marks");
-        assert!(sent.starts_with(PLACEHOLDER));
+        let mut line = String::new();
+        assert!(placeholder(0, 0, &mut line));
+        assert_eq!(line.chars().count(), 3, "the cell and its two marks");
+        assert!(line.starts_with(PLACEHOLDER));
     }
 
     #[test]
     fn a_placeholder_says_which_image_it_belongs_to_in_its_foreground() {
-        assert_eq!(bytes(|out| image_fg(IMAGE_IDS[0], out)), "\x1b[38;2;119;119;116m");
-        assert_eq!(bytes(|out| image_fg(IMAGE_IDS[1], out)), "\x1b[38;2;119;119;117m");
+        let mut line = String::new();
+        fg(IMAGE_IDS[0], &mut line);
+        assert_eq!(line, "\x1b[38;2;119;119;116m");
+
+        line.clear();
+        fg(IMAGE_IDS[1], &mut line);
+        assert_eq!(line, "\x1b[38;2;119;119;117m");
     }
 
     #[test]
     fn a_position_past_the_table_addresses_nothing_rather_than_addressing_wrongly() {
-        let mut out = Vec::new();
-        assert!(!placeholder(297, 0, &mut out).expect("write"), "no row for it");
-        assert!(!placeholder(0, 297, &mut out).expect("write"), "no column for it");
-        assert!(out.is_empty(), "and nothing was written");
+        let mut line = String::new();
+        assert!(!placeholder(297, 0, &mut line), "no row for it");
+        assert!(!placeholder(0, 297, &mut line), "no column for it");
+        assert!(line.is_empty(), "and nothing was written");
     }
 
     #[test]
     fn a_position_within_the_table_is_written() {
-        let mut out = Vec::new();
-        assert!(placeholder(296, 296, &mut out).expect("write"));
-        assert!(!out.is_empty());
+        let mut line = String::new();
+        assert!(placeholder(296, 296, &mut line));
+        assert!(!line.is_empty());
     }
 }

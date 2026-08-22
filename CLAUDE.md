@@ -28,6 +28,7 @@ Currently at **M5** (pixel mode). Milestones M1–M7 are defined in
     cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
     cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
     cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture              # what a picture costs
+    cargo test -p wwt --lib measure_pixel_compose -- --nocapture                 # and what composing one costs
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -361,10 +362,23 @@ cells pointed at it, and only then is the other deleted. A test image in one
 sequence shows none of this; it took a real page to find.
 
 **A frame therefore rewrites the cells, and that is the cheaper half.**
-`measure_pixel_frame`: ~38KB of cells against ~410KB of payload, under a
-millisecond. `Frame` carries the image and `Cell` does not, because a cell
-holding combining diacritics would put a terminal protocol inside the one
-crate whose hard rule is that it knows about nothing.
+`measure_pixel_frame`: ~39KB of cells against ~410KB of payload, ~410µs to
+write. `Frame` carries the image and `Cell` does not, because a cell holding
+combining diacritics would put a terminal protocol inside the one crate whose
+hard rule is that it knows about nothing.
+
+**A payload is shared, never copied.** `Image::payload` is an `Arc<String>`
+because a frame is cloned twice on the way to the terminal, once by `compose`
+and once by the renderer keeping it to diff against, and a page's worth of
+base64 is a few hundred kilobytes. This is the rule under Performance about
+never deep-copying a payload; the image is the biggest one there is.
+
+**A row of cells is assembled and written once.** A placeholder is three
+codepoints and a row is a hundred cells, so writing them as they are produced
+is thousands of writes a frame, each a capacity check to copy two bytes. The
+per-cell paths build into a `String`, which is why they return no `io::Result`
+at all. Together with the shared payload this took a pixel frame from ~1.5ms
+to ~0.45ms.
 
 **The ack is the frame rate.** Chromium sends the next picture only once the
 last is answered, so holding the ack back for `FRAME_INTERVAL` paces the

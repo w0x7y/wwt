@@ -514,7 +514,7 @@ impl Session {
         self.generations += 1;
         self.picture = Some(Image {
             generation: self.generations,
-            payload: frame.data,
+            payload: std::sync::Arc::new(frame.data),
             area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
         });
     }
@@ -2081,7 +2081,7 @@ mod tests {
 
         let frame = session.compose();
         let image = frame.image().expect("pixel mode composes an image");
-        assert_eq!(image.payload, "AAAA");
+        assert_eq!(image.payload.as_str(), "AAAA");
         assert_eq!(image.area.row, 1, "the page starts below the tab bar");
     }
 
@@ -2104,7 +2104,7 @@ mod tests {
         let effects = session.on(frame_for(background, "BBBB"));
         assert!(effects.iter().any(|e| matches!(e, Effect::AckFrame(_, 7))));
         assert!(
-            session.compose().image().is_none_or(|i| i.payload != "BBBB"),
+            session.compose().image().is_none_or(|i| i.payload.as_str() != "BBBB"),
             "the tab you are not looking at does not paint"
         );
     }
@@ -2360,6 +2360,33 @@ mod tests {
         // Nothing is stopped: the tab is being closed and its target goes
         // with it.
         assert!(!effects.iter().any(|e| matches!(e, Effect::StopScreencast(_))));
+    }
+
+    /// What composing a pixel frame costs. Run with:
+    ///
+    ///     cargo test -p wwt --lib measure_pixel_compose -- --nocapture
+    /// What composing a pixel frame costs. Run with:
+    ///
+    ///     cargo test -p wwt --lib measure_pixel_compose -- --nocapture
+    ///
+    /// The payload is shared rather than copied, so this is the cost of the
+    /// cell grid and the chrome and not of the picture: a few hundred
+    /// kilobytes of base64 moving through here would dominate everything.
+    #[test]
+    fn measure_pixel_compose() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let payload = "A".repeat(400 * 1024);
+        session.on(frame_data(&payload));
+
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..200 {
+            let start = std::time::Instant::now();
+            let frame = session.compose();
+            worst = worst.max(start.elapsed());
+            std::hint::black_box(frame);
+        }
+        eprintln!("pixel compose, worst of 200: {worst:?}");
     }
 
     // Switching.

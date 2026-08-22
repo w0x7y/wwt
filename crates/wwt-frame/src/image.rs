@@ -3,6 +3,8 @@
 //! Data and nothing else. What the payload means and how it reaches a
 //! terminal is `wwt-term`'s, because this crate knows about no terminal.
 
+use std::sync::Arc;
+
 use crate::geom::GridSize;
 
 /// A rectangle of cells, in frame coordinates.
@@ -31,13 +33,19 @@ impl CellRect {
 /// The payload is base64 and stays base64: it arrives from CDP encoded and
 /// the graphics protocol wants it encoded, so nothing here ever decodes it.
 ///
+/// Shared rather than owned, because a frame is cloned twice on its way to
+/// the terminal, once into the frame the session composes and once into the
+/// one the renderer keeps to diff against. A page's worth of base64 is a few
+/// hundred kilobytes, and copying it twice a frame is the thing `CLAUDE.md`
+/// means by never deep-copying a payload.
+///
 /// `generation` is what a renderer diffs on. Comparing payloads would mean
 /// comparing a megabyte of base64 per frame to answer a question a counter
 /// answers, and two different frames can encode identically anyway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub generation: u64,
-    pub payload: String,
+    pub payload: Arc<String>,
     pub area: CellRect,
 }
 
@@ -66,12 +74,12 @@ mod tests {
         let area = CellRect::of(GridSize { cols: 4, rows: 2 }, 1);
         let first = Image {
             generation: 1,
-            payload: "AAAA".into(),
+            payload: Arc::new("AAAA".to_string()),
             area,
         };
         let second = Image {
             generation: 2,
-            payload: "AAAA".into(),
+            payload: Arc::new("AAAA".to_string()),
             area,
         };
         assert_ne!(first, second);

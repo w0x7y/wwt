@@ -222,7 +222,7 @@ mod tests {
         let mut frame = Frame::new(GridSize { cols: 10, rows: 4 });
         let image = Image {
             generation: 7,
-            payload: "iVBOR".into(),
+            payload: std::sync::Arc::new("iVBOR".to_string()),
             area: CellRect { col: 0, row: 1, cols: 10, rows: 2 },
         };
         frame.set_image(Some(image.clone()));
@@ -236,7 +236,7 @@ mod tests {
         let mut f = Frame::new(vp().grid());
         f.set_image(Some(Image {
             generation: 1,
-            payload: "AAAA".into(),
+            payload: std::sync::Arc::new("AAAA".to_string()),
             area: CellRect::of(vp().grid(), 0),
         }));
         f.paint_run(&vp(), &run("hi", 0.0, 14.0, 20.0));
