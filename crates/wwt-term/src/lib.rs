@@ -1,3 +1,4 @@
+pub mod graphics;
 pub mod probe;
 pub mod render;
 
