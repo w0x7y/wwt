@@ -12,6 +12,9 @@
 
 pub mod base64;
 pub mod inflate;
+pub mod png;
+
+pub use png::{Png, decode, decode_base64};
 
 /// What can be wrong with a picture.
 ///

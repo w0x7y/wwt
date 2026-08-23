@@ -973,7 +973,7 @@ What the crate is named for. It reads IHDR, concatenates IDAT, inflates, undoes 
   ```
   `pixels` is always RGBA regardless of the source colour type, so one consumer path handles both. Task 8 calls `decode_base64`; nothing else calls anything here.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/wwt-png/src/png.rs`, tests at the bottom:
 
@@ -1125,7 +1125,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-png png
@@ -1133,7 +1133,7 @@ cargo test -p wwt-png png
 
 Expected: FAIL, `cannot find function decode`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `crates/wwt-png/src/png.rs`, above the tests:
 
@@ -1301,7 +1301,7 @@ pub mod png;
 pub use png::{Png, decode, decode_base64};
 ```
 
-- [ ] **Step 4: Write the test against the real fixture**
+- [x] **Step 4: Write the test against the real fixture**
 
 `crates/wwt-png/tests/screencast.rs`. This is the one that proves the crate against a picture Chromium actually produced, rather than against one this crate's own test wrote.
 
@@ -1339,7 +1339,7 @@ fn the_bytes_and_the_base64_are_the_same_picture() {
 }
 ```
 
-- [ ] **Step 5: Run to verify everything passes**
+- [x] **Step 5: Run to verify everything passes**
 
 ```bash
 cargo test -p wwt-png
@@ -1347,7 +1347,7 @@ cargo test -p wwt-png
 
 Expected: all pass, including the two fixture tests. If the fixture test fails on the colour, check whether the probe captured before the page painted; retake the fixture rather than loosening the assertion.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
