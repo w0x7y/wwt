@@ -404,6 +404,18 @@ exception, since `Core` drops effects naming a page it does not hold.
 new tab's chrome until the first frame arrives, because the alternative is
 blanking the frame you are looking at.
 
+**The picture follows the focus from four places, and one of them cannot start
+it.** `focus_tab` and `close_tab` call `follow_focus`, which stops the old target
+and starts the new one. `open_tab` and `adopt_tab` cannot: `Core` drops any effect
+naming a page it does not hold, which is every effect between asking for a tab and
+being told it opened, so a start emitted there is a start nobody hears. They call
+`leave_for_a_new_tab`, which stops the tab being left, and `Job::Opened` does the
+start. Miss either half and pixel mode looks frozen on a new tab: the tab you left
+goes on sending frames that `on_frame` acks and discards for not naming the tab in
+front, so the last picture it sent stays on screen until something else starts a
+screencast. This is the same window `Tab::opened` names for the in-flight flags,
+and the screencast is the fourth thing with that shape.
+
 **Pixel mode is global and is not saved.** Only the focused tab screencasts
 either way, so per-tab would buy a preference rather than a cost, and a new
 field in `Snapshot` is a version bump that costs every existing session file

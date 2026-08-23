@@ -225,6 +225,7 @@ impl Session {
     /// it is marked loading and `Core` holds nothing for it, so effects
     /// naming it are dropped; nothing could have expected to land.
     fn open_tab(&mut self, url: String, effects: &mut Vec<Effect>) {
+        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, url.clone());
         tab.navigating = true;
@@ -266,6 +267,7 @@ impl Session {
     /// browser chose where it goes. It arrives focused, which is what
     /// following such a link does anywhere else.
     fn adopt_tab(&mut self, target: Attached, effects: &mut Vec<Effect>) {
+        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, String::new());
         tab.navigating = true;
@@ -423,6 +425,25 @@ impl Session {
             effects.push(Effect::StopScreencast(leaving));
         }
         effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
+    }
+
+    /// Stop the picture on the way to a tab that does not exist yet.
+    ///
+    /// `follow_focus` is for a tab already open and does the stop and the
+    /// start together. It cannot be used here: `Core` drops any effect
+    /// naming a page it does not hold, which is every effect between asking
+    /// for a tab and being told it opened, so a start emitted now is a start
+    /// nobody hears. The tab being left does exist, so its stop is emitted
+    /// here and the start waits for `Job::Opened`.
+    ///
+    /// Without the stop, the tab you left goes on producing frames that
+    /// `on_frame` acks and discards for naming a tab that is no longer in
+    /// front, and the picture on screen stays the last one it sent.
+    fn leave_for_a_new_tab(&mut self, effects: &mut Vec<Effect>) {
+        if !self.pixel {
+            return;
+        }
+        effects.push(Effect::StopScreencast(self.focused_id()));
     }
 
     /// How large a picture to ask for. See `FrameSize`.
@@ -1060,6 +1081,11 @@ impl Session {
                 tab.mark_dirty();
                 if self.focused_id() == id {
                     effects.push(Effect::Activate(id));
+                    // The moment the picture can follow the focus here. It
+                    // could not when the tab was made, because there was no
+                    // page for `Core` to ask; nothing was left running to
+                    // stop, because `leave_for_a_new_tab` did that then.
+                    self.follow_focus(None, effects);
                 }
                 // The page is already at the offset it was restored to;
                 // `Effect::OpenTab` carried it, so this reads what is there.
@@ -2154,11 +2180,77 @@ mod tests {
 
     // What a dirty signal costs while a picture is what you are looking at.
 
+    fn attached(target: &str) -> Attached {
+        Attached { target: wwt_cdp::TargetId(target.to_string()), session: format!("s-{target}") }
+    }
+
     /// A ready session in pixel mode, which is where the cheap read applies.
     fn ready_in_pixel() -> Session {
         let mut session = ready_with_graphics();
         session.on(key('p'));
         session
+    }
+
+    #[test]
+    fn opening_a_tab_in_pixel_mode_moves_the_picture_to_it() {
+        // The tab you left stops at once, because it exists. The new one
+        // cannot start until it does: `Core` drops any effect naming a page
+        // it holds none for, which is every effect between asking for a tab
+        // and being told it opened.
+        let mut session = ready_in_pixel();
+        typed(&mut session, ":tabopen one.test");
+
+        let effects = session.on(code(KeyCode::Enter));
+        assert!(
+            effects.contains(&Effect::StopScreencast(tab0())),
+            "the tab you left has to stop, or its frames go on arriving: {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::StartScreencast(..))),
+            "and nothing can start on a tab with no page yet: {effects:?}"
+        );
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::StartScreencast(id, _) if *id == TabId(1))),
+            "the picture follows the focus once there is a page to ask: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn adopting_a_tab_in_pixel_mode_moves_the_picture_to_it() {
+        // A `target=_blank` link arrives focused like any other new tab, and
+        // has the same window with no page behind it.
+        let mut session = ready_in_pixel();
+
+        let effects = session.on(Event::TargetOpened(attached("t-1")));
+        assert!(
+            effects.contains(&Effect::StopScreencast(tab0())),
+            "the tab you left has to stop: {effects:?}"
+        );
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::StartScreencast(id, _) if *id == TabId(1))),
+            "the picture follows the focus: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn opening_a_tab_in_text_mode_asks_for_no_screencast() {
+        let mut session = ready();
+        typed(&mut session, ":tabopen one.test");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::StartScreencast(..) | Effect::StopScreencast(..)
+            )),
+            "text mode has no picture to move: {effects:?}"
+        );
     }
 
     #[test]
