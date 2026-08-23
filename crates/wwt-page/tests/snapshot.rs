@@ -45,14 +45,14 @@ fn a_snapshot_carries_the_title_url_and_scroll_geometry() {
         // 200 lines of 20px, so it is four times the viewport.
         let extraction = open(&h, "tall.html").await.snapshot(viewport()).await.expect("snapshot");
 
-        assert_eq!(extraction.title, "Tall Fixture");
-        assert!(extraction.url.ends_with("tall.html"), "url was {}", extraction.url);
-        assert_eq!(extraction.scroll_y, 0.0);
+        assert_eq!(extraction.status.title, "Tall Fixture");
+        assert!(extraction.status.url.ends_with("tall.html"), "url was {}", extraction.status.url);
+        assert_eq!(extraction.status.scroll_y, 0.0);
         assert!(
-            extraction.scroll_height > extraction.viewport_height,
+            extraction.status.scroll_height > extraction.status.viewport_height,
             "a 4000px page must be taller than the viewport: {} vs {}",
-            extraction.scroll_height,
-            extraction.viewport_height
+            extraction.status.scroll_height,
+            extraction.status.viewport_height
         );
     });
 }

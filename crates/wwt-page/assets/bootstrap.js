@@ -317,10 +317,18 @@
 
     // Scroll geometry rides along with the runs so the statusline costs no
     // extra round trip.
+    return { runs, caret: fields.caret, ...status() };
+  }
+
+  // What the chrome needs and nothing else: the title, where we are, and how
+  // far down. No walk, no layout of anything, no mirrors.
+  //
+  // Pixel mode asks for this instead of an extraction, because the runs it
+  // would get back are not painted there and computing them is a forced
+  // layout on the same main thread that has to paint the picture.
+  function status() {
     const doc = document.documentElement;
     return {
-      runs,
-      caret: fields.caret,
       title: document.title,
       url: location.href,
       scrollY: window.scrollY,
@@ -679,6 +687,7 @@
   // page, only data, so their tests cost data.
   window.__wwt = {
     extract,
+    status,
     hints,
     __pure: { firstWhere, splitLines, caretIn, throttle },
   };

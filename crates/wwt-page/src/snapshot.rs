@@ -17,7 +17,7 @@ use serde_json::json;
 use wwt_frame::{CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
-use crate::extract::{Extraction, Page};
+use crate::extract::{Extraction, Page, Status};
 
 /// The fraction of the font size a baseline sits above the text box's
 /// bottom. `bootstrap.js` states the same number once and calls it
@@ -176,11 +176,13 @@ impl Page {
             // needs the mirror, which is script machinery. Insert mode
             // still types; it types blind.
             caret: None,
-            title: snapshot.string(document.title).to_string(),
-            url: snapshot.string(document.document_url).to_string(),
-            scroll_y: document.scroll_offset_y,
-            scroll_height: document.content_height,
-            viewport_height,
+            status: Status {
+                title: snapshot.string(document.title).to_string(),
+                url: snapshot.string(document.document_url).to_string(),
+                scroll_y: document.scroll_offset_y,
+                scroll_height: document.content_height,
+                viewport_height,
+            },
         })
     }
 }

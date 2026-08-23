@@ -87,8 +87,8 @@ fn enter_submits_the_form_it_is_typed_into() {
         };
         page.dispatch_key(&enter).await.expect("dispatch enter");
 
-        let extraction = eventually(&page, "the submitted page", |e| e.title == "Submitted").await;
-        assert_eq!(extraction.title, "Submitted");
+        let extraction = eventually(&page, "the submitted page", |e| e.status.title == "Submitted").await;
+        assert_eq!(extraction.status.title, "Submitted");
     });
 }
 
@@ -139,11 +139,11 @@ fn clicking_a_link_follows_it() {
         page.dispatch_mouse(&MouseInput::release(at)).await.expect("release");
 
         let extraction =
-            eventually(&page, "the linked page", |e| e.title == "Fixture Page").await;
+            eventually(&page, "the linked page", |e| e.status.title == "Fixture Page").await;
         assert!(
-            extraction.url.ends_with("simple.html"),
+            extraction.status.url.ends_with("simple.html"),
             "the click should have followed the link: {}",
-            extraction.url
+            extraction.status.url
         );
     });
 }
@@ -182,7 +182,7 @@ fn a_wheel_scrolls_what_is_under_the_pointer() {
             "the scroller under the pointer should have moved"
         );
         assert_eq!(
-            extraction.scroll_y, 0.0,
+            extraction.status.scroll_y, 0.0,
             "the document must not scroll when a nested scroller was under the pointer"
         );
     });
@@ -792,9 +792,9 @@ fn scrolling_to_an_offset_lands_there() {
         // pixels, so this asserts the neighbourhood rather than the exact
         // number.
         assert!(
-            (extraction.scroll_y - 400.0).abs() < 2.0,
+            (extraction.status.scroll_y - 400.0).abs() < 2.0,
             "scrolled to {}, wanted 400",
-            extraction.scroll_y
+            extraction.status.scroll_y
         );
     });
 }
@@ -820,9 +820,9 @@ fn a_scroll_that_threw_is_a_failure_and_not_a_silence() {
 
         let extraction = page.extract().await.expect("extract");
         assert!(
-            extraction.scroll_y < 1.0,
+            extraction.status.scroll_y < 1.0,
             "the page did not move, which is the half that was always true: {}",
-            extraction.scroll_y
+            extraction.status.scroll_y
         );
     });
 }
@@ -851,7 +851,7 @@ fn two_pages_on_one_browser_read_their_own_documents() {
             "{:?}",
             texts(&two)
         );
-        assert_ne!(one.url, two.url);
+        assert_ne!(one.status.url, two.status.url);
 
         second.close().await.expect("close the second");
         first.close().await.expect("close the first");
@@ -979,9 +979,9 @@ fn a_tab_the_page_opened_for_itself_is_adopted_with_our_script_in_it() {
         })
         .await;
         assert!(
-            extraction.url.ends_with("hello.html"),
+            extraction.status.url.ends_with("hello.html"),
             "adopted the wrong target: {}",
-            extraction.url
+            extraction.status.url
         );
 
         adopted.close().await.expect("close the adopted tab");

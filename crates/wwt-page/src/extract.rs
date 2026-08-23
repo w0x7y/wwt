@@ -35,6 +35,22 @@ struct RawExtraction {
     inner_height: f64,
 }
 
+/// The shape `bootstrap.js` returns from `window.__wwt.status()`, which is
+/// the tail of `RawExtraction` and deliberately a separate struct: the two
+/// are the same fields today by coincidence, and a run field arriving in
+/// one must not silently become required of the other.
+#[derive(Debug, Deserialize)]
+struct RawStatus {
+    title: String,
+    url: String,
+    #[serde(rename = "scrollY")]
+    scroll_y: f64,
+    #[serde(rename = "scrollHeight")]
+    scroll_height: f64,
+    #[serde(rename = "innerHeight")]
+    inner_height: f64,
+}
+
 /// The insertion point, as the injected script measured it.
 #[derive(Debug, Deserialize)]
 struct RawCaret {
@@ -43,13 +59,13 @@ struct RawCaret {
     offset: usize,
 }
 
-/// One pass of the extraction script: everything the renderer and the
-/// statusline need, from one round trip.
-#[derive(Debug, Clone)]
-pub struct Extraction {
-    pub runs: Vec<TextRun>,
-    /// Where typing would land, when a form control has focus.
-    pub caret: Option<Caret>,
+/// What the chrome needs to know about a page, and nothing else.
+///
+/// Separated from the runs because pixel mode wants only this: the picture
+/// comes from the screencast, so the walk that produces runs would be a
+/// forced layout on the same main thread that has to paint it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Status {
     pub title: String,
     pub url: String,
     pub scroll_y: f64,
@@ -57,7 +73,7 @@ pub struct Extraction {
     pub viewport_height: f64,
 }
 
-impl Extraction {
+impl Status {
     /// How far down the document we are: 0.0 at the top, 1.0 when the last
     /// line is on screen, and 0.0 when the document fits without scrolling.
     pub fn scroll_progress(&self) -> f64 {
@@ -67,6 +83,17 @@ impl Extraction {
         }
         (self.scroll_y / scrollable).clamp(0.0, 1.0)
     }
+}
+
+/// One pass of the extraction script: everything the renderer and the
+/// statusline need, from one round trip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extraction {
+    pub runs: Vec<TextRun>,
+    /// Where typing would land, when a form control has focus.
+    pub caret: Option<Caret>,
+    /// Everything the chrome needs, which a status read gets on its own.
+    pub status: Status,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +504,30 @@ impl Page {
             caret: raw
                 .caret
                 .map(|c| Caret { x: c.x, baseline: c.baseline, offset: c.offset }),
+            status: Status {
+                title: raw.title,
+                url: raw.url,
+                scroll_y: raw.scroll_y,
+                scroll_height: raw.scroll_height,
+                viewport_height: raw.inner_height,
+            },
+        })
+    }
+
+    /// Read only what the chrome needs.
+    ///
+    /// What pixel mode asks for on a dirty signal. `measure_status` against
+    /// `measure_extraction` is the difference it makes, and it is the whole
+    /// reason this exists rather than reusing `extract`.
+    pub async fn status(&self) -> Result<Status> {
+        let value = self
+            .js("window.__wwt.status()")
+            .await
+            .context("run the status script")?;
+        let raw: RawStatus = serde_json::from_value(value)
+            .context("the status script returned an unexpected shape")?;
+
+        Ok(Status {
             title: raw.title,
             url: raw.url,
             scroll_y: raw.scroll_y,
@@ -484,6 +535,7 @@ impl Page {
             viewport_height: raw.inner_height,
         })
     }
+
     /// Run JavaScript in the page, for a test.
     ///
     /// Gated, because it has no business in what a caller must know: a

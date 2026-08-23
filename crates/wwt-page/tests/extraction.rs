@@ -71,7 +71,7 @@ fn reads_the_document_title() {
     let h = harness();
     runtime().block_on(async {
         let page = open(&h, "simple.html").await;
-        assert_eq!(page.extract().await.expect("extract").title, "Fixture Page");
+        assert_eq!(page.extract().await.expect("extract").status.title, "Fixture Page");
     });
 }
 
@@ -126,18 +126,16 @@ fn extraction_reports_scroll_geometry() {
     runtime().block_on(async {
         let extraction = open(&h, "simple.html").await.extract().await.expect("extract");
 
-        assert_eq!(extraction.scroll_y, 0.0);
-        assert!(extraction.viewport_height > 0.0);
-        assert!(extraction.url.ends_with("simple.html"), "url was {}", extraction.url);
-        assert_eq!(extraction.title, "Fixture Page");
+        assert_eq!(extraction.status.scroll_y, 0.0);
+        assert!(extraction.status.viewport_height > 0.0);
+        assert!(extraction.status.url.ends_with("simple.html"), "url was {}", extraction.status.url);
+        assert_eq!(extraction.status.title, "Fixture Page");
     });
 }
 
 #[test]
 fn scroll_progress_is_zero_when_the_document_fits() {
-    let e = wwt_page::Extraction {
-        runs: Vec::new(),
-        caret: None,
+    let e = wwt_page::Status {
         title: String::new(),
         url: String::new(),
         scroll_y: 0.0,
@@ -149,9 +147,7 @@ fn scroll_progress_is_zero_when_the_document_fits() {
 
 #[test]
 fn scroll_progress_is_one_at_the_bottom() {
-    let e = wwt_page::Extraction {
-        runs: Vec::new(),
-        caret: None,
+    let e = wwt_page::Status {
         title: String::new(),
         url: String::new(),
         scroll_y: 600.0,
@@ -166,7 +162,7 @@ fn scroll_progress_is_one_at_the_bottom() {
 /// sleeping a fixed amount.
 async fn await_scroll_past(page: &Page, floor: f64) -> f64 {
     for _ in 0..100 {
-        let y = page.extract().await.expect("extract").scroll_y;
+        let y = page.extract().await.expect("extract").status.scroll_y;
         if y > floor {
             return y;
         }
@@ -182,7 +178,7 @@ fn scrolling_moves_the_page_and_changes_the_runs() {
         let page = open(&h, "tall.html").await;
 
         let before = page.extract().await.expect("extract");
-        assert_eq!(before.scroll_y, 0.0);
+        assert_eq!(before.status.scroll_y, 0.0);
         let first_before = before.runs.first().expect("a run").text.clone();
 
         page.scroll_by(200.0, viewport()).await.expect("scroll");
@@ -232,11 +228,11 @@ fn scroll_to_end_reaches_the_bottom() {
 
         page.scroll_to_end().await.expect("scroll to end");
         let end = page.extract().await.expect("extract");
-        assert!(end.scroll_progress() > 0.99, "progress was {}", end.scroll_progress());
+        assert!(end.status.scroll_progress() > 0.99, "progress was {}", end.status.scroll_progress());
 
         page.scroll_to_top().await.expect("scroll to top");
         let top = page.extract().await.expect("extract");
-        assert_eq!(top.scroll_y, 0.0);
+        assert_eq!(top.status.scroll_y, 0.0);
     });
 }
 
@@ -249,13 +245,13 @@ fn history_moves_back_and_forward() {
 
         assert!(page.back().await.expect("back"), "there should be an entry to go back to");
         assert!(
-            page.extract().await.expect("extract").url.ends_with("simple.html"),
+            page.extract().await.expect("extract").status.url.ends_with("simple.html"),
             "back should land on the first fixture"
         );
 
         assert!(page.forward().await.expect("forward"), "there should be an entry to go forward to");
         assert!(
-            page.extract().await.expect("extract").url.ends_with("tall.html"),
+            page.extract().await.expect("extract").status.url.ends_with("tall.html"),
             "forward should land on the second fixture"
         );
 
@@ -269,7 +265,7 @@ fn reload_keeps_the_same_url() {
     runtime().block_on(async {
         let page = open(&h, "simple.html").await;
         page.reload().await.expect("reload");
-        assert!(page.extract().await.expect("extract").url.ends_with("simple.html"));
+        assert!(page.extract().await.expect("extract").status.url.ends_with("simple.html"));
     });
 }
 

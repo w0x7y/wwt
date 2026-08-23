@@ -20,7 +20,7 @@ use wwt_frame::{
     CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, Samples, TargetKind,
     Viewport,
 };
-use wwt_page::{Input, MouseInput, ScreencastFrame};
+use wwt_page::{Input, MouseInput, ScreencastFrame, Status};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
@@ -786,6 +786,49 @@ impl Session {
         effects.push(Effect::Extract(id, source));
     }
 
+    /// Everything the chrome learns from a page, applied the same way
+    /// whichever read produced it.
+    ///
+    /// An extraction and a status read differ in whether runs came with it
+    /// and in nothing else, so this is the only place that knows what a
+    /// title, a URL and a scroll offset mean. Splitting it out is what lets
+    /// pixel mode ask the cheap question without a second copy of the error
+    /// detection and the save rule drifting away from this one.
+    fn apply_status(&mut self, id: TabId, status: Status, effects: &mut Vec<Effect>) {
+        let progress = status.scroll_progress();
+        let Some(tab) = self.tab_mut(id) else { return };
+        // What a restart would come back to, before this read touches it.
+        // Compared against what is stored rather than against what arrived:
+        // an error page's URL is deliberately not kept, so a comparison with
+        // the read would differ every time and turn a page that cannot load
+        // into a write per dirty signal.
+        let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
+        tab.progress = progress;
+        tab.scroll_y = status.scroll_y;
+        tab.title = status.title;
+
+        // Chromium answers a DNS or connection failure by navigating to its
+        // own error page rather than failing the command, so a navigation can
+        // "succeed" into one. Its error page is more use than a stale frame,
+        // it says what went wrong, but the statusline must not go on claiming
+        // the page is fine.
+        if status.url.starts_with(CHROME_ERROR_SCHEME) {
+            // The statusline prints the URL itself, so naming it here too
+            // would print it twice.
+            tab.state = State::Error("could not be reached".to_string());
+        } else {
+            tab.url = status.url;
+            if !tab.navigating {
+                tab.state = State::Ready;
+            }
+        }
+
+        let tab = self.tab_mut(id).expect("resolved above");
+        if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
+            self.save(effects);
+        }
+    }
+
     fn enter_hints(&mut self, targets: Vec<HintTarget>) {
         let session = HintSession::new(targets);
         if session.is_empty() {
@@ -903,42 +946,15 @@ impl Session {
                         return;
                     }
                 };
-                let progress = extraction.scroll_progress();
+                let extraction = *extraction;
                 let tab = self.tab_mut(id).expect("resolved above");
-                // What a restart would come back to, before this extraction
-                // touches it. Compared against what is stored rather than
-                // against what arrived: an error page's URL is deliberately
-                // not kept, so a comparison with the extraction would differ
-                // every time and turn a page that cannot load into a write
-                // per dirty signal.
-                let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
                 tab.extracting = false;
                 tab.read = true;
-                tab.progress = progress;
-                tab.scroll_y = extraction.scroll_y;
                 tab.runs = extraction.runs;
                 tab.caret = extraction.caret;
-                tab.title = extraction.title;
-
-                // Chromium answers a DNS or connection failure by navigating
-                // to its own error page rather than failing the command, so a
-                // navigation can "succeed" into one. Its error page is more
-                // use than a stale frame, it says what went wrong, but the
-                // statusline must not go on claiming the page is fine.
-                if extraction.url.starts_with(CHROME_ERROR_SCHEME) {
-                    // The statusline prints the URL itself, so naming it here
-                    // too would print it twice.
-                    tab.state = State::Error("could not be reached".to_string());
-                } else {
-                    tab.url = extraction.url;
-                    if !tab.navigating {
-                        tab.state = State::Ready;
-                    }
-                }
-                let tab = self.tab_mut(id).expect("resolved above");
-                if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
-                    self.save(effects);
-                }
+                // Everything else an extraction carries is what a status read
+                // carries, and is applied by the one place that knows how.
+                self.apply_status(id, extraction.status, effects);
                 // The page may have changed again while we were extracting.
                 self.start_extract(id, effects);
             }
@@ -1066,9 +1082,11 @@ mod tests {
     }
 
     fn extraction(url: &str) -> Extraction {
-        Extraction {
-            runs: Vec::new(),
-            caret: None,
+        Extraction { runs: Vec::new(), caret: None, status: status(url) }
+    }
+
+    fn status(url: &str) -> Status {
+        Status {
             title: "Example".to_string(),
             url: url.to_string(),
             scroll_y: 0.0,
@@ -1814,7 +1832,7 @@ mod tests {
     fn an_extraction_that_moved_the_page_is_worth_writing_down() {
         let mut session = ready();
         let mut moved = extraction("https://example.com");
-        moved.scroll_y = 240.0;
+        moved.status.scroll_y = 240.0;
 
         let effects = session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(moved)))));
 
