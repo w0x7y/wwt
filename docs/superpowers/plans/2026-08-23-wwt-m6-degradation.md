@@ -88,7 +88,7 @@ Two things this milestone rests on are assumptions until a real Chromium answers
 - Consumes: `wwt_page::Page`, and the test harness in `crates/wwt-page/tests/common`.
 - Produces: the baseline rule Task 9 implements, and the two fixtures Task 4 asserts against.
 
-- [ ] **Step 1: Read how a page test is arranged**
+- [x] **Step 1: Read how a page test is arranged**
 
 ```bash
 sed -n '1,80p' crates/wwt-page/tests/common/mod.rs
@@ -97,7 +97,7 @@ sed -n '1,40p' crates/wwt-page/tests/extraction.rs
 
 Every test binary launches one Chromium and hands it out a test at a time, because `Input.dispatchMouseEvent` is answered by whichever target the browser has in front. Follow whatever `extraction.rs` does to get a `Page`; do not invent a second way.
 
-- [ ] **Step 2: Write the probe**
+- [x] **Step 2: Write the probe**
 
 Create `crates/wwt-page/tests/probe.rs`. It is a test so that it gets the harness for
 free, and it prints rather than asserts, because its output is the deliverable.
@@ -230,7 +230,7 @@ The fixture paths are relative to `crates/wwt-page`, which is where a test's wor
 directory is. Create `crates/wwt-png/tests/fixtures/` before running if the `create_dir_all`
 above is not enough.
 
-- [ ] **Step 3: Run both probes and read the answers**
+- [x] **Step 3: Run both probes and read the answers**
 
 ```bash
 cargo test -p wwt-page --test probe -- --nocapture
@@ -242,20 +242,20 @@ Expected: both print. Write down, verbatim, for the next steps:
 2. The exact key names under `documents[0]`, `nodes` and `layout`.
 3. The PNG's bit depth, colour type, compression, filter and interlace bytes.
 
-- [ ] **Step 4: Record the answers in the spec**
+- [x] **Step 4: Record the answers in the spec**
 
 Rewrite open question 1 of `docs/superpowers/specs/2026-08-23-wwt-m6-design.md` as closed, in the style M5 used: `~~**Title.**~~ **Closed, 2026-08-23.**` followed by what was measured and what it forces. If the answer is "line box", also change the baseline sentence in section 3 from the box bottom to the box centre, since that is the rule the rest of the plan implements.
 
 If the PNG is anything other than 8-bit, colour type 6 or 2, non-interlaced, deflate-compressed with filter method 0, say so there too: Task 4's scope is whatever the probe printed, and a decoder for a format Chromium does not send is untested code.
 
-- [ ] **Step 5: Delete the probe, keep the fixtures**
+- [x] **Step 5: Delete the probe, keep the fixtures**
 
 ```bash
 rm crates/wwt-page/tests/probe.rs
 git status --short   # the two fixtures under crates/wwt-png/tests/fixtures must remain
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-08-23-wwt-m6-design.md crates/wwt-png/tests/fixtures
