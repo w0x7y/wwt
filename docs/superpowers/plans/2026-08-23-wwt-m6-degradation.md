@@ -3090,7 +3090,7 @@ rule nobody will test.
   ```
   Task 12 is the only consumer of `Source` outside this task.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt/src/session.rs`'s `mod tests`:
 
@@ -3280,7 +3280,7 @@ In `crates/wwt/src/session.rs`'s `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt --lib
@@ -3288,7 +3288,7 @@ cargo test -p wwt --lib
 
 Expected: FAIL to compile. `Effect::Extract` takes one argument, `Source` does not exist.
 
-- [ ] **Step 3: Implement the vocabulary**
+- [x] **Step 3: Implement the vocabulary**
 
 `crates/wwt/src/effect.rs`:
 
@@ -3334,7 +3334,7 @@ with `Extract(TabId, Source)` and `Hints(TabId, Source)`.
     pub degraded: bool,
 ```
 
-- [ ] **Step 4: Implement the rule**
+- [x] **Step 4: Implement the rule**
 
 In `start_extract`, the effect names the source the tab is on:
 
@@ -3404,7 +3404,7 @@ Where `f` emits its effect:
 and put it into both `format!` arms, after `pixel`. In `Session::compose`, fill it
 from the focused tab.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 ```bash
 cargo test --workspace
@@ -3414,7 +3414,7 @@ Expected: all pass. Every existing `Job::Extracted(id, Box::new(..))` in the tes
 module becomes `Job::Extracted(id, Source::Script, Ok(Box::new(..)))`; there are
 around fifteen and the compiler lists them.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -3449,7 +3449,7 @@ and calls the matching method.
 **Interfaces:**
 - Consumes: `Source`, `Page::snapshot`, `Page::snapshot_hints`.
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
 
 ```rust
                 Effect::Extract(id, source) => {
@@ -3488,7 +3488,7 @@ and not a `Job::Failed`; it is still true and still the reason.
 `self.session.viewport()` before the closure, not inside it: nothing in a spawn may
 borrow `self`, which is the same rule the `Scroll` arm above already follows.
 
-- [ ] **Step 2: Run to verify the workspace passes**
+- [x] **Step 2: Run to verify the workspace passes**
 
 ```bash
 cargo test --workspace
@@ -3498,7 +3498,7 @@ Expected: all pass. This task adds no test of its own on purpose: it makes no
 decision, and the decisions are all tested in Task 11 with no browser. What proves
 this wiring is the integration test in Task 13's step 2.
 
-- [ ] **Step 3: Clippy and commit**
+- [x] **Step 3: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

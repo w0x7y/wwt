@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use wwt::effect::{Effect, Navigation};
+use wwt::effect::{Effect, Navigation, Source};
 use wwt::event::{Event, Job};
 use wwt::session::{Session, page_viewport};
 use wwt::tab::TabId;
@@ -42,7 +42,7 @@ async fn composed(fixture: &str) -> Frame {
 
     let mut session = Session::new(GRID, CELL);
     let id = session.focused().id;
-    session.on(Event::Done(Job::Extracted(id, Box::new(extraction))));
+    session.on(Event::Done(Job::Extracted(id, Source::Script, Ok(Box::new(extraction)))));
     session.compose()
 }
 

@@ -25,12 +25,28 @@ pub struct FrameSize {
     pub height: u32,
 }
 
+/// Which way to read a page.
+///
+/// The effect says, rather than the page deciding, so that the rule about
+/// when to reach for the second one is written where a test can exercise
+/// it without a browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// `window.__wwt`, installed into every document. Cheap, complete, and
+    /// occasionally broken by the page it is installed in.
+    Script,
+    /// `DOMSnapshot.captureSnapshot`, which shares no code with it. Costs
+    /// the whole document rather than what is on screen, offers no caret,
+    /// and works on a page that has broken the script.
+    Snapshot,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Read the page.
-    Extract(TabId),
+    Extract(TabId, Source),
     /// Ask the page for its interactive boxes.
-    Hints(TabId),
+    Hints(TabId, Source),
     Scroll(TabId, Scroll),
     Navigate(TabId, Navigation),
     /// Send one key or click to the page, in order with the others.

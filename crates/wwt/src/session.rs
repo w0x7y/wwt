@@ -26,7 +26,7 @@ use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
-use crate::effect::{Effect, FrameSize, Navigation, Scroll};
+use crate::effect::{Effect, FrameSize, Navigation, Scroll, Source};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
@@ -477,6 +477,7 @@ impl Session {
                 titles: &titles,
                 focus: self.focus,
                 pixel: self.pixel,
+                degraded: tab.degraded,
             },
         );
 
@@ -599,7 +600,9 @@ impl Session {
                 None if !self.focused().hinting && self.focused().opened => {
                     let id = self.focused_id();
                     self.focused_mut().hinting = true;
-                    effects.push(Effect::Hints(id));
+                    let source =
+                        if self.focused().degraded { Source::Snapshot } else { Source::Script };
+                    effects.push(Effect::Hints(id, source));
                 }
                 None => {}
             },
@@ -730,6 +733,11 @@ impl Session {
         let id = self.focused_id();
         let tab = self.focused_mut();
         tab.navigating = true;
+        // A new document reinstalls bootstrap.js, so the next page has done
+        // nothing to deserve the slow path. Cleared on asking rather than
+        // on arriving, which makes a reload the way back from a tab that
+        // degraded on something transient.
+        tab.degraded = false;
         tab.state = State::Loading;
         effects.push(Effect::Navigate(id, navigation));
     }
@@ -774,7 +782,8 @@ impl Session {
         }
         tab.extracting = true;
         tab.dirty = false;
-        effects.push(Effect::Extract(id));
+        let source = if tab.degraded { Source::Snapshot } else { Source::Script };
+        effects.push(Effect::Extract(id, source));
     }
 
     fn enter_hints(&mut self, targets: Vec<HintTarget>) {
@@ -849,7 +858,7 @@ impl Session {
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
         let id = match &job {
-            Job::Extracted(id, _)
+            Job::Extracted(id, _, _)
             | Job::Failed(id, _)
             | Job::Settled(id)
             | Job::Hints(id, _)
@@ -871,7 +880,29 @@ impl Session {
         }
 
         match job {
-            Job::Extracted(_, extraction) => {
+            Job::Extracted(_, source, result) => {
+                let extraction = match result {
+                    Ok(extraction) => extraction,
+                    Err(message) => {
+                        let tab = self.tab_mut(id).expect("resolved above");
+                        tab.extracting = false;
+                        match source {
+                            // The script broke. Read it the other way, once,
+                            // and go on reading it that way until it
+                            // navigates.
+                            Source::Script => {
+                                tab.degraded = true;
+                                tab.dirty = true;
+                                self.start_extract(id, effects);
+                            }
+                            // There is no third source. The frame you are
+                            // looking at stands and only the statusline
+                            // changes, which is section 8 of the parent.
+                            Source::Snapshot => tab.state = State::Error(message),
+                        }
+                        return;
+                    }
+                };
                 let progress = extraction.scroll_progress();
                 let tab = self.tab_mut(id).expect("resolved above");
                 // What a restart would come back to, before this extraction
@@ -1030,7 +1061,7 @@ mod tests {
     fn ready() -> Session {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
+        session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://example.com"))))));
         session
     }
 
@@ -1087,13 +1118,13 @@ mod tests {
 
     #[test]
     fn the_first_thing_a_session_does_is_read_the_page() {
-        assert_eq!(session().begin(), vec![Effect::Extract(tab0())]);
+        assert_eq!(session().begin(), vec![Effect::Extract(tab0(), Source::Script)]);
     }
 
     #[test]
     fn a_dirty_signal_during_an_extraction_re_runs_it_once_not_twice() {
         let mut session = session();
-        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0(), Source::Script)]);
 
         // Three signals arrive while that extraction is still in flight.
         for _ in 0..3 {
@@ -1103,10 +1134,10 @@ mod tests {
         // Finishing it starts exactly one more, covering all three. The tab
         // had no url until now, so this is also the first thing worth
         // writing down.
-        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("about:blank")))));
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("about:blank"))))));
         assert_eq!(
             effects,
-            vec![Effect::Save(session.snapshot()), Effect::Extract(tab0())]
+            vec![Effect::Save(session.snapshot()), Effect::Extract(tab0(), Source::Script)]
         );
     }
 
@@ -1116,10 +1147,7 @@ mod tests {
         // The same page `ready` left it on: an idle page is one that did not
         // move, so extracting it again must cost neither a read nor a write.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(
-                tab0(),
-                Box::new(extraction("https://example.com"))
-            ))),
+            session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://example.com")))))),
             vec![],
             "an idle page must cost nothing"
         );
@@ -1130,7 +1158,7 @@ mod tests {
         let mut session = session();
         session.begin();
         session.on(Event::Done(Job::Failed(tab0(), "boom".to_string())));
-        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0())]);
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0(), Source::Script)]);
     }
 
     // What a finished job says about the page.
@@ -1139,9 +1167,9 @@ mod tests {
     fn a_chrome_error_url_is_an_error_without_becoming_the_url() {
         let mut session = ready();
         session.on(Event::Dirty(tab0()));
-        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction(
+        session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction(
             "chrome-error://chromewebdata/",
-        )))));
+        ))))));
 
         assert_eq!(session.state(), &State::Error("could not be reached".to_string()));
         assert!(
@@ -1160,10 +1188,7 @@ mod tests {
         assert_eq!(mid_extraction, vec![], "an extraction was in flight and still is");
         // The one already running still finishes, and finds nothing to do.
         assert_eq!(
-            session.on(Event::Done(Job::Extracted(
-                tab0(),
-                Box::new(extraction("https://example.com"))
-            ))),
+            session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://example.com")))))),
             vec![]
         );
     }
@@ -1283,7 +1308,7 @@ mod tests {
     fn a_settled_navigation_reads_the_new_page() {
         let mut session = ready();
         session.on(key('H'));
-        assert_eq!(session.on(Event::Done(Job::Settled(tab0()))), vec![Effect::Extract(tab0())]);
+        assert_eq!(session.on(Event::Done(Job::Settled(tab0()))), vec![Effect::Extract(tab0(), Source::Script)]);
         assert_eq!(session.state(), &State::Ready);
     }
 
@@ -1301,7 +1326,7 @@ mod tests {
     #[test]
     fn f_queries_the_page_once_and_then_uses_what_it_said() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0(), Source::Script)]);
 
         session.on(hinted(vec![target(TargetKind::Clickable)]));
         assert!(matches!(session.mode(), Mode::Hint(_)));
@@ -1321,7 +1346,7 @@ mod tests {
         session.on(Event::Dirty(tab0()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints(tab0())],
+            vec![Effect::Hints(tab0(), Source::Script)],
             "hints are geometry, so a page that moved has invalidated them"
         );
     }
@@ -1377,7 +1402,7 @@ mod tests {
     #[test]
     fn a_query_still_in_flight_is_not_asked_again() {
         let mut session = ready();
-        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0())]);
+        assert_eq!(session.on(key('f')), vec![Effect::Hints(tab0(), Source::Script)]);
         assert_eq!(session.on(key('f')), vec![], "one question, not two");
     }
 
@@ -1411,7 +1436,7 @@ mod tests {
         assert_eq!(session.state(), &State::Error("the page went away".to_string()));
         assert_eq!(
             session.on(key('f')),
-            vec![Effect::Hints(tab0())],
+            vec![Effect::Hints(tab0(), Source::Script)],
             "a failed query that never cleared its flag would kill `f` for the session"
         );
     }
@@ -1497,7 +1522,7 @@ mod tests {
 
         assert_eq!(
             session.on(Event::Done(Job::Resized(TabId(2)))),
-            vec![Effect::Extract(TabId(2))],
+            vec![Effect::Extract(TabId(2), Source::Script)],
             "reading before the page has reflowed reads the old layout"
         );
         assert_eq!(
@@ -1522,7 +1547,7 @@ mod tests {
 
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Extracted(tab0(), Box::new(with_caret))));
+        session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(with_caret)))));
         assert_eq!(
             session.compose().cursor(),
             None,
@@ -1573,7 +1598,7 @@ mod tests {
     #[test]
     fn every_effect_says_which_page_it_is_for() {
         let mut session = session();
-        assert_eq!(session.begin(), vec![Effect::Extract(tab0())]);
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0(), Source::Script)]);
 
         let mut session = ready();
         assert_eq!(
@@ -1587,7 +1612,7 @@ mod tests {
         // Nothing can close a tab yet, but the guard is what makes Task 8
         // safe, and a job carrying an unknown id must never be looked up.
         let mut session = ready();
-        let stale = Job::Extracted(TabId(999), Box::new(extraction("https://elsewhere.test")));
+        let stale = Job::Extracted(TabId(999), Source::Script, Ok(Box::new(extraction("https://elsewhere.test"))));
         assert_eq!(session.on(Event::Done(stale)), vec![]);
         assert_eq!(session.focused().url, "https://example.com", "the frame is untouched");
     }
@@ -1598,10 +1623,7 @@ mod tests {
             typed(session, &format!(":tabopen {url}"));
             session.on(code(KeyCode::Enter));
             session.on(Event::Done(Job::Opened(TabId(n), Ok(()))));
-            session.on(Event::Done(Job::Extracted(
-                TabId(n),
-                Box::new(extraction(&format!("https://{url}"))),
-            )));
+            session.on(Event::Done(Job::Extracted(TabId(n), Source::Script, Ok(Box::new(extraction(&format!("https://{url}")))))));
         }
     }
 
@@ -1728,10 +1750,10 @@ mod tests {
         // Tab 0 is in the background and has never been read. It is read
         // anyway, once, which is what makes the first switch to it instant.
         let effects = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
-        assert!(effects.contains(&Effect::Extract(tab0())));
+        assert!(effects.contains(&Effect::Extract(tab0(), Source::Script)));
 
         // And having been read, it goes quiet.
-        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://one.test")))));
+        session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://one.test"))))));
         assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
     }
 
@@ -1794,7 +1816,7 @@ mod tests {
         let mut moved = extraction("https://example.com");
         moved.scroll_y = 240.0;
 
-        let effects = session.on(Event::Done(Job::Extracted(tab0(), Box::new(moved))));
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(moved)))));
 
         assert_eq!(saved(&effects).map(|s| s.tabs[0].scroll_y), Some(240.0));
     }
@@ -1804,10 +1826,7 @@ mod tests {
         let mut session = ready();
         session.focused_mut().dirty = true;
 
-        let effects = session.on(Event::Done(Job::Extracted(
-            tab0(),
-            Box::new(extraction("https://example.com")),
-        )));
+        let effects = session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://example.com"))))));
 
         assert!(
             saved(&effects).is_none(),
@@ -1822,10 +1841,7 @@ mod tests {
         // write on every dirty signal a page that cannot even load.
         let mut session = ready();
         let error = || {
-            Event::Done(Job::Extracted(
-                tab0(),
-                Box::new(extraction("chrome-error://chromewebdata/")),
-            ))
+            Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("chrome-error://chromewebdata/")))))
         };
         session.on(error());
 
@@ -1870,7 +1886,7 @@ mod tests {
         let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
         assert_eq!(
             effects,
-            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1), Source::Script)]
         );
     }
 
@@ -1903,7 +1919,7 @@ mod tests {
 
         assert_eq!(
             effects,
-            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1))]
+            vec![Effect::Activate(TabId(1)), Effect::Extract(TabId(1), Source::Script)]
         );
     }
 
@@ -1962,7 +1978,7 @@ mod tests {
         // opened. `Core` holds no page for it and would drop the query.
         let effects = session.on(key('f'));
         assert!(
-            !effects.iter().any(|effect| matches!(effect, Effect::Hints(_))),
+            !effects.iter().any(|effect| matches!(effect, Effect::Hints(..))),
             "asked a tab with no page behind it: {effects:?}"
         );
 
@@ -1973,7 +1989,7 @@ mod tests {
         session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
         let effects = session.on(key('f'));
         assert!(
-            effects.contains(&Effect::Hints(TabId(1))),
+            effects.contains(&Effect::Hints(TabId(1), Source::Script)),
             "f stopped working on the tab: {effects:?}"
         );
     }
@@ -2051,9 +2067,152 @@ mod tests {
         open_two_more(&mut session);
         session.on(key('x')); // closes TabId(2), leaving 0 and 1
 
-        let late = Job::Extracted(TabId(2), Box::new(extraction("https://gone.test")));
+        let late = Job::Extracted(TabId(2), Source::Script, Ok(Box::new(extraction("https://gone.test"))));
         assert_eq!(session.on(Event::Done(late)), vec![]);
         assert_eq!(session.tabs().len(), 2);
+    }
+
+    fn failed(id: TabId) -> Job {
+        Job::Extracted(id, Source::Script, Err("__wwt is not defined".to_string()))
+    }
+
+    fn read(id: TabId, source: Source, url: &str) -> Event {
+        Event::Done(Job::Extracted(id, source, Ok(Box::new(extraction(url)))))
+    }
+
+    #[test]
+    fn a_script_that_throws_is_read_the_other_way_instead() {
+        let mut session = session();
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0(), Source::Script)]);
+
+        let effects = session.on(Event::Done(failed(tab0())));
+        assert_eq!(
+            effects,
+            vec![Effect::Extract(tab0(), Source::Snapshot)],
+            "a failed script extraction asks the other source, once"
+        );
+    }
+
+    #[test]
+    fn a_tab_that_has_degraded_asks_the_snapshot_first_from_then_on() {
+        // Otherwise a page whose script is permanently broken pays a failed
+        // round trip before every good one, on every scroll frame.
+        let mut session = session();
+        session.begin();
+        session.on(Event::Done(failed(tab0())));
+        session.on(read(tab0(), Source::Snapshot, "https://example.com"));
+
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![Effect::Extract(tab0(), Source::Snapshot)]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_that_also_fails_is_the_end_of_the_line() {
+        let mut session = session();
+        session.begin();
+        session.on(Event::Done(failed(tab0())));
+
+        let effects = session.on(Event::Done(Job::Extracted(
+            tab0(),
+            Source::Snapshot,
+            Err("no document".to_string()),
+        )));
+
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Extract(..))),
+            "there is no third source: {effects:?}"
+        );
+        assert!(matches!(session.state(), State::Error(_)), "the statusline must say so");
+    }
+
+    #[test]
+    fn a_failed_extraction_leaves_the_frame_you_are_looking_at_alone() {
+        let mut session = session();
+        session.begin();
+        session.on(read(tab0(), Source::Script, "https://example.com"));
+        let before = session.compose().row_text(1);
+
+        session.on(Event::Done(failed(tab0())));
+        session.on(Event::Done(Job::Extracted(
+            tab0(),
+            Source::Snapshot,
+            Err("no document".to_string()),
+        )));
+
+        assert_eq!(session.compose().row_text(1), before, "spec section 8");
+    }
+
+    #[test]
+    fn navigating_gives_a_degraded_tab_the_good_path_back() {
+        // A new document reinstalls bootstrap.js, so the next page has done
+        // nothing to deserve the slow path. It is also the way back:
+        // reloading a tab that degraded on a transient failure clears it.
+        let mut session = session();
+        session.begin();
+        session.on(Event::Done(failed(tab0())));
+        session.on(read(tab0(), Source::Snapshot, "https://example.com"));
+
+        // Reload is Ctrl-r here, not r: `keymap.rs` is the table to check
+        // rather than to guess at.
+        session.on(ctrl('r'));
+
+        // Settling is what asks for the read, so it is what to assert on:
+        // a `Dirty` after it would find an extraction already in flight and
+        // correctly do nothing.
+        assert_eq!(
+            session.on(Event::Done(Job::Settled(tab0()))),
+            vec![Effect::Extract(tab0(), Source::Script)]
+        );
+    }
+
+    #[test]
+    fn hints_follow_the_flag_rather_than_deciding_anything() {
+        let mut healthy = session();
+        healthy.begin();
+        healthy.on(read(tab0(), Source::Script, "https://example.com"));
+        assert!(healthy.on(key('f')).contains(&Effect::Hints(tab0(), Source::Script)));
+
+        let mut degraded = session();
+        degraded.begin();
+        degraded.on(Event::Done(failed(tab0())));
+        degraded.on(read(tab0(), Source::Snapshot, "https://example.com"));
+        assert!(degraded.on(key('f')).contains(&Effect::Hints(tab0(), Source::Snapshot)));
+    }
+
+    #[test]
+    fn a_degraded_tab_says_so_and_goes_on_saying_it() {
+        // Not a State::Notice: a notice is cleared by the next successful
+        // extraction, and on a degraded tab the next extraction succeeds
+        // every time, so it would say this once and never again.
+        let mut session = session();
+        session.begin();
+        session.on(Event::Done(failed(tab0())));
+        session.on(read(tab0(), Source::Snapshot, "https://example.com"));
+
+        let rows = session.compose().grid().rows;
+        let status = session.compose().row_text(rows - 1);
+        assert!(status.contains("[degraded]"), "statusline was {status:?}");
+
+        session.on(read(tab0(), Source::Snapshot, "https://example.com"));
+        let status = session.compose().row_text(rows - 1);
+        assert!(status.contains("[degraded]"), "and still says it: {status:?}");
+    }
+
+    #[test]
+    fn the_tag_belongs_to_the_tab_and_not_to_the_browser() {
+        let mut session = session();
+        session.begin();
+        session.on(Event::Done(failed(tab0())));
+        // `t` opens the command line with "tabopen " prefilled rather than
+        // opening a tab, so this drives it the way the tab tests do.
+        typed(&mut session, ":tabopen https://other.test");
+        session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+
+        let rows = session.compose().grid().rows;
+        let status = session.compose().row_text(rows - 1);
+        assert!(!status.contains("[degraded]"), "the new tab is fine: {status:?}");
     }
 
     fn hinted_for(id: TabId, targets: Vec<HintTarget>) -> Event {
@@ -2615,7 +2774,7 @@ mod tests {
 
         // Switching to it spends the flag.
         let effects = session.on(alt('1'));
-        assert!(effects.contains(&Effect::Extract(tab0())));
+        assert!(effects.contains(&Effect::Extract(tab0(), Source::Script)));
     }
 
     #[test]
@@ -2623,7 +2782,7 @@ mod tests {
         let mut session = ready();
         open_two_more(&mut session);
         session.on(alt('1')); // to tab 0, spending its flag
-        session.on(Event::Done(Job::Extracted(tab0(), Box::new(extraction("https://example.com")))));
+        session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://example.com"))))));
 
         let effects = session.on(alt('3'));
         assert_eq!(
@@ -2673,7 +2832,7 @@ mod tests {
             worst = worst.max(start.elapsed());
 
             assert!(
-                !effects.iter().any(|e| matches!(e, Effect::Extract(_))),
+                !effects.iter().any(|e| matches!(e, Effect::Extract(..))),
                 "a clean tab must not be re-read: a switch is a repaint"
             );
             std::hint::black_box(frame);

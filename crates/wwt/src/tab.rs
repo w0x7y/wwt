@@ -39,6 +39,10 @@ pub struct Tab {
     pub dirty: bool,
     /// An extraction is in flight; a second would race it.
     pub extracting: bool,
+    /// This tab's injected script threw, so it is read by snapshot until it
+    /// navigates. Not one of the in-flight flags: it outlives the effect
+    /// that set it, on purpose.
+    pub degraded: bool,
     /// A navigation is in flight.
     pub navigating: bool,
     /// The last hint query's targets, held so that pressing `f` twice on a
@@ -71,6 +75,7 @@ impl Tab {
             scroll_y: 0.0,
             dirty: true,
             extracting: false,
+            degraded: false,
             navigating: false,
             hints: None,
             hinting: false,

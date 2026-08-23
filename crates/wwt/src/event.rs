@@ -9,6 +9,7 @@ use wwt_cdp::Attached;
 use wwt_frame::{CellSize, GridSize, HintTarget};
 use wwt_page::{Extraction, ScreencastFrame};
 
+use crate::effect::Source;
 use crate::tab::TabId;
 
 /// Something that happened. Everything that can move the browser arrives
@@ -42,7 +43,14 @@ pub enum Event {
 /// for it, so the answer has to say what it was an answer to.
 #[derive(Debug, Clone)]
 pub enum Job {
-    Extracted(TabId, Box<Extraction>),
+    /// The page was read, or could not be. One variant rather than two,
+    /// for the reason `Hints` is one: it is the only thing that clears
+    /// `extracting`, so there must be exactly one place that can forget
+    /// the extraction is over. It also carries which source answered,
+    /// because a failed script extraction and a failed snapshot mean
+    /// different things and `Job::Failed` cannot tell them apart from a
+    /// failed scroll.
+    Extracted(TabId, Source, Result<Box<Extraction>, String>),
     Failed(TabId, String),
     /// A navigation, history move, or reload finished.
     Settled(TabId),

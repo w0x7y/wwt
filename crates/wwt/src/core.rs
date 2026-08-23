@@ -25,7 +25,7 @@ use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::Page;
 use wwt_term::Renderer;
 
-use crate::effect::{Effect, Navigation, Scroll};
+use crate::effect::{Effect, Navigation, Scroll, Source};
 use crate::event::{Event, Job};
 use crate::input::InputPump;
 use crate::session::Session;
@@ -344,12 +344,26 @@ impl Core {
                     }
                 }
 
-                Effect::Extract(id) => self.spawn(id, move |page| async move {
-                    Some(match page.extract().await {
-                        Ok(extraction) => Job::Extracted(id, Box::new(extraction)),
-                        Err(error) => Job::Failed(id, error.to_string()),
+                Effect::Extract(id, source) => {
+                    let vp = self.session.viewport();
+                    self.spawn(id, move |page| async move {
+                        // The two sources answer the same question, so they
+                        // report the same job and the session's rule is the
+                        // only thing that tells them apart. A failure is not
+                        // a `Job::Failed` either: which source failed is
+                        // what decides whether there is another to try, and
+                        // a failed scroll arrives as the same variant.
+                        let read = match source {
+                            Source::Script => page.extract().await,
+                            Source::Snapshot => page.snapshot(vp).await,
+                        };
+                        Some(Job::Extracted(
+                            id,
+                            source,
+                            read.map(Box::new).map_err(|error| error.to_string()),
+                        ))
                     })
-                }),
+                }
 
                 // Always a `Job::Hints`, however it went. A failure is not a
                 // `Job::Failed`: that one clears the extraction and
@@ -357,12 +371,16 @@ impl Core {
                 // those. Nor can it go unreported, or the session would
                 // believe a query was still in flight and `f` would be dead
                 // for the rest of the run.
-                Effect::Hints(id) => self.spawn(id, move |page| async move {
-                    Some(Job::Hints(
-                        id,
-                        page.hints().await.map_err(|e| e.to_string()),
-                    ))
-                }),
+                Effect::Hints(id, source) => {
+                    let vp = self.session.viewport();
+                    self.spawn(id, move |page| async move {
+                        let found = match source {
+                            Source::Script => page.hints().await,
+                            Source::Snapshot => page.snapshot_hints(vp).await,
+                        };
+                        Some(Job::Hints(id, found.map_err(|error| error.to_string())))
+                    })
+                }
 
                 Effect::Blur(id) => self.spawn(id, move |page| async move {
                     page.blur().await.err().map(|e| Job::Noted(id, e.to_string()))

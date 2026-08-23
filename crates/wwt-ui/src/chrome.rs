@@ -59,18 +59,18 @@ pub struct Chrome<'a> {
     pub focus: usize,
     /// Whether the page is being shown as a picture rather than as its runs.
     pub pixel: bool,
+    /// Whether this tab is being read by snapshot because its script threw.
+    pub degraded: bool,
 }
 
 /// Build the statusline, padded or truncated to exactly `cols` characters.
-fn statusline(
-    mode: &Mode,
-    state: &State,
-    url: &str,
-    title: &str,
-    progress: f64,
-    pixel: bool,
-    cols: u16,
-) -> String {
+///
+/// Takes the whole `Chrome` rather than the six fields it reads. Two of
+/// those are adjacent bools, and a signature with two adjacent bools is one
+/// transposition away from a statusline that says the wrong thing about the
+/// wrong condition.
+fn statusline(chrome: &Chrome, cols: u16) -> String {
+    let &Chrome { mode, state, url, title, progress, pixel, degraded, .. } = chrome;
     let tag = match state {
         State::Ready => String::new(),
         State::Loading => "[loading] ".to_string(),
@@ -82,11 +82,15 @@ fn statusline(
     // Named only when it is on. Text is what wwt is, and a statusline that
     // spells out the normal case spends a row saying nothing.
     let pixel = if pixel { "[pixel] " } else { "" };
+    // Beside [pixel] and for the same reason: a flag rather than a State,
+    // because State::Notice is cleared by the next successful extraction
+    // and this condition has to outlive one.
+    let degraded = if degraded { "[degraded] " } else { "" };
 
     let left = if title.is_empty() {
-        format!("{}{pixel}{tag}{url}", mode_tag(mode))
+        format!("{}{pixel}{degraded}{tag}{url}", mode_tag(mode))
     } else {
-        format!("{}{pixel}{tag}{url} — {title}", mode_tag(mode))
+        format!("{}{pixel}{degraded}{tag}{url} — {title}", mode_tag(mode))
     };
 
     let percent = format!("{:>3}%", (progress * 100.0).round() as i64);
@@ -254,15 +258,7 @@ fn paint_status(frame: &mut Frame, chrome: &Chrome) {
     let row = rows - 1;
     let text = match chrome.mode {
         Mode::Command(buffer) => command_line(buffer, cols),
-        _ => statusline(
-            chrome.mode,
-            chrome.state,
-            chrome.url,
-            chrome.title,
-            chrome.progress,
-            chrome.pixel,
-            cols,
-        ),
+        _ => statusline(chrome, cols),
     };
     frame.paint_text(CellPos { col: 0, row }, &text, chrome_style());
 }
@@ -271,9 +267,44 @@ fn paint_status(frame: &mut Frame, chrome: &Chrome) {
 mod tests {
     use super::*;
 
+    /// A chrome showing an ordinary page. Statusline tests name the two or
+    /// three fields they are about and take the rest from here; the tab
+    /// bar's fields are never what one of them asserts on.
+    fn showing<'a>(mode: &'a Mode, state: &'a State, url: &'a str, title: &'a str) -> Chrome<'a> {
+        Chrome {
+            mode,
+            state,
+            url,
+            title,
+            progress: 0.0,
+            titles: &[],
+            focus: 0,
+            pixel: false,
+            degraded: false,
+        }
+    }
+
+    #[test]
+    fn statusline_tags_a_degraded_tab() {
+        let line = statusline(
+            &Chrome {
+                degraded: true,
+                ..showing(&Mode::Normal, &State::Ready, "https://example.com", "Example")
+            },
+            60,
+        );
+        assert!(line.contains("[degraded]"), "line was {line:?}");
+    }
+
     #[test]
     fn statusline_shows_url_title_and_progress() {
-        let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "Example", 0.5, false, 40);
+        let line = statusline(
+            &Chrome {
+                progress: 0.5,
+                ..showing(&Mode::Normal, &State::Ready, "https://example.com", "Example")
+            },
+            40,
+        );
         assert!(line.contains("https://example.com"), "line was {line:?}");
         assert!(line.contains("Example"), "line was {line:?}");
         assert!(line.ends_with(" 50%"), "line was {line:?}");
@@ -282,28 +313,34 @@ mod tests {
     #[test]
     fn statusline_is_exactly_the_grid_width() {
         for cols in [10u16, 40, 80, 200] {
-            let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "Example", 0.0, false, cols);
+            let line = statusline(
+                &showing(&Mode::Normal, &State::Ready, "https://example.com", "Example"),
+                cols,
+            );
             assert_eq!(line.chars().count(), usize::from(cols), "at {cols} columns");
         }
     }
 
     #[test]
     fn statusline_tags_a_loading_page() {
-        let line = statusline(&Mode::Normal, &State::Loading, "https://example.com", "", 0.0, false, 60);
+        let line = statusline(
+            &showing(&Mode::Normal, &State::Loading, "https://example.com", ""),
+            60,
+        );
         assert!(line.starts_with("[loading]"), "line was {line:?}");
     }
 
     #[test]
     fn statusline_shows_the_error_text() {
         let state = State::Error("could not resolve host".to_string());
-        let line = statusline(&Mode::Normal, &state, "https://exmaple.com", "", 0.0, false, 60);
+        let line = statusline(&showing(&Mode::Normal, &state, "https://exmaple.com", ""), 60);
         assert!(line.contains("could not resolve host"), "line was {line:?}");
     }
 
     #[test]
     fn a_long_url_is_truncated_rather_than_overflowing() {
         let url = "https://example.com/".to_string() + &"a".repeat(500);
-        let line = statusline(&Mode::Normal, &State::Ready, &url, "", 0.0, false, 40);
+        let line = statusline(&showing(&Mode::Normal, &State::Ready, &url, ""), 40);
         assert_eq!(line.chars().count(), 40);
     }
 
@@ -324,6 +361,7 @@ mod tests {
             titles,
             focus: 0,
             pixel: false,
+            degraded: false,
         }
     }
 
@@ -347,14 +385,20 @@ mod tests {
     }
     #[test]
     fn the_statusline_says_when_you_are_in_insert_mode() {
-        let line = statusline(&Mode::Insert, &State::Ready, "https://example.com", "", 0.0, false, 60);
+        let line = statusline(
+            &showing(&Mode::Insert, &State::Ready, "https://example.com", ""),
+            60,
+        );
         assert!(line.starts_with("-- INSERT --"), "line was {line:?}");
         assert!(line.contains("https://example.com"), "line was {line:?}");
     }
 
     #[test]
     fn normal_mode_adds_nothing_to_the_statusline() {
-        let line = statusline(&Mode::Normal, &State::Ready, "https://example.com", "", 0.0, false, 60);
+        let line = statusline(
+            &showing(&Mode::Normal, &State::Ready, "https://example.com", ""),
+            60,
+        );
         assert!(line.starts_with("https://example.com"), "line was {line:?}");
     }
 
@@ -368,13 +412,8 @@ mod tests {
             kind: TargetKind::Clickable,
         }];
         let line = statusline(
-            &Mode::Hint(HintSession::new(targets)),
-            &State::Ready,
-            "https://example.com",
-            "",
-            0.0,
-            false,
-            60,
+            &showing(&Mode::Hint(HintSession::new(targets)),
+            &State::Ready, "https://example.com", ""), 60,
         );
         assert!(line.starts_with("-- HINT  (1) --"), "line was {line:?}");
     }
@@ -382,13 +421,8 @@ mod tests {
     #[test]
     fn a_notice_is_not_dressed_up_as_an_error() {
         let line = statusline(
-            &Mode::Normal,
-            &State::Notice("no hints".to_string()),
-            "https://example.com",
-            "",
-            0.0,
-            false,
-            60,
+            &showing(&Mode::Normal, &State::Notice("no hints".to_string()),
+            "https://example.com", ""), 60,
         );
         assert!(line.starts_with("[no hints]"), "line was {line:?}");
         assert!(!line.contains("error"), "line was {line:?}");
