@@ -1,7 +1,8 @@
 use crate::cell::{Cell, Style};
 use crate::geom::{CellPos, GridSize, Viewport};
-use crate::image::Image;
+use crate::image::{CellRect, Image};
 use crate::run::TextRun;
+use crate::samples::Samples;
 
 /// Shrinks a box's right edge before it is mapped to a column, so an edge
 /// sitting exactly on a cell boundary belongs to the cell on its left.
@@ -165,6 +166,39 @@ impl Frame {
     /// Chrome uses this. It paints at the maximum stacking depth, and the
     /// compositor paints chrome last, so it takes every cell it touches:
     /// `paint_run` yields a cell to anything at or above its own depth.
+    /// Paint a picture as half blocks: the upper half block glyph, the top
+    /// sample as its foreground and the bottom sample as its background.
+    ///
+    /// Painted at the lowest possible depth, because it is the page and
+    /// everything else is on top of it. `paint_text` takes what it touches
+    /// unconditionally, so a hint label over a picture needs nothing else.
+    pub fn paint_samples(&mut self, area: CellRect, samples: &Samples) {
+        for row in 0..area.rows {
+            for col in 0..area.cols {
+                let Some(top) = samples.at(col, row * 2) else { continue };
+                // A missing bottom sample means an odd sample row count at
+                // the bottom edge. Repeating the top makes the cell a
+                // solid block; leaving the background unset would show the
+                // terminal's own colour as a stripe.
+                let bottom = samples.at(col, row * 2 + 1).unwrap_or(top);
+                let Some(pos) = area
+                    .col
+                    .checked_add(col)
+                    .zip(area.row.checked_add(row))
+                    .map(|(col, row)| CellPos { col, row })
+                else {
+                    continue;
+                };
+                let Some(index) = self.index(pos) else { continue };
+                self.cells[index] = Cell {
+                    ch: '\u{2580}',
+                    style: Style { fg: top, bg: Some(bottom), bold: false, reverse: false },
+                    z: i32::MIN,
+                };
+            }
+        }
+    }
+
     pub fn paint_text(&mut self, pos: CellPos, text: &str, style: Style) {
         for (i, ch) in text.chars().enumerate() {
             let Ok(offset) = u16::try_from(i) else { break };
@@ -196,6 +230,61 @@ mod tests {
     use crate::geom::{CellPos, CellSize, CssRect, GridSize, Viewport};
     use crate::image::{CellRect, Image};
     use crate::run::TextRun;
+    use crate::samples::Samples;
+
+    #[test]
+    fn painting_samples_gives_every_cell_two_colours() {
+        let mut frame = Frame::new(GridSize { cols: 2, rows: 3 });
+        // One cell row of the frame, so two sample rows.
+        let samples = Samples {
+            cols: 2,
+            rows: 2,
+            pixels: vec![
+                Rgb { r: 1, g: 1, b: 1 },
+                Rgb { r: 2, g: 2, b: 2 },
+                Rgb { r: 3, g: 3, b: 3 },
+                Rgb { r: 4, g: 4, b: 4 },
+            ],
+        };
+        frame.paint_samples(CellRect { col: 0, row: 1, cols: 2, rows: 1 }, &samples);
+
+        let cell = frame.cell(CellPos { col: 0, row: 1 }).expect("painted");
+        assert_eq!(cell.ch, '\u{2580}');
+        assert_eq!(cell.style.fg, Rgb { r: 1, g: 1, b: 1 });
+        assert_eq!(cell.style.bg, Some(Rgb { r: 3, g: 3, b: 3 }));
+
+        let cell = frame.cell(CellPos { col: 1, row: 1 }).expect("painted");
+        assert_eq!(cell.style.fg, Rgb { r: 2, g: 2, b: 2 });
+        assert_eq!(cell.style.bg, Some(Rgb { r: 4, g: 4, b: 4 }));
+    }
+
+    #[test]
+    fn a_label_over_a_half_block_page_is_the_label() {
+        // The property M5 spent a section of its spec buying with unicode
+        // placeholders, and which half-block gets for nothing: a cell is a
+        // glyph or it is picture, and whatever painted last decides.
+        let mut frame = Frame::new(GridSize { cols: 2, rows: 2 });
+        let samples = Samples { cols: 2, rows: 2, pixels: vec![Rgb { r: 9, g: 9, b: 9 }; 4] };
+        frame.paint_samples(CellRect { col: 0, row: 0, cols: 2, rows: 1 }, &samples);
+        frame.paint_text(CellPos { col: 0, row: 0 }, "a", Style::default());
+
+        assert_eq!(frame.cell(CellPos { col: 0, row: 0 }).expect("label").ch, 'a');
+        assert_eq!(frame.cell(CellPos { col: 1, row: 0 }).expect("picture").ch, '\u{2580}');
+    }
+
+    #[test]
+    fn a_cell_with_no_bottom_sample_is_a_solid_block() {
+        // An odd number of sample rows, which a resample can produce at
+        // the bottom edge. Leaving the background unset would show the
+        // terminal's own colour in a stripe across the last row.
+        let mut frame = Frame::new(GridSize { cols: 1, rows: 1 });
+        let samples = Samples { cols: 1, rows: 1, pixels: vec![Rgb { r: 5, g: 5, b: 5 }] };
+        frame.paint_samples(CellRect { col: 0, row: 0, cols: 1, rows: 1 }, &samples);
+
+        let cell = frame.cell(CellPos { col: 0, row: 0 }).expect("painted");
+        assert_eq!(cell.style.fg, Rgb { r: 5, g: 5, b: 5 });
+        assert_eq!(cell.style.bg, Some(Rgb { r: 5, g: 5, b: 5 }));
+    }
 
     fn vp() -> Viewport {
         Viewport::new(GridSize { cols: 20, rows: 5 }, CellSize { w: 10, h: 20 })

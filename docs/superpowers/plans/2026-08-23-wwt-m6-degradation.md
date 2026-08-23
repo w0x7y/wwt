@@ -1544,7 +1544,7 @@ painting, so it lives beside `paint_run` rather than beside the decoder.
   ```
   `rgba` is a plain slice, not `wwt_png::Png`: `wwt-frame` depends on nothing and that is not negotiable. Task 8 is the only caller and it passes `png.pixels`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/wwt-frame/src/samples.rs`:
 
@@ -1679,7 +1679,7 @@ In `crates/wwt-frame/src/frame.rs`'s `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-frame
@@ -1687,7 +1687,7 @@ cargo test -p wwt-frame
 
 Expected: FAIL, `cannot find type Samples`.
 
-- [ ] **Step 3: Implement `Samples`**
+- [x] **Step 3: Implement `Samples`**
 
 In `crates/wwt-frame/src/samples.rs`, above the tests:
 
@@ -1777,7 +1777,7 @@ impl Samples {
 }
 ```
 
-- [ ] **Step 4: Implement `paint_samples`**
+- [x] **Step 4: Implement `paint_samples`**
 
 In `crates/wwt-frame/src/frame.rs`:
 
@@ -1823,7 +1823,7 @@ pub mod samples;
 pub use samples::Samples;
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 ```bash
 cargo test -p wwt-frame
@@ -1831,7 +1831,7 @@ cargo test -p wwt-frame
 
 Expected: all pass.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
