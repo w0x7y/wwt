@@ -6,6 +6,7 @@ version.workspace = true
 [dependencies]
 wwt-cdp = { path = "../wwt-cdp" }
 wwt-frame = { path = "../wwt-frame" }
+wwt-png = { path = "../wwt-png" }
 wwt-page = { path = "../wwt-page" }
 wwt-term = { path = "../wwt-term" }
 wwt-ui = { path = "../wwt-ui" }

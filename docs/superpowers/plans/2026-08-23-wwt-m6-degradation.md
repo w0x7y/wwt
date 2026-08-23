@@ -2047,7 +2047,7 @@ compose.
 - Consumes: `wwt_png::decode_base64`, `wwt_frame::Samples`, `Frame::paint_samples`.
 - Produces: nothing later tasks depend on. This is the last of the half-block half.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt/src/session.rs`'s `mod tests`. The fixture is the crate's own, reached by a relative path, so the test needs no browser:
 
@@ -2138,7 +2138,7 @@ In `crates/wwt/src/session.rs`'s `mod tests`. The fixture is the crate's own, re
 
 If `state_of_focused` does not exist, assert on what the statusline row contains instead, using whatever helper the neighbouring notice tests use.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt --lib half_block
@@ -2147,7 +2147,7 @@ cargo test -p wwt --lib pixel
 
 Expected: FAIL. The first assertion to go is `pixel_mode_without_graphics_is_offered_rather_than_refused`, because `set_pixel` still refuses.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `crates/wwt/Cargo.toml`, in `[dependencies]`:
 
@@ -2242,7 +2242,7 @@ And `set_pixel` loses its refusal:
         ...
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 cargo test --workspace
@@ -2250,7 +2250,7 @@ cargo test --workspace
 
 Expected: all pass. If M5's own pixel tests fail, they are asserting on the refusal that just went away: read each one and decide whether it is now wrong (delete it) or was testing something else (fix the setup by calling `set_graphics(true)`).
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

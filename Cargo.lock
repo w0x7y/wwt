@@ -719,6 +719,7 @@ dependencies = [
  "wwt-cdp",
  "wwt-frame",
  "wwt-page",
+ "wwt-png",
  "wwt-term",
  "wwt-ui",
 ]

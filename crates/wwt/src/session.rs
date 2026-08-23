@@ -17,7 +17,8 @@
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_cdp::Attached;
 use wwt_frame::{
-    CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, TargetKind, Viewport,
+    CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, Samples, TargetKind,
+    Viewport,
 };
 use wwt_page::{Input, MouseInput, ScreencastFrame};
 use wwt_ui::Mode;
@@ -38,6 +39,18 @@ const WHEEL_ROWS: f64 = 3.0;
 
 /// What Chromium navigates to when it cannot reach a host.
 const CHROME_ERROR_SCHEME: &str = "chrome-error://";
+
+/// The picture last received for the focused tab, in whichever form the
+/// terminal can show.
+///
+/// Two shapes rather than one because they leave by different doors: an
+/// `Image` is a payload the renderer hands to a graphics protocol, and
+/// `Samples` are cells the renderer already knows how to write.
+#[derive(Debug, Clone, PartialEq)]
+enum Picture {
+    Graphics(Image),
+    Blocks(Samples),
+}
 
 pub struct Session {
     grid: GridSize,
@@ -65,7 +78,7 @@ pub struct Session {
     ///
     /// Not on `Tab`: a background tab does not screencast, so there is never
     /// a second one to hold.
-    picture: Option<Image>,
+    picture: Option<Picture>,
     /// Counts pictures. The renderer diffs on this rather than on the
     /// payload, so two frames that encode identically are still two frames.
     generations: u64,
@@ -362,14 +375,12 @@ impl Session {
 
     /// Enter or leave pixel mode.
     ///
-    /// Refusing is a notice and nothing else: the mode does not change and
-    /// the frame you are looking at stands, per section 8 of the parent
-    /// spec. Half-block would have been the third answer here and is M6's.
+    /// Never refused. Without a graphics protocol the picture is
+    /// half-block rather than absent, which is what M5's notice said it
+    /// was waiting for. Whether a picture is true pixels or coloured
+    /// blocks is a property of the terminal and not a mode: there is one
+    /// key and one tag.
     fn set_pixel(&mut self, on: bool, effects: &mut Vec<Effect>) {
-        if on && !self.graphics {
-            self.notice("pixel mode needs a terminal that can show images");
-            return;
-        }
         if on == self.pixel {
             return;
         }
@@ -437,7 +448,12 @@ impl Session {
         // through every cell the image does not cover, and in pixel mode
         // that is every cell of the page.
         if self.pixel {
-            frame.set_image(self.picture.clone());
+            match &self.picture {
+                Some(Picture::Graphics(image)) => frame.set_image(Some(image.clone())),
+                Some(Picture::Blocks(samples)) => frame
+                    .paint_samples(CellRect::of(self.vp.grid(), self.vp.origin_row()), samples),
+                None => {}
+            }
         } else {
             frame.paint_runs(&self.vp, &tab.runs);
         }
@@ -520,12 +536,32 @@ impl Session {
         if !self.pixel || self.focused_id() != id {
             return;
         }
-        self.generations += 1;
-        self.picture = Some(Image {
-            generation: self.generations,
-            payload: std::sync::Arc::new(frame.data),
-            area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
+        if self.graphics {
+            // M5's path: the bytes never leave base64.
+            self.generations += 1;
+            self.picture = Some(Picture::Graphics(Image {
+                generation: self.generations,
+                payload: std::sync::Arc::new(frame.data),
+                area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
+            }));
+            return;
+        }
+
+        // Half-block has to look inside. Decoded here rather than in
+        // `compose`, which runs for every hint label, mode change and
+        // statusline update, and here rather than in a spawned task,
+        // because a frame arrives on the CDP arm of the loop and never as
+        // a job. A few thousand pixels against a 33ms pacing interval.
+        let grid = self.vp.grid();
+        let decoded = wwt_png::decode_base64(&frame.data).ok().and_then(|png| {
+            Samples::resampled(png.width, png.height, &png.pixels, grid.cols, grid.rows * 2)
         });
+        match decoded {
+            Some(samples) => self.picture = Some(Picture::Blocks(samples)),
+            // The frame you are looking at stands. It has already been
+            // acked above, which is what keeps the screencast running.
+            None => self.notice("that picture could not be read"),
+        }
     }
 
     fn on_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
@@ -797,7 +833,10 @@ impl Session {
         // the placeholders would address a placement of the wrong shape
         // until the next frame lands. A new generation with it, because the
         // renderer diffs on that and this image has to be placed again.
-        if let Some(image) = &mut self.picture {
+        // Half-block has no placement to correct: its cells are repainted
+        // from whatever samples are in hand, and a grid the old picture is
+        // too small for leaves the new edge blank until the next frame.
+        if let Some(Picture::Graphics(image)) = &mut self.picture {
             self.generations += 1;
             image.generation = self.generations;
             image.area = CellRect::of(self.vp.grid(), self.vp.origin_row());
@@ -2054,6 +2093,91 @@ mod tests {
         )
     }
 
+    /// A real screencast frame, as base64, from the M6 probe.
+    fn fixture_frame() -> ScreencastFrame {
+        ScreencastFrame {
+            data: include_str!("../../wwt-png/tests/fixtures/screencast.txt").trim().to_string(),
+            ack: 1,
+        }
+    }
+
+    #[test]
+    fn pixel_mode_without_graphics_is_offered_rather_than_refused() {
+        // M5 answered this with a notice and said so until M6.
+        let mut session = session();
+        session.set_graphics(false);
+        session.on(key('p'));
+
+        let frame = session.compose();
+        assert!(
+            !matches!(session.state(), State::Notice(_)),
+            "pixel mode said something instead of entering"
+        );
+        assert_eq!(frame.image(), None, "no graphics means no image on the frame");
+    }
+
+    #[test]
+    fn a_frame_without_graphics_composes_to_half_block_cells() {
+        let mut session = session();
+        session.set_graphics(false);
+        session.on(key('p'));
+        session.on(Event::Frame(tab0(), Box::new(fixture_frame())));
+
+        let frame = session.compose();
+        // Row 1 is the first page row: row 0 is the tab bar.
+        let cell = frame.cell(CellPos { col: 0, row: 1 }).expect("a page cell");
+        assert_eq!(cell.ch, '\u{2580}');
+        assert_eq!(cell.style.fg, Rgb { r: 255, g: 0, b: 0 }, "the fixture page was red");
+        assert_eq!(cell.style.bg, Some(Rgb { r: 255, g: 0, b: 0 }));
+        assert_eq!(frame.image(), None, "half-block is cells and never an image");
+    }
+
+    #[test]
+    fn a_frame_with_graphics_still_composes_to_an_image() {
+        // M5's path, unchanged, and the test that says so.
+        let mut session = session();
+        session.set_graphics(true);
+        session.on(key('p'));
+        session.on(Event::Frame(tab0(), Box::new(fixture_frame())));
+
+        let frame = session.compose();
+        assert!(frame.image().is_some(), "graphics means the payload goes out whole");
+    }
+
+    #[test]
+    fn a_picture_that_cannot_be_decoded_leaves_the_last_one_up_and_is_still_acked() {
+        let mut session = session();
+        session.set_graphics(false);
+        session.on(key('p'));
+        session.on(Event::Frame(tab0(), Box::new(fixture_frame())));
+
+        let effects = session.on(Event::Frame(
+            tab0(),
+            Box::new(ScreencastFrame { data: "not a picture".to_string(), ack: 7 }),
+        ));
+
+        assert!(
+            effects.contains(&Effect::AckFrame(tab0(), 7)),
+            "Chromium counts acks and not paints, so a dropped frame still owes one"
+        );
+        let frame = session.compose();
+        let cell = frame.cell(CellPos { col: 0, row: 1 }).expect("a page cell");
+        assert_eq!(cell.ch, '\u{2580}', "the picture you were looking at must stand");
+    }
+
+    #[test]
+    fn leaving_pixel_mode_takes_the_half_block_picture_with_it() {
+        let mut session = session();
+        session.set_graphics(false);
+        session.on(key('p'));
+        session.on(Event::Frame(tab0(), Box::new(fixture_frame())));
+        session.on(key('p'));
+
+        let frame = session.compose();
+        let cell = frame.cell(CellPos { col: 0, row: 1 }).expect("a page cell");
+        assert_ne!(cell.ch, '\u{2580}', "text mode must not keep painting the picture");
+    }
+
     #[test]
     fn a_terminal_with_graphics_is_asked_for_the_page_at_full_size() {
         let mut session = ready_with_graphics();
@@ -2104,17 +2228,6 @@ mod tests {
         let effects = session.on(key('p'));
         assert!(!session.pixel);
         assert!(matches!(effects.as_slice(), [Effect::StopScreencast(_)]));
-    }
-
-    #[test]
-    fn p_without_a_terminal_that_can_show_pictures_is_a_notice() {
-        // Never blank the frame you are looking at, and never emit escapes
-        // a terminal cannot read. Section 5 of the M5 spec.
-        let mut session = ready();
-        let effects = session.on(key('p'));
-        assert!(!session.pixel);
-        assert!(effects.is_empty());
-        assert!(matches!(session.state(), State::Notice(_)), "it says why");
     }
 
     #[test]
@@ -2286,11 +2399,13 @@ mod tests {
     }
 
     #[test]
-    fn set_pixel_on_without_graphics_is_refused_like_the_key_is() {
+    fn set_pixel_on_without_graphics_enters_it_like_the_key_does() {
+        // M5 refused both ways. M6 enters both ways, into half-block: what
+        // matters here is still that the command and the key agree.
         let mut session = ready();
         typed(&mut session, ":set pixel on");
         session.on(code(KeyCode::Enter));
-        assert!(!session.pixel);
+        assert!(session.pixel);
     }
 
     #[test]
