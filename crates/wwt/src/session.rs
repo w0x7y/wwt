@@ -31,7 +31,7 @@ use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
 use crate::store::{SavedTab, Snapshot};
-use crate::tab::{Tab, TabId};
+use crate::tab::{Presence, Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
@@ -116,7 +116,7 @@ impl Session {
         let mut session = Self::empty(grid, cell);
         let id = session.mint();
         let mut tab = Tab::new(id, String::new());
-        tab.opened = true;
+        tab.presence = Presence::Attached;
         session.tabs.push(tab);
         session
     }
@@ -356,10 +356,10 @@ impl Session {
         let wanted: Vec<(TabId, String, f64, bool)> = self
             .tabs
             .iter()
-            .map(|tab| (tab.id, tab.url.clone(), tab.scroll_y, tab.opened))
+            .map(|tab| (tab.id, tab.url.clone(), tab.scroll_y, tab.attached()))
             .collect();
-        for (id, url, scroll_y, opened) in wanted {
-            if opened {
+        for (id, url, scroll_y, attached) in wanted {
+            if attached {
                 self.start_extract(id, &mut effects);
             } else {
                 effects.push(Effect::OpenTab { id, url, scroll_y });
@@ -630,7 +630,7 @@ impl Session {
                 // clears the flag below. Setting it for a query nobody can
                 // answer leaves `f` dead on that tab for the rest of the
                 // run. `Tab::opened` is what names that window.
-                None if !self.focused().hinting && self.focused().opened => {
+                None if !self.focused().hinting && self.focused().attached() => {
                     let id = self.focused_id();
                     self.focused_mut().hinting = true;
                     let source =
@@ -1075,7 +1075,7 @@ impl Session {
             }
             Job::Opened(_, Ok(())) => {
                 let tab = self.tab_mut(id).expect("resolved above");
-                tab.opened = true;
+                tab.presence = Presence::Attached;
                 tab.navigating = false;
                 tab.state = State::Ready;
                 tab.mark_dirty();

@@ -18,6 +18,26 @@ use wwt_ui::chrome::State;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u32);
 
+/// Whether a target exists for this tab, and if not, whether one is coming.
+///
+/// `Core` drops every effect naming a tab it holds no page for, so this is
+/// the question to ask before emitting one or setting an in-flight flag
+/// beside it. It used to be a bool called `opened`, and a bool cannot carry
+/// the difference that matters: `Opening` has an answer in flight and
+/// `Detached` has nothing, so focusing the first should wait and focusing
+/// the second should ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// A target was asked for and `Job::Opened` is coming.
+    Opening,
+    /// A target exists. The only state in which an effect naming this tab
+    /// is not dropped.
+    Attached,
+    /// No target, and none is coming until this tab is focused. Evicted,
+    /// restored but not yet reached, or left behind by a dead browser.
+    Detached,
+}
+
 /// One page: what it is showing, and what we have asked it for.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -54,10 +74,8 @@ pub struct Tab {
     /// this one comes back and changes the mode, so it needs to be known
     /// about while it is away.
     pub hinting: bool,
-    /// A target exists for this tab. False between asking for one and being
-    /// told it opened, which is the window in which effects naming this tab
-    /// are dropped.
-    pub opened: bool,
+    /// Whether this tab has a target behind it. See `Presence`.
+    pub presence: Presence,
     /// This tab has been read at least once, so its title is real and its
     /// runs are worth painting. Until then it is read even in the background:
     /// that first read is what makes the first switch to it instant.
@@ -81,7 +99,7 @@ impl Tab {
             navigating: false,
             hints: None,
             hinting: false,
-            opened: false,
+            presence: Presence::Opening,
             read: false,
         }
     }
@@ -92,6 +110,11 @@ impl Tab {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.hints = None;
+    }
+
+    /// Whether an effect naming this tab would reach a page.
+    pub fn attached(&self) -> bool {
+        self.presence == Presence::Attached
     }
 }
 
@@ -119,6 +142,28 @@ mod tests {
         tab.mark_dirty();
         assert!(tab.dirty);
         assert_eq!(tab.hints, None);
+    }
+
+    #[test]
+    fn a_tab_that_has_only_been_asked_for_has_no_target_yet() {
+        let tab = Tab::new(TabId(0), "https://example.com".to_string());
+        assert_eq!(tab.presence, Presence::Opening);
+        assert!(
+            !tab.attached(),
+            "an effect naming this tab would be dropped, so none may be emitted for it"
+        );
+    }
+
+    #[test]
+    fn only_an_attached_tab_can_be_asked_for_anything() {
+        // The two states without a target are not interchangeable: one has
+        // an answer coming and one is waiting to be focused. Both answer no
+        // to the only question `Core` asks.
+        let mut tab = Tab::new(TabId(0), String::new());
+        tab.presence = Presence::Attached;
+        assert!(tab.attached());
+        tab.presence = Presence::Detached;
+        assert!(!tab.attached());
     }
 
     #[test]
