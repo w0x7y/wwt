@@ -2017,7 +2017,7 @@ mod tests {
             text: text.to_string(),
             rect: CssRect { x: 0.0, y: 0.0, w: 400.0, h: 20.0 },
             baseline: 16.0,
-            style: Style { fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, bold: false, reverse: false },
+            style: Style { fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 }, bg: None, bold: false, reverse: false },
             z: 0,
         }
     }

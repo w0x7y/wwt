@@ -12,6 +12,7 @@ pub const ALPHABET: &[u8] = b"sadfjklewcmpgh";
 /// that ignores the colour.
 const LABEL_STYLE: Style = Style {
     fg: Rgb { r: 0xff, g: 0xd7, b: 0x00 },
+    bg: None,
     bold: true,
     reverse: true,
 };

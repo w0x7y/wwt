@@ -754,6 +754,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wwt-png"
+version = "0.1.0"
+
+[[package]]
 name = "wwt-term"
 version = "0.1.0"
 dependencies = [

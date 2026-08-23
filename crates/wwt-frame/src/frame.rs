@@ -361,7 +361,7 @@ mod tests {
     fn paint_carries_style_onto_the_cells() {
         let mut f = Frame::new(vp().grid());
         let mut r = run("hi", 0.0, 14.0, 20.0);
-        r.style = Style { fg: Rgb { r: 255, g: 0, b: 0 }, bold: true, reverse: false };
+        r.style = Style { fg: Rgb { r: 255, g: 0, b: 0 }, bg: None, bold: true, reverse: false };
         f.paint_run(&vp(), &r);
         let c = f.cell(CellPos { col: 0, row: 0 }).unwrap();
         assert_eq!(c.ch, 'h');
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn paint_text_carries_its_style() {
         let mut f = Frame::new(GridSize { cols: 4, rows: 1 });
-        let style = Style { fg: Rgb { r: 1, g: 2, b: 3 }, bold: false, reverse: true };
+        let style = Style { fg: Rgb { r: 1, g: 2, b: 3 }, bg: None, bold: false, reverse: true };
         f.paint_text(CellPos { col: 0, row: 0 }, "x", style);
         assert_eq!(f.cell(CellPos { col: 0, row: 0 }).unwrap().style, style);
     }

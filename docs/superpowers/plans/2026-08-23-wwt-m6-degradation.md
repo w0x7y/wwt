@@ -1378,7 +1378,7 @@ Half-block needs two colours per cell. `Style`'s own comment has been saying
 **Interfaces:**
 - Produces: `Style { fg: Rgb, bg: Option<Rgb>, bold: bool, reverse: bool }`. `Style::default()` leaves `bg` at `None`. Every existing construction site of `Style` needs the field; there are enough that the compiler is the checklist.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt-frame/src/cell.rs`, add a test module if there is none:
 
@@ -1433,7 +1433,7 @@ In `crates/wwt-term/src/render.rs`, in its existing `mod tests`:
 
 Match the surrounding tests' way of building a `Renderer` and calling `render`; if the signature differs from the sketch above, follow the file.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-frame
@@ -1442,7 +1442,7 @@ cargo test -p wwt-term
 
 Expected: FAIL to compile, `struct Style has no field named bg`.
 
-- [ ] **Step 3: Add the field**
+- [x] **Step 3: Add the field**
 
 `crates/wwt-frame/src/cell.rs`:
 
@@ -1475,7 +1475,7 @@ impl Default for Style {
 }
 ```
 
-- [ ] **Step 4: Fix every construction site**
+- [x] **Step 4: Fix every construction site**
 
 ```bash
 cargo build --workspace 2>&1 | grep -c "missing field"
@@ -1483,7 +1483,7 @@ cargo build --workspace 2>&1 | grep -c "missing field"
 
 Add `bg: None` to each. Do not reach for `..Default::default()`: an explicit `None` at each site is what makes the one site that will one day want a colour visible.
 
-- [ ] **Step 5: Teach the renderer**
+- [x] **Step 5: Teach the renderer**
 
 In `push_style`, after the foreground:
 
@@ -1497,7 +1497,7 @@ In `push_style`, after the foreground:
     }
 ```
 
-- [ ] **Step 6: Run to verify everything passes**
+- [x] **Step 6: Run to verify everything passes**
 
 ```bash
 cargo test --workspace
@@ -1505,7 +1505,7 @@ cargo test --workspace
 
 Expected: all pass, including the ASCII snapshot in `wwt-page`, which cannot have moved: nothing sets a background yet.
 
-- [ ] **Step 7: Clippy and commit**
+- [x] **Step 7: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

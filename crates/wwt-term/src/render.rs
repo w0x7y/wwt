@@ -122,6 +122,12 @@ fn push_style(out: &mut String, style: &Style) {
         out.push_str("\x1b[7m");
     }
     let _ = write!(out, "\x1b[38;2;{};{};{}m", style.fg.r, style.fg.g, style.fg.b);
+    // Only when there is one. The reset at the top of this function is
+    // what clears a background the previous cell set, so there is no
+    // "\x1b[49m" branch to forget.
+    if let Some(bg) = style.bg {
+        let _ = write!(out, "\x1b[48;2;{};{};{}m", bg.r, bg.g, bg.b);
+    }
 }
 
 /// A renderer that remembers what it last put on screen.
@@ -359,7 +365,8 @@ impl Renderer {
 mod tests {
     use super::*;
     use wwt_frame::{
-        CellRect, CellSize, CssRect, Frame, GridSize, Image, Rgb, Style, TextRun, Viewport,
+        CellPos, CellRect, CellSize, CssRect, Frame, GridSize, Image, Rgb, Style, TextRun,
+        Viewport,
     };
 
     fn vp() -> Viewport {
@@ -399,6 +406,34 @@ mod tests {
         let mut out = Vec::new();
         renderer.render(frame, &mut out).expect("render");
         String::from_utf8(out).expect("utf-8")
+    }
+
+    #[test]
+    fn render_sets_a_background_only_when_a_cell_has_one() {
+        let mut frame = Frame::new(GridSize { cols: 2, rows: 1 });
+        frame.paint_text(
+            CellPos { col: 0, row: 0 },
+            "a",
+            Style { fg: Rgb { r: 1, g: 2, b: 3 }, bg: None, bold: false, reverse: false },
+        );
+        frame.paint_text(
+            CellPos { col: 1, row: 0 },
+            "b",
+            Style {
+                fg: Rgb { r: 1, g: 2, b: 3 },
+                bg: Some(Rgb { r: 9, g: 8, b: 7 }),
+                bold: false,
+                reverse: false,
+            },
+        );
+
+        let out = rendered(&mut Renderer::new(), &frame);
+
+        assert!(out.contains("\x1b[48;2;9;8;7m"), "output was {out:?}");
+        // Exactly once: the cell without a background must not inherit the
+        // one beside it, and the reset in front of every style is what
+        // stops it.
+        assert_eq!(out.matches("\x1b[48;2;").count(), 1, "output was {out:?}");
     }
 
     #[test]
@@ -624,14 +659,14 @@ mod tests {
 
     #[test]
     fn render_sets_truecolor_foreground() {
-        let style = Style { fg: Rgb { r: 255, g: 128, b: 0 }, bold: false, reverse: false };
+        let style = Style { fg: Rgb { r: 255, g: 128, b: 0 }, bg: None, bold: false, reverse: false };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[38;2;255;128;0m"), "output was {out:?}");
     }
 
     #[test]
     fn render_sets_and_clears_bold() {
-        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bold: true, reverse: false };
+        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bg: None, bold: true, reverse: false };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[1m"), "output was {out:?}");
         assert!(out.ends_with("\x1b[0m"), "output was {out:?}");
@@ -639,7 +674,7 @@ mod tests {
 
     #[test]
     fn render_does_not_repeat_an_unchanged_style() {
-        let style = Style { fg: Rgb { r: 10, g: 20, b: 30 }, bold: false, reverse: false };
+        let style = Style { fg: Rgb { r: 10, g: 20, b: 30 }, bg: None, bold: false, reverse: false };
         let out = render_to_string(&painted("hello", style));
         assert_eq!(
             out.matches("\x1b[38;2;10;20;30m").count(),
@@ -707,7 +742,7 @@ mod tests {
 
     #[test]
     fn render_sets_reverse_video() {
-        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bold: false, reverse: true };
+        let style = Style { fg: Rgb { r: 0, g: 0, b: 0 }, bg: None, bold: false, reverse: true };
         let out = render_to_string(&painted("hi", style));
         assert!(out.contains("\x1b[7m"), "output was {out:?}");
     }

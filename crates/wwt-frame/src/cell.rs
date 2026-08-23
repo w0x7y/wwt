@@ -9,9 +9,16 @@ pub struct Rgb {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
     pub fg: Rgb,
+    /// The cell's own background, or the terminal's when there is none.
+    ///
+    /// Extraction never produces one: a page painted over whatever theme
+    /// the terminal has is what makes text mode look like the terminal it
+    /// is in rather than like a browser pretending to be one. Half-block
+    /// is the one thing that sets it, because half a cell is a foreground
+    /// and a background and there is no third way to say that.
+    pub bg: Option<Rgb>,
     pub bold: bool,
-    /// Swap foreground and background. Chrome uses this; extraction never
-    /// produces it, which is why there is no background color here yet.
+    /// Swap foreground and background. Chrome uses this.
     pub reverse: bool,
 }
 
@@ -19,6 +26,7 @@ impl Default for Style {
     fn default() -> Self {
         Self {
             fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 },
+            bg: None,
             bold: false,
             reverse: false,
         }
@@ -43,5 +51,18 @@ impl Default for Cell {
             style: Style::default(),
             z: i32::MIN,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_style_has_no_background_unless_it_is_given_one() {
+        // Text mode never sets one. A run is a foreground colour on
+        // whatever the terminal's own background is, and that is what
+        // makes a page painted over a user's theme look like their theme.
+        assert_eq!(Style::default().bg, None);
     }
 }

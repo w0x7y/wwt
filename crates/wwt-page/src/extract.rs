@@ -467,6 +467,7 @@ impl Page {
                     baseline: r.baseline,
                     style: Style {
                         fg: parse_css_color(&r.color),
+                        bg: None,
                         bold: r.bold,
                         reverse: false,
                     },

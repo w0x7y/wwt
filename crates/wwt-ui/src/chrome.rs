@@ -21,6 +21,7 @@ pub enum State {
 fn chrome_style() -> Style {
     Style {
         fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 },
+        bg: None,
         bold: false,
         reverse: true,
     }
@@ -155,6 +156,7 @@ struct TabSlot {
 fn focus_style() -> Style {
     Style {
         fg: Rgb { r: 0xd0, g: 0xd0, b: 0xd0 },
+        bg: None,
         bold: true,
         reverse: false,
     }
