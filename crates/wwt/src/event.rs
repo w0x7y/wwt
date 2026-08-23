@@ -36,6 +36,46 @@ pub enum Event {
     Done(Job),
 }
 
+/// Why something did not work, in the only two kinds `Session` treats
+/// differently.
+///
+/// `Core` reports what happened and the session decides what it means,
+/// which is the seam M6 drew when the effect started naming its source
+/// rather than the page carrying a flag. A string cannot carry the
+/// distinction, and every rule about degrading depends on it: a script that
+/// threw is a page our extractor cannot read, and a page that did not answer
+/// is one whose main thread is not running, which the fallback extractor
+/// needs just as much as our script does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The command was never answered. The page is not running.
+    TimedOut,
+    /// It was answered, with a refusal.
+    Failed(String),
+}
+
+impl Failure {
+    /// What an error from a page operation was.
+    ///
+    /// The downcast is why `wwt-cdp` has a type for this at all: the reason
+    /// has to survive being wrapped in context on the way up.
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        if error.downcast_ref::<wwt_cdp::TimedOut>().is_some() {
+            return Failure::TimedOut;
+        }
+        Failure::Failed(error.to_string())
+    }
+
+    /// What to put in the statusline. A timeout says `[stalled]` instead, so
+    /// this is only ever reached by the other kind.
+    pub fn message(&self) -> String {
+        match self {
+            Failure::TimedOut => "the page did not answer".to_string(),
+            Failure::Failed(message) => message.clone(),
+        }
+    }
+}
+
 /// The result of something that ran off the loop's thread.
 ///
 /// Every variant that came from a page names it, and a job whose tab is no
@@ -50,19 +90,19 @@ pub enum Job {
     /// because a failed script extraction and a failed snapshot mean
     /// different things and `Job::Failed` cannot tell them apart from a
     /// failed scroll.
-    Extracted(TabId, Source, Result<Box<Extraction>, String>),
+    Extracted(TabId, Source, Result<Box<Extraction>, Failure>),
     /// The chrome's half of a read came back, or could not. One variant
     /// carrying a `Result` for the reason `Extracted` is one: it and
     /// `Extracted` are the only two things that clear `reading`, and each
     /// has to be the single place that can forget its read is over.
-    Status(TabId, Result<Status, String>),
-    Failed(TabId, String),
+    Status(TabId, Result<Status, Failure>),
+    Failed(TabId, Failure),
     /// A navigation, history move, or reload finished.
     Settled(TabId),
     /// The page reported its interactive boxes, or could not. One variant
     /// rather than two, so there is exactly one place that can forget the
     /// query is no longer in flight.
-    Hints(TabId, Result<Vec<HintTarget>, String>),
+    Hints(TabId, Result<Vec<HintTarget>, Failure>),
     /// The page has been told the window changed size.
     Resized(TabId),
     /// A tab's target was created and navigated, or could not be. The page

@@ -27,7 +27,7 @@ use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
 use crate::effect::{Effect, FrameSize, Navigation, Scroll, Source};
-use crate::event::{Event, Job};
+use crate::event::{Event, Failure, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
 use crate::store::{SavedTab, Snapshot};
@@ -994,14 +994,26 @@ impl Session {
             Job::Extracted(_, source, result) => {
                 let extraction = match result {
                     Ok(extraction) => extraction,
-                    Err(message) => {
+                    Err(failure) => {
                         let tab = self.tab_mut(id).expect("resolved above");
                         tab.reading = false;
-                        match source {
+                        match (source, &failure) {
+                            // A deadline is not a broken script. The page is
+                            // not running, and `DOMSnapshot` needs the same
+                            // main thread our script does, so asking it costs
+                            // a second deadline to learn the same thing and
+                            // leaves the tab degraded for good over a wedge
+                            // that may last a second.
+                            //
+                            // Nothing is scheduled to try again either: a
+                            // page wedged in a loop cannot run its own
+                            // MutationObserver, so it sends no dirty signal,
+                            // and one that recovers sends one and is read.
+                            (_, Failure::TimedOut) => tab.state = State::Stalled,
                             // The script broke. Read it the other way, once,
                             // and go on reading it that way until it
                             // navigates.
-                            Source::Script => {
+                            (Source::Script, _) => {
                                 tab.degraded = true;
                                 tab.dirty = true;
                                 self.start_extract(id, effects);
@@ -1009,7 +1021,7 @@ impl Session {
                             // There is no third source. The frame you are
                             // looking at stands and only the statusline
                             // changes, which is section 8 of the parent.
-                            Source::Snapshot => tab.state = State::Error(message),
+                            (Source::Snapshot, _) => tab.state = State::Error(failure.message()),
                         }
                         return;
                     }
@@ -1036,6 +1048,13 @@ impl Session {
                     // degrade, and read the other way from now on. There is
                     // no `Source` to branch on because a status is only ever
                     // asked of a tab whose script works.
+                    // A deadline is the exception, for the reason
+                    // `Extracted` gives: the snapshot needs the main thread
+                    // that did not answer.
+                    Err(Failure::TimedOut) => {
+                        tab.state = State::Stalled;
+                        return;
+                    }
                     Err(_) => {
                         tab.degraded = true;
                         tab.dirty = true;
@@ -1071,9 +1090,15 @@ impl Session {
                             self.enter_hints(targets);
                         }
                     }
-                    Err(message) => {
+                    Err(failure) => {
                         if let Some(tab) = self.tab_mut(id) {
-                            tab.state = State::Error(message);
+                            // A hint query that was never answered says the
+                            // page is not running, which is what `[stalled]`
+                            // is for.
+                            tab.state = match failure {
+                                Failure::TimedOut => State::Stalled,
+                                Failure::Failed(message) => State::Error(message),
+                            };
                         }
                     }
                 }
@@ -1130,13 +1155,20 @@ impl Session {
                     self.focused_mut().state = State::Error(message);
                 }
             }
-            Job::Failed(_, message) => {
+            Job::Failed(_, failure) => {
                 let tab = self.tab_mut(id).expect("resolved above");
                 tab.reading = false;
                 tab.navigating = false;
                 // The frame stays exactly as it was; only the statusline
                 // changes. Section 8: never blank the frame you are looking at.
-                tab.state = State::Error(message);
+                //
+                // A scroll or a navigation that was never answered says the
+                // same thing about the page as a read that was not, so it
+                // earns the same label.
+                tab.state = match failure {
+                    Failure::TimedOut => State::Stalled,
+                    Failure::Failed(message) => State::Error(message),
+                };
             }
             // The frame stays exactly as it was; only the statusline changes.
             // Spec section 8. Deliberately not `Job::Failed`: that one clears
@@ -1271,7 +1303,7 @@ mod tests {
     fn a_failed_extraction_lets_the_next_one_start() {
         let mut session = session();
         session.begin();
-        session.on(Event::Done(Job::Failed(tab0(), "boom".to_string())));
+        session.on(Event::Done(Job::Failed(tab0(), Failure::Failed("boom".to_string()))));
         assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0(), Source::Script)]);
     }
 
@@ -1311,7 +1343,7 @@ mod tests {
     fn a_failure_never_blanks_the_frame() {
         let mut session = ready();
         let before = session.compose();
-        session.on(Event::Done(Job::Failed(tab0(), "the page went away".to_string())));
+        session.on(Event::Done(Job::Failed(tab0(), Failure::Failed("the page went away".to_string()))));
         let after = session.compose();
 
         let rows = |f: &Frame| (0..23).map(|r| f.row_text(r)).collect::<Vec<_>>();
@@ -1545,7 +1577,7 @@ mod tests {
     fn a_query_that_failed_leaves_f_working() {
         let mut session = ready();
         session.on(key('f'));
-        session.on(Event::Done(Job::Hints(tab0(), Err("the page went away".to_string()))));
+        session.on(Event::Done(Job::Hints(tab0(), Err(Failure::Failed("the page went away".to_string())))));
 
         assert_eq!(session.state(), &State::Error("the page went away".to_string()));
         assert_eq!(
@@ -2187,7 +2219,75 @@ mod tests {
     }
 
     fn failed(id: TabId) -> Job {
-        Job::Extracted(id, Source::Script, Err("__wwt is not defined".to_string()))
+        Job::Extracted(
+            id,
+            Source::Script,
+            Err(Failure::Failed("__wwt is not defined".to_string())),
+        )
+    }
+
+    #[test]
+    fn a_read_that_timed_out_stalls_the_tab_and_does_not_degrade_it() {
+        // A script that threw is a page our extractor cannot read, and the
+        // snapshot is a different extractor that might. A page that did not
+        // answer in five seconds has no main thread running, and the
+        // snapshot needs the same one: asking would cost a second deadline
+        // to learn the same thing, and would mark the tab degraded for the
+        // rest of its life over a wedge that may last a second.
+        let mut session = ready();
+        let id = session.focused_id();
+        let effects = session.on(Event::Done(Job::Extracted(
+            id,
+            Source::Script,
+            Err(Failure::TimedOut),
+        )));
+
+        assert_eq!(*session.state(), State::Stalled);
+        assert!(!session.focused().degraded, "a deadline is not a broken script");
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Extract(_, Source::Snapshot))),
+            "there is nothing to ask a page that is not running"
+        );
+        assert!(!session.focused().reading, "the read is over either way");
+    }
+
+    #[test]
+    fn a_script_that_threw_still_reaches_for_the_snapshot() {
+        // M6's rule, unchanged. This is what proves the exemption above is
+        // an exemption and not a replacement.
+        let mut session = ready();
+        let id = session.focused_id();
+        let effects = session.on(Event::Done(failed(id)));
+
+        assert!(session.focused().degraded);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Extract(_, Source::Snapshot)))
+        );
+    }
+
+    #[test]
+    fn a_page_that_comes_back_clears_the_stall_by_itself() {
+        // Nothing schedules a retry: a page wedged in a loop cannot run its
+        // own MutationObserver, so it sends no dirty signal and nothing
+        // re-asks. A page that recovers sends one and is read normally.
+        let mut session = ready();
+        let id = session.focused_id();
+        session.on(Event::Done(Job::Extracted(id, Source::Script, Err(Failure::TimedOut))));
+        assert_eq!(*session.state(), State::Stalled);
+
+        let effects = session.on(Event::Dirty(id));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Extract(_, Source::Script))),
+            "the fast path, because a timeout never degraded it"
+        );
+        session.on(read(id, Source::Script, "https://example.com"));
+        assert_eq!(*session.state(), State::Ready);
     }
 
     fn read(id: TabId, source: Source, url: &str) -> Event {
@@ -2390,7 +2490,7 @@ mod tests {
         let mut session = ready_in_pixel();
         session.on(Event::Dirty(tab0()));
 
-        let effects = session.on(Event::Done(Job::Status(tab0(), Err("no".to_string()))));
+        let effects = session.on(Event::Done(Job::Status(tab0(), Err(Failure::Failed("no".to_string())))));
 
         assert_eq!(
             effects,
@@ -2437,7 +2537,7 @@ mod tests {
         let effects = session.on(Event::Done(Job::Extracted(
             tab0(),
             Source::Snapshot,
-            Err("no document".to_string()),
+            Err(Failure::Failed("no document".to_string())),
         )));
 
         assert!(
@@ -2458,7 +2558,7 @@ mod tests {
         session.on(Event::Done(Job::Extracted(
             tab0(),
             Source::Snapshot,
-            Err("no document".to_string()),
+            Err(Failure::Failed("no document".to_string())),
         )));
 
         assert_eq!(session.compose().row_text(1), before, "spec section 8");

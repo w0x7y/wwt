@@ -19,9 +19,37 @@ use tokio::time::{Duration, timeout};
 
 use crate::target::{Attached, TargetId};
 
-/// Every command carries a deadline, so a wedged page cannot hang the caller.
-/// Spec section 8.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// What a command gets when it is our own script being asked a question.
+///
+/// Every command carries a deadline, so a wedged page cannot hang the
+/// caller. Spec section 8.
+///
+/// An extraction measures ~4ms, a status read under 1ms, and the worst
+/// `DOMSnapshot` of `heavy.html` ~26ms, so this is two hundred times the
+/// slowest thing ever measured here. It was a flat thirty seconds, which
+/// meant a wedged page swallowed a keystroke for half a minute before
+/// anything on screen said so.
+pub const DEADLINE: Duration = Duration::from_secs(5);
+
+/// What a command gets when the answer is somebody else's network.
+///
+/// A real page on a bad connection legitimately takes this long, and the
+/// thing being waited for is not our main thread.
+pub const NAVIGATION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// A command that was never answered, as a type rather than a message.
+///
+/// `Session` treats a deadline differently from a script that threw: one
+/// means our extractor cannot read this page and the other means the page
+/// is not running at all. The difference has to survive the trip through
+/// `anyhow`, so it is carried by a type that can be downcast to rather than
+/// by wording nobody should have to match on.
+#[derive(Debug, thiserror::Error)]
+#[error("{method} was not answered within {deadline:?}")]
+pub struct TimedOut {
+    pub method: String,
+    pub deadline: Duration,
+}
 
 /// A CDP protocol event: any message the browser sends that is not a
 /// response to one of our commands.
@@ -187,15 +215,42 @@ impl Client {
 
     /// Send a command to the browser target.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        self.send(method, params, None).await
+        self.send(method, params, None, DEADLINE).await
+    }
+
+    /// The same, with a deadline of its own. See `NAVIGATION_DEADLINE`.
+    pub async fn call_with(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value> {
+        self.send(method, params, None, deadline).await
     }
 
     /// Send a command to an attached session (a page).
     pub async fn call_on(&self, session_id: &str, method: &str, params: Value) -> Result<Value> {
-        self.send(method, params, Some(session_id)).await
+        self.send(method, params, Some(session_id), DEADLINE).await
     }
 
-    async fn send(&self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
+    /// The same, with a deadline of its own.
+    pub async fn call_on_with(
+        &self,
+        session_id: &str,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value> {
+        self.send(method, params, Some(session_id), deadline).await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+        deadline: Duration,
+    ) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut msg = json!({ "id": id, "method": method, "params": params });
         if let Some(session_id) = session {
@@ -209,14 +264,18 @@ impl Client {
             .send(msg.to_string())
             .map_err(|_| anyhow!("the CDP connection is closed"))?;
 
-        let mut response = match timeout(CALL_TIMEOUT, rx).await {
+        let mut response = match timeout(deadline, rx).await {
             Ok(Ok(v)) => v,
             Ok(Err(_)) => {
                 return Err(anyhow!("the CDP connection closed while awaiting {method}"));
             }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                return Err(anyhow!("{method} timed out after {CALL_TIMEOUT:?}"));
+                return Err(TimedOut {
+                    method: method.to_string(),
+                    deadline,
+                }
+                .into());
             }
         };
 
@@ -304,6 +363,34 @@ mod tests {
 
     fn one(text: &str) -> impl futures_util::Stream<Item = Result<Message, WsError>> + Unpin {
         stream::iter(vec![Ok(Message::text(text.to_string()))])
+    }
+
+    #[tokio::test]
+    async fn a_call_that_is_never_answered_produces_a_timeout_and_not_a_string() {
+        // The whole of the stalled rule rests on this being tellable apart
+        // from a page whose script threw.
+        let (pending, subscribers) = parts();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = Client {
+            next_id: AtomicU64::new(1),
+            outgoing: tx,
+            pending,
+            subscribers,
+            user_agent: OnceLock::new(),
+        };
+
+        let error = client
+            // A real millisecond rather than a paused clock, which would
+            // cost the whole crate tokio's test-util feature to save one.
+            // Nothing is listening on the other end, so no length of wait
+            // changes the answer.
+            .call_with("Runtime.evaluate", json!({}), Duration::from_millis(1))
+            .await
+            .expect_err("nothing ever answers this");
+        assert!(
+            error.downcast_ref::<TimedOut>().is_some(),
+            "a deadline is a kind of failure, not a message about one"
+        );
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ use wwt_page::Page;
 use wwt_term::Renderer;
 
 use crate::effect::{Effect, Navigation, Scroll, Source};
-use crate::event::{Event, Job};
+use crate::event::{Event, Failure, Job};
 use crate::input::InputPump;
 use crate::session::Session;
 use crate::store::Snapshot;
@@ -363,7 +363,7 @@ impl Core {
                         Some(Job::Extracted(
                             id,
                             source,
-                            read.map(Box::new).map_err(|error| error.to_string()),
+                            read.map(Box::new).map_err(|error| Failure::from_error(&error)),
                         ))
                     })
                 }
@@ -375,7 +375,7 @@ impl Core {
                 Effect::ReadStatus(id) => self.spawn(id, move |page| async move {
                     Some(Job::Status(
                         id,
-                        page.status().await.map_err(|error| error.to_string()),
+                        page.status().await.map_err(|error| Failure::from_error(&error)),
                     ))
                 }),
 
@@ -392,7 +392,7 @@ impl Core {
                             Source::Script => page.hints().await,
                             Source::Snapshot => page.snapshot_hints(vp).await,
                         };
-                        Some(Job::Hints(id, found.map_err(|error| error.to_string())))
+                        Some(Job::Hints(id, found.map_err(|error| Failure::from_error(&error))))
                     })
                 }
 
@@ -408,7 +408,7 @@ impl Core {
                             Scroll::Top => page.scroll_to_top().await,
                             Scroll::End => page.scroll_to_end().await,
                         };
-                        done.err().map(|e| Job::Failed(id, e.to_string()))
+                        done.err().map(|e| Job::Failed(id, Failure::from_error(&e)))
                     });
                 }
 
@@ -421,7 +421,7 @@ impl Core {
                     };
                     Some(match done {
                         Ok(()) => Job::Settled(id),
-                        Err(error) => Job::Failed(id, error.to_string()),
+                        Err(error) => Job::Failed(id, Failure::from_error(&error)),
                     })
                 }),
 
@@ -539,7 +539,7 @@ impl Core {
         self.spawn(id, move |page| async move {
             Some(match page.set_viewport(vp).await {
                 Ok(()) => Job::Resized(id),
-                Err(error) => Job::Failed(id, error.to_string()),
+                Err(error) => Job::Failed(id, Failure::from_error(&error)),
             })
         });
     }

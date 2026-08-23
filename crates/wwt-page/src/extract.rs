@@ -337,7 +337,15 @@ impl Page {
 
         let result = self
             .client
-            .call_on(&self.session_id, "Page.navigate", json!({ "url": url }))
+            // The long deadline: what is being waited for is somebody
+            // else's server, not our own script. `LOAD_TIMEOUT` below is a
+            // separate wait, for the load event that follows.
+            .call_on_with(
+                &self.session_id,
+                "Page.navigate",
+                json!({ "url": url }),
+                wwt_cdp::NAVIGATION_DEADLINE,
+            )
             .await
             .with_context(|| format!("navigate to {url}"))?;
 
@@ -394,10 +402,11 @@ impl Page {
 
         let mut events = self.client.subscribe();
         self.client
-            .call_on(
+            .call_on_with(
                 &self.session_id,
                 "Page.navigateToHistoryEntry",
                 json!({ "entryId": entry_id }),
+                wwt_cdp::NAVIGATION_DEADLINE,
             )
             .await
             .context("navigate to a history entry")?;
@@ -416,7 +425,12 @@ impl Page {
     pub async fn reload(&self) -> Result<()> {
         let mut events = self.client.subscribe();
         self.client
-            .call_on(&self.session_id, "Page.reload", json!({}))
+            .call_on_with(
+                &self.session_id,
+                "Page.reload",
+                json!({}),
+                wwt_cdp::NAVIGATION_DEADLINE,
+            )
             .await
             .context("reload the page")?;
         self.wait_for_load(&mut events).await

@@ -218,7 +218,7 @@ Three keys, a parser asserted on with data, and the three call sites that read t
   - `wwt_cdp::Chromium::launch(profile: Option<&Path>, binary: Option<&Path>) -> Result<Chromium>`
   - `Session::configure(&mut self, config: &Config)`
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In the workspace `Cargo.toml`, under `[workspace.dependencies]`, after `serde_json`:
 
@@ -234,7 +234,7 @@ toml = { workspace = true }
 
 Run `cargo check -p wwt`. If `0.9` does not resolve, use the highest `0.x` that does and say so in the commit body.
 
-- [ ] **Step 2: Write the failing parser tests**
+- [x] **Step 2: Write the failing parser tests**
 
 Create `crates/wwt/src/config.rs` containing only this test module for now:
 
@@ -317,13 +317,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Add `pub mod config;` to `crates/wwt/src/lib.rs`.
 Run: `cargo test -p wwt --lib config::`
 Expected: FAIL, `cannot find function parse in this scope`.
 
-- [ ] **Step 4: Implement the parser**
+- [x] **Step 4: Implement the parser**
 
 Above the test module in `crates/wwt/src/config.rs`:
 
@@ -435,12 +435,12 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
 
 Add `use std::path::Path;` to the test module's imports if the compiler asks.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p wwt --lib config::`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 6: Add the config path to the store**
+- [x] **Step 6: Add the config path to the store**
 
 In `crates/wwt/src/store.rs`, beside `data_dir` and `data_dir_from`:
 
@@ -492,7 +492,7 @@ And a test beside the existing `data_dir_from` tests:
     }
 ```
 
-- [ ] **Step 7: Take the search template as a parameter in `wwt-ui`**
+- [x] **Step 7: Take the search template as a parameter in `wwt-ui`**
 
 In `crates/wwt-ui/src/command.rs`:
 
@@ -520,7 +520,7 @@ In `crates/wwt-ui/src/command.rs`:
       }
   ```
 
-- [ ] **Step 8: Take the binary path as a parameter in `wwt-cdp`**
+- [x] **Step 8: Take the binary path as a parameter in `wwt-cdp`**
 
 In `crates/wwt-cdp/src/launch.rs`:
 
@@ -539,7 +539,7 @@ In `crates/wwt-cdp/src/launch.rs`:
 - `pub async fn launch(profile: Option<&std::path::Path>, binary: Option<&std::path::Path>)`, whose first line becomes `let binary = find_chromium(binary)?;`.
 - Update the four call sites in `crates/wwt-cdp/tests/browser.rs`, and the ones in `crates/wwt-page/tests/common/mod.rs`, `crates/wwt/tests/smoke.rs` and `crates/wwt/tests/input.rs`, to pass `None` as the second argument.
 
-- [ ] **Step 9: Wire it through the session and main**
+- [x] **Step 9: Wire it through the session and main**
 
 In `crates/wwt/src/session.rs`:
 - Add a field `search: String` to `Session`, initialised in `empty` with `Config::default().search`.
@@ -577,12 +577,12 @@ In `crates/wwt/src/main.rs`:
   ```
   Place this block *above* the `if !mouse` block.
 
-- [ ] **Step 10: Run everything**
+- [x] **Step 10: Run everything**
 
 Run: `cargo test --workspace`
 Expected: PASS. The browser tests launch Chromium; they must still pass with the new `launch` signature.
 
-- [ ] **Step 11: Clippy and commit**
+- [x] **Step 11: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
