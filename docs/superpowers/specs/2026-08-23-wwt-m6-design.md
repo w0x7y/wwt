@@ -120,15 +120,24 @@ milestone shrinks to the half of it that is worth having soon.
 ### What the query asks for
 
     DOMSnapshot.captureSnapshot({
-      computedStyles: ["color", "font-weight"],
+      computedStyles: ["color", "font-weight", "font-size", "visibility"],
       includePaintOrder: true,
       includeDOMRects: false,
     })
 
-Two computed styles and no more, because a run's style is a foreground colour and a
-bold flag and nothing else. Reverse belongs to the chrome, and the background colour
-section 6 adds is half-block's, never a run's. There is no italic in a `Style`, so
-asking for `font-style` would be asking for something nothing can paint.
+Four computed styles and no more. Two of them are the style: a run's `Style` is a
+foreground colour and a bold flag and nothing else. Reverse belongs to the chrome, and
+the background colour section 6 adds is half-block's, never a run's. There is no italic
+in a `Style`, so asking for `font-style` would be asking for something nothing can
+paint.
+
+The other two are not style at all, and the probe is what added them. `font-size` is
+arithmetic: the baseline rule below subtracts a fraction of it, so without it the
+fallback cannot put a run in the row the script would. `visibility` is culling: a
+snapshot reports a `visibility: hidden` text box with ordinary non-empty bounds, where
+the script drops it, so a fallback that does not ask would paint text the browser does
+not show.
+
 `includePaintOrder` is what fills `TextRun::z`, which the painter's algorithm in
 `paint_run` needs to resolve a contested cell.
 
@@ -145,16 +154,20 @@ difference except by the tag on the statusline:
   has `scrollOffsetX`/`scrollOffsetY` subtracted. Getting this wrong is a page that
   looks right at the top of a document and drifts as you scroll, which is why it is
   written down.
-- **The baseline** is the bottom of the text box. `paint_run` snaps a run to the row
-  containing its baseline, and a line box's bottom shares that row for any ordinary
-  line height. Section 12 keeps this open: the probe compares both paths on the same
-  page, and if Chromium's text box turns out to be the full line box rather than the
-  tight one, the rule becomes the box centre instead.
-- **Style** comes from `layout.styles`, indexed against the two properties asked for.
+- **The baseline** is the script's rule applied to the snapshot's box:
+  `bounds.y + bounds.height - font_size * 0.21`, the `DESCENDER` constant
+  `bootstrap.js` states once. The probe settled why it can be the same rule: a text box
+  is the tight box and it is the *same* box, to the last fraction of a pixel, that the
+  script gets from `getClientRects`. Anything else here is a fallback that reads the
+  page correctly and paints it a row off.
+- **Style** comes from `layout.styles`, positionally: one entry per property asked for,
+  in the order asked for.
   Bold is `font-weight >= 600`, which is what the script already uses.
-- **Culling is ours.** The snapshot is the whole document, so runs outside the viewport
-  are dropped on our side. See section 11: this is the fallback's real cost, and it is
-  accepted rather than solved.
+- **Culling is ours**, and there are two kinds. The snapshot is the whole document, so
+  runs outside the viewport are dropped on our side; see section 11, where this is the
+  fallback's real cost, accepted rather than solved. And a hidden run is culled by its
+  `visibility`, since a snapshot reports one and the script never sees one.
+  `display: none` needs no rule: it has no layout node to report.
 - **Title, URL and scroll geometry** come from the document itself: `title`,
   `documentURL`, `scrollOffsetY` and `contentHeight`. The viewport height is ours
   already. So the statusline still costs no extra call, which was M1's rule.
@@ -249,7 +262,13 @@ zero and the cell size is a configured guess.
 A new crate with `wwt-frame`'s hard rule: no I/O, no dependencies. It parses IHDR,
 concatenates IDAT, inflates, unfilters, and returns samples. That is all of it.
 
-**It decodes what Chromium's screencast emits and refuses everything else.** No
+**It decodes what Chromium's screencast emits and refuses everything else**, and the
+probe is what fixed that scope: 8-bit channels, colour type 2, compression method 0,
+filter method 0, interlace method 0. Colour type 2 is RGB, with no alpha, which is the
+one that matters downstream: a screencast frame is opaque, so a sample is three bytes
+and there is no compositing question to answer. Colour type 6 is accepted too, since
+the container work is already done and dropping a fourth byte is one line, but the
+fixture is type 2 because that is what arrives. No
 interlacing, no palettes, no 16-bit channels, no ancillary chunks it does not need. A
 decoder that accepts what it will never be given is code no test covers, and a wrong
 guess about a format is worse than an error: it puts a plausible wrong picture on
@@ -374,7 +393,7 @@ same cells any frame writes. `measure_halfblock_frame` records it beside
   the wire shape. **The fidelity test is the interesting one**: on a page where the
   script works, extract both ways and assert the runs land on the same cells. That is
   what tells us the baseline rule and the scroll-offset subtraction are right, and it
-  is the test that closes open question 1.
+  is what keeps the answer to open question 1 true rather than merely measured once.
 - **`wwt`**: the degrade rule, the one retry, the sticky flag, the clear on navigation,
   and hints following the flag. No browser: these are decisions.
 - **End to end**: a page painted a known solid colour, screencast at reduced size,
@@ -389,11 +408,15 @@ same cells any frame writes. `measure_halfblock_frame` records it beside
 
 ## 13. Open questions
 
-1. **The text box and the baseline.** Whether `TextBoxSnapshot::bounds` is the tight
-   text box or the full line box decides whether the baseline is the box bottom or its
-   centre. The probe that opens the implementation answers it by comparing both
-   extraction paths on the same page, and the fidelity test in section 12 keeps the
-   answer honest.
+1. ~~**The text box and the baseline.**~~ **Closed, 2026-08-23.** A `<p>` given
+   `font: 16px/3 monospace`, so that its line box is 48px around 22px of text, was read
+   both ways at once. The snapshot's text box is `[0, 56, 153.609375, 22]` and the
+   script's rect is `x=0 y=56 w=153.609375 h=22`: not merely the tight box, the same
+   box. So the baseline is the script's own rule, `bottom - font_size * 0.21`, which
+   reproduces the script's answer exactly (74.64 for that paragraph, 36.28 for a 32px
+   heading) rather than approximately. It forces `font-size` into the computed styles
+   the query asks for, and the probe found `visibility` had to go in beside it, since
+   a snapshot reports hidden text that the script never sees. Section 3 has both.
 2. **Whether a full-document snapshot needs a cap.** Section 11 accepts the cost
    without bounding it. If `measure_snapshot` on `heavy.html` is bad enough to make a
    degraded tab unusable rather than merely slow, the answer is probably to stop
