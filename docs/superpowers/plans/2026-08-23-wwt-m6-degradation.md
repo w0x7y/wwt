@@ -3526,7 +3526,7 @@ owes a number for it.
 - Modify: `docs/superpowers/specs/2026-08-19-wwt-design.md` (the four amendments)
 - Modify: `docs/superpowers/specs/2026-08-23-wwt-m6-design.md` (open question 2)
 
-- [ ] **Step 1: Write the half-block measurement**
+- [x] **Step 1: Write the half-block measurement**
 
 In `crates/wwt/src/session.rs`'s `mod tests`, beside `measure_pixel_compose`:
 
@@ -3561,7 +3561,7 @@ In `crates/wwt/src/session.rs`'s `mod tests`, beside `measure_pixel_compose`:
 Sixteen milliseconds is half the pacing interval, which is the point at which
 decoding on the loop would stop being free. It is expected to come in far under.
 
-- [ ] **Step 2: Write the snapshot measurement and the wiring test**
+- [x] **Step 2: Write the snapshot measurement and the wiring test**
 
 Append to `crates/wwt-page/tests/snapshot.rs`:
 
@@ -3599,7 +3599,7 @@ fn measure_snapshot_of_a_heavy_page() {
 }
 ```
 
-- [ ] **Step 3: Run the measurements and record them**
+- [x] **Step 3: Run the measurements and record them**
 
 ```bash
 cargo test -p wwt --lib measure_halfblock_frame -- --nocapture
@@ -3608,7 +3608,7 @@ cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture
 
 Write both numbers into section 11 of `docs/superpowers/specs/2026-08-23-wwt-m6-design.md`, replacing the sentences that promise them. Then close open question 2 with the answer the number gives: if a degraded `heavy.html` is merely slow, close it as accepted; if it is unusable, say so and open the cap as work for the milestone that needs it, since `textBoxes` arrive in document order and stopping once the visible rows are filled is the shape of the fix.
 
-- [ ] **Step 4: Write the four amendments into the parent spec**
+- [x] **Step 4: Write the four amendments into the parent spec**
 
 In `docs/superpowers/specs/2026-08-19-wwt-design.md`, exactly as section 9 of the M6 spec describes:
 
@@ -3617,7 +3617,7 @@ In `docs/superpowers/specs/2026-08-19-wwt-design.md`, exactly as section 9 of th
 3. **Section 11**: M6 is degradation, M7 stays hardening, M8 is reader mode and the reflow renderer.
 4. Nothing in the parent spec claims pixel mode refuses without graphics; the sentence that did is in M5's spec, section 5. Amend it there to say half-block, with a pointer to M6.
 
-- [ ] **Step 5: Update the glossary**
+- [x] **Step 5: Update the glossary**
 
 In `CONTEXT.md`, under "What the browser is doing":
 
@@ -3642,7 +3642,7 @@ and the bottom as its background. Two colours in one cell, which is the
 whole reason `Style` has a background at all.
 ```
 
-- [ ] **Step 6: Update the working notes**
+- [x] **Step 6: Update the working notes**
 
 In `CLAUDE.md`: change the milestone line to M6, add the two commands
 
@@ -3704,7 +3704,7 @@ as a job, and the numbers make that fine: a few thousand pixels against a
 33ms pacing interval.
 ```
 
-- [ ] **Step 7: Update the README**
+- [x] **Step 7: Update the README**
 
 Status line to M6. Change the `p` line so it no longer promises a refusal, and add a
 sentence about a degraded page:
@@ -3722,7 +3722,7 @@ keep reading, scrolling, hinting and typing; you lose the insertion point
 and the wrapping inside a text field until the tab navigates.
 ```
 
-- [ ] **Step 8: The manual pass**
+- [x] **Step 8: The manual pass**
 
 Not automatable, and the milestone is not done without it. On a real terminal:
 
@@ -3742,7 +3742,7 @@ Not automatable, and the milestone is not done without it. On a real terminal:
 
 Fix what it finds, and put what it taught in the commit body: M5's lesson was that the things a spec is most confident about are the ones a real terminal disproves.
 
-- [ ] **Step 9: Run everything one last time**
+- [x] **Step 9: Run everything one last time**
 
 ```bash
 cargo test --workspace
@@ -3759,7 +3759,7 @@ The first four are M2's, M3's, M4's and M5's numbers, and M6 must not have moved
 of them: nothing on the good path changed. If one has moved, find out why before
 calling the milestone done.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add CLAUDE.md CONTEXT.md README.md crates docs
