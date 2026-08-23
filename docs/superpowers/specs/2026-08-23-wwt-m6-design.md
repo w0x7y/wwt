@@ -71,16 +71,28 @@ rules and the cursor rules all apply unchanged, and a hint label over a half-blo
 page is a cell that differs. M5 spent a section of its spec on making the grid win
 over the image; here the grid is all there is.
 
-The decode happens once, in the spawned task that receives the frame, and never in
-`compose`. Composing is what a hint label, a mode change and a statusline update each
-cost, and a picture that were decoded there would be decoded again for every one of
-them.
+The decode happens once per frame, in `Session::on_frame`, and never in `compose`.
+Composing is what a hint label, a mode change and a statusline update each cost, and a
+picture decoded there would be decoded again for every one of them.
+
+`on_frame` rather than a spawned task because there is no spawned task to put it in: a
+picture arrives on the CDP arm of the loop's `select!` as `Event::Frame`, straight off
+the websocket, and never as a `Job`. So the choice is the loop's thread or a new hop
+through the result channel, and the loop wins on the numbers. A frame is paced at
+`FRAME_INTERVAL`, 33ms, and the picture to decode is a few thousand pixels rather than
+a megapixel, so the decode is a fraction of a millisecond against an interval it has
+all of. Text mode produces no frames at all and pays none of it.
+
+It also keeps the seam where M5 left it. The decode is pure arithmetic over bytes with
+no I/O, which is the same thing `paint_runs` is, and `Session` already owns what a
+picture is. A test feeds a `ScreencastFrame` carrying a fixture PNG and asserts on the
+cells that compose out, with no browser and no terminal anywhere near it.
 
 ### Crate deltas
 
 | Crate | M6 delta |
 |---|---|
-| `wwt-png` | New. IHDR, IDAT, inflate, unfilter. **No I/O, no dependencies**, the same hard rule as `wwt-frame`, and no knowledge of terminals, cells or pages. |
+| `wwt-png` | New. Base64, IHDR, IDAT, inflate, unfilter. **No I/O, no dependencies**, the same hard rule as `wwt-frame`, and no knowledge of terminals, cells or pages. |
 | `wwt-frame` | `Style::bg`, and `Frame::paint_samples`, which turns a sample grid into half-block cells. |
 | `wwt-page` | `snapshot()` beside `extract()`, and a screencast size that depends on what the terminal can show. |
 | `wwt-term` | The renderer emits a background colour when a cell has one. |
@@ -258,11 +270,20 @@ consolidated. Text mode never sets it, so text mode is unchanged byte for byte.
 
 ### The frame's two shapes
 
-`Job`/`Event` carry a `Picture` that is either the base64 payload M5 forwards or an
-`Arc<Samples>` this milestone decodes. `Session::picture` holds whichever arrived,
-`compose` sets an image on the frame for the first and paints cells for the second,
-and everything else about pixel mode, the ack, the pacing, the focus rule and the
-switch behaviour, is M5's and is untouched.
+`Event::Frame` is unchanged: it carries the `ScreencastFrame` exactly as M5 defined it,
+base64 and all. What changes is what `Session::picture` becomes, which is a `Picture`
+that is either the `Image` M5 forwards or the `Samples` this milestone decodes.
+`compose` sets an image on the frame for the first and paints cells for the second.
+
+Everything else about pixel mode is M5's and is untouched: the ack, the pacing, the
+rule that only the focused tab screencasts, the rule that every frame is acked
+including the dropped ones, and what a switch costs.
+
+**The base64 stops being opaque on this path.** M5's whole economy was that a payload
+arrives encoded and leaves encoded; half-block has to look inside it, so `wwt-png`
+decodes base64 as well as PNG. Both are pure byte arithmetic and both live in the same
+crate for the same reason. The graphics path is unchanged and still never decodes
+anything.
 
 ## 7. Detection and the key
 
