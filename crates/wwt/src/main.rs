@@ -19,10 +19,16 @@ const FRAME_BUFFER: usize = 256 * 1024;
 #[tokio::main]
 async fn main() -> Result<()> {
     let (new_session, argument) = parse_args()?;
+
+    // Before the argument is interpreted: a word that is not a URL is a
+    // search, and where a search goes is one of the three things this file
+    // decides.
+    let (config, complaints) = wwt::config::load(wwt::store::config_path().as_deref());
+
     let url = match argument {
-        Some(argument) => {
-            Some(normalize_url(&argument).map_err(|message| anyhow::anyhow!(message))?)
-        }
+        Some(argument) => Some(
+            normalize_url(&argument, &config.search).map_err(|message| anyhow::anyhow!(message))?,
+        ),
         None => None,
     };
 
@@ -37,14 +43,21 @@ async fn main() -> Result<()> {
     // session file. The instance holding the profile owns that file.
     let profile = wwt::store::profile_path();
     let (browser, private) = match profile.as_deref() {
-        Some(path) => match Chromium::launch(Some(path)).await {
+        Some(path) => match Chromium::launch(Some(path), config.chromium.as_deref()).await {
             Ok(browser) => (browser, false),
             Err(_) => (
-                Chromium::launch(None).await.context("launch chromium")?,
+                Chromium::launch(None, config.chromium.as_deref())
+                    .await
+                    .context("launch chromium")?,
                 true,
             ),
         },
-        None => (Chromium::launch(None).await.context("launch chromium")?, true),
+        None => (
+            Chromium::launch(None, config.chromium.as_deref())
+                .await
+                .context("launch chromium")?,
+            true,
+        ),
     };
 
     let client = Arc::new(
@@ -89,11 +102,16 @@ async fn main() -> Result<()> {
             open: url,
             session_file,
             graphics,
+            config: config.clone(),
         },
     );
     // The statusline holds one notice, so the last of these is the one you
-    // see: least worth knowing first. A session you cannot save is worth
-    // more than a mouse you cannot use.
+    // see: least worth knowing first. A typo in a config file matters less
+    // than a mouse you cannot use, and both matter less than a session you
+    // cannot save.
+    if let Some(complaint) = complaints.first() {
+        core.notice(&format!("config.toml: {complaint}"));
+    }
     if !mouse {
         core.notice("mouse unavailable");
     }

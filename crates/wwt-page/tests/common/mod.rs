@@ -77,7 +77,7 @@ pub fn harness() -> Turn {
             Some(harness) => harness,
             None => {
                 let harness = Arc::new(runtime().block_on(async {
-                    let browser = Chromium::launch(None).await.expect("launch chromium");
+                    let browser = Chromium::launch(None, None).await.expect("launch chromium");
                     let client = Client::connect(browser.ws_url()).await.expect("connect");
                     // `Page::open` takes its session from auto-attach rather
                     // than attaching for itself, so a client without this

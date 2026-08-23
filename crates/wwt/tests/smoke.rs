@@ -31,7 +31,7 @@ fn fixture_url(name: &str) -> String {
 /// the browser does the moment the tab bar arrived, so the assertion that
 /// called itself end to end was describing something nothing else did.
 async fn composed(fixture: &str) -> Frame {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
     client.auto_attach().await.expect("turn on auto-attach");
 
@@ -94,7 +94,7 @@ async fn text_lands_in_the_first_row_the_page_owns() {
 /// `select!` arm itself.
 #[tokio::test]
 async fn a_real_screencast_frame_becomes_the_picture_on_a_frame() {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
     client.auto_attach().await.expect("turn on auto-attach");
 

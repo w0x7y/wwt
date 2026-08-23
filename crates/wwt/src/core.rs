@@ -126,6 +126,8 @@ pub struct Startup {
     /// before raw mode, because after the input pump exists a reply would be
     /// a keystroke.
     pub graphics: bool,
+    /// What the config file said, or its defaults.
+    pub config: crate::config::Config,
 }
 
 impl Core {
@@ -139,6 +141,7 @@ impl Core {
         let mut session =
             Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
         session.set_graphics(startup.graphics);
+        session.configure(&startup.config);
 
         Self {
             pages: HashMap::new(),

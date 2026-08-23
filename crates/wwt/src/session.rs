@@ -69,6 +69,11 @@ pub struct Session {
     /// startup. A session told no refuses pixel mode rather than emitting
     /// escapes into a terminal that would print them as text.
     graphics: bool,
+    /// Where anything that is not a URL goes. From the config file, and
+    /// held here because `Session` is what interprets a `:` line.
+    search: String,
+    /// How many live targets to hold. See `evict`.
+    max_tabs: usize,
     /// Global rather than per-tab: only the focused tab screencasts either
     /// way, so per-tab would buy a preference rather than a cost, and it
     /// would have to be remembered in the session file, which is a snapshot
@@ -133,6 +138,8 @@ impl Session {
             focus: 0,
             next_id: 0,
             graphics: false,
+            search: crate::config::Config::default().search,
+            max_tabs: crate::config::Config::default().max_tabs,
             pixel: false,
             picture: None,
             generations: 0,
@@ -373,6 +380,15 @@ impl Session {
     /// Asked once at startup, before raw mode, and never again.
     pub fn set_graphics(&mut self, graphics: bool) {
         self.graphics = graphics;
+    }
+
+    /// Take what the config file said.
+    ///
+    /// Called once at startup, like `set_graphics`, and for the same reason:
+    /// neither of these is a thing that changes while the browser is running.
+    pub fn configure(&mut self, config: &crate::config::Config) {
+        self.search = config.search.clone();
+        self.max_tabs = config.max_tabs;
     }
 
     /// Enter or leave pixel mode.
@@ -676,7 +692,7 @@ impl Session {
                 };
                 let line = buffer.clone();
                 self.mode = Mode::Normal;
-                match command::parse(&line) {
+                match command::parse(&line, &self.search) {
                     Ok(Command::Quit) => effects.push(Effect::Quit),
                     Ok(command) => self.run_command(command, effects),
                     Err(message) => self.focused_mut().state = State::Error(message),

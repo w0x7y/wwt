@@ -60,6 +60,34 @@ fn data_dir_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
     Some(Path::new(home).join(".local/share/wwt"))
 }
 
+/// Our directory under the user's config home, or `None` when there is no
+/// home to put it in.
+pub fn config_dir() -> Option<PathBuf> {
+    config_dir_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// The arithmetic of `config_dir`, with the environment passed in. The same
+/// shape as `data_dir_from` and for the same reason: environment variables
+/// are process global and tests run in threads.
+fn config_dir_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg.filter(|value| !value.is_empty()) {
+        return Some(Path::new(xdg).join("wwt"));
+    }
+    let home = home.filter(|value| !value.is_empty())?;
+    Some(Path::new(home).join(".config/wwt"))
+}
+
+/// The settings file, which is the user's to write and ours only to read.
+///
+/// Under the config home rather than the data home: the profile and the
+/// session file are ours and this one is not.
+pub fn config_path() -> Option<PathBuf> {
+    Some(config_dir()?.join("config.toml"))
+}
+
 /// Chromium's persistent profile: the cookie jar that makes logins durable.
 pub fn profile_path() -> Option<PathBuf> {
     Some(data_dir()?.join("profile"))
@@ -133,6 +161,23 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn the_config_lives_under_the_config_home_and_not_the_data_home() {
+        assert_eq!(
+            config_dir_from(Some(OsStr::new("/x/config")), None),
+            Some(PathBuf::from("/x/config/wwt"))
+        );
+        assert_eq!(
+            config_dir_from(None, Some(OsStr::new("/home/a"))),
+            Some(PathBuf::from("/home/a/.config/wwt"))
+        );
+        // An empty variable is unset, per the XDG basedir spec.
+        assert_eq!(
+            config_dir_from(Some(OsStr::new("")), Some(OsStr::new("/home/a"))),
+            Some(PathBuf::from("/home/a/.config/wwt"))
+        );
     }
 
     #[test]

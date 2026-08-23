@@ -7,7 +7,7 @@ use wwt_cdp::{Chromium, Client};
 
 #[tokio::test]
 async fn launches_chromium_and_reports_its_version() {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Client::connect(browser.ws_url()).await.expect("connect");
 
     let result = client
@@ -24,7 +24,7 @@ async fn launches_chromium_and_reports_its_version() {
 
 #[tokio::test]
 async fn attaches_to_a_page_target_and_evaluates_javascript() {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Client::connect(browser.ws_url()).await.expect("connect");
 
     let target = client
@@ -56,7 +56,7 @@ async fn attaches_to_a_page_target_and_evaluates_javascript() {
 
 #[tokio::test]
 async fn a_failing_command_returns_an_error_rather_than_hanging() {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Client::connect(browser.ws_url()).await.expect("connect");
 
     let err = client
@@ -78,11 +78,11 @@ async fn a_failing_command_returns_an_error_rather_than_hanging() {
 async fn a_second_browser_cannot_have_a_profile_the_first_one_holds() {
     let profile = tempfile::tempdir().expect("a profile directory");
 
-    let first = Chromium::launch(Some(profile.path()))
+    let first = Chromium::launch(Some(profile.path()), None)
         .await
         .expect("the first browser takes the profile");
 
-    let second = Chromium::launch(Some(profile.path())).await;
+    let second = Chromium::launch(Some(profile.path()), None).await;
     assert!(
         second.is_err(),
         "a held profile must be refused, or the private-session fallback never triggers"
@@ -94,7 +94,7 @@ async fn a_second_browser_cannot_have_a_profile_the_first_one_holds() {
 
 #[tokio::test]
 async fn a_browser_with_no_profile_directory_gets_a_temporary_one() {
-    let browser = Chromium::launch(None)
+    let browser = Chromium::launch(None, None)
         .await
         .expect("launch on a temp profile");
     assert!(browser.ws_url().starts_with("ws://"));

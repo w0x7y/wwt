@@ -42,7 +42,7 @@ fn space() -> KeyInput {
 /// the shape of the bug it would otherwise have.
 #[tokio::test]
 async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
-    let browser = Chromium::launch(None).await.expect("launch chromium");
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Arc::new(Client::connect(browser.ws_url()).await.expect("connect"));
     client.auto_attach().await.expect("turn on auto-attach");
     let vp = Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 });

@@ -60,7 +60,7 @@ A pure widening with no behaviour change. `Detached` is defined here and produce
 - Consumes: nothing.
 - Produces: `pub enum Presence { Opening, Attached, Detached }` (derives `Debug, Clone, Copy, PartialEq, Eq`); `Tab::presence: Presence`; `Tab::attached(&self) -> bool`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `mod tests` block at the bottom of `crates/wwt/src/tab.rs`:
 
@@ -88,12 +88,12 @@ Add to the `mod tests` block at the bottom of `crates/wwt/src/tab.rs`:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p wwt --lib tab::`
 Expected: FAIL, `cannot find type Presence in this scope`.
 
-- [ ] **Step 3: Add the enum and the field**
+- [x] **Step 3: Add the enum and the field**
 
 In `crates/wwt/src/tab.rs`, above `pub struct Tab`:
 
@@ -137,7 +137,7 @@ Add to `impl Tab`, beside `mark_dirty`:
     }
 ```
 
-- [ ] **Step 4: Fix every site that read the old field**
+- [x] **Step 4: Fix every site that read the old field**
 
 In `crates/wwt/src/session.rs`:
 
@@ -162,12 +162,12 @@ In `crates/wwt/src/session.rs`:
 
 Add `Presence` to the `use crate::tab::...` import at the top of `session.rs`.
 
-- [ ] **Step 5: Run the workspace to verify nothing moved**
+- [x] **Step 5: Run the workspace to verify nothing moved**
 
 Run: `cargo test -p wwt --lib`
 Expected: PASS. This task changes no behaviour, so every existing test must still pass untouched. If one needed editing, the widening was not faithful.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

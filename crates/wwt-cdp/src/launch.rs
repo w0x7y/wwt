@@ -11,17 +11,29 @@ use tokio::time::{Duration, timeout};
 const CANDIDATES: &[&str] = &["chromium", "chromium-browser", "google-chrome-stable"];
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Locate a Chromium binary. `WWT_CHROMIUM` wins if set.
+/// Locate a Chromium binary. `WWT_CHROMIUM` wins, then `configured`, then
+/// the `PATH`.
+///
+/// The environment beats the config file because it is the more specific
+/// thing: a variable is set for one run and a file is written for all of
+/// them.
 ///
 /// We never download a browser; an absent one is a clear error with an
 /// actionable message, per spec section 8.
-pub fn find_chromium() -> Result<PathBuf> {
+pub fn find_chromium(configured: Option<&std::path::Path>) -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("WWT_CHROMIUM") {
         let path = PathBuf::from(&explicit);
         if !path.is_file() {
             bail!("WWT_CHROMIUM is set to {explicit}, which is not a file");
         }
         return Ok(path);
+    }
+
+    if let Some(path) = configured {
+        if !path.is_file() {
+            bail!("config.toml names {}, which is not a file", path.display());
+        }
+        return Ok(path.to_path_buf());
     }
 
     let path_var = std::env::var_os("PATH").unwrap_or_default();
@@ -57,12 +69,19 @@ impl Chromium {
     /// crate's: `wwt-cdp` launches browsers and has no opinion about the
     /// user's data directory.
     ///
+    /// Which binary is the caller's business too, for the same reason: the
+    /// config file is read by the binary and this crate only launches what
+    /// it is given.
+    ///
     /// A profile another Chromium already holds is refused by Chromium
     /// itself, which exits without announcing an endpoint, so this returns an
     /// error rather than a second browser sharing a cookie jar. That is the
     /// whole of the locking in spec section 7.
-    pub async fn launch(profile: Option<&std::path::Path>) -> Result<Self> {
-        let binary = find_chromium()?;
+    pub async fn launch(
+        profile: Option<&std::path::Path>,
+        binary: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let binary = find_chromium(binary)?;
         let temporary = match profile {
             Some(_) => None,
             None => Some(tempfile::tempdir().context("create a temporary profile directory")?),
