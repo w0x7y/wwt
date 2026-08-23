@@ -31,6 +31,7 @@ Currently at **M6** (degradation). Milestones M1–M8 are defined in
     cargo test -p wwt --lib measure_pixel_compose -- --nocapture                 # and what composing one costs
     cargo test -p wwt --lib measure_halfblock_frame -- --nocapture               # a degraded picture
     cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture       # a degraded read
+    cargo test -p wwt-page --test extraction measure_status -- --nocapture       # what the chrome alone costs
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -512,6 +513,18 @@ them there:
 - **Nothing deep-copies a payload.** An extraction is every run on screen;
   `Client::send` and `Page::js` take their `Value` rather than clone it, or the whole
   of it is copied twice on the way to the caller.
+- **A read that paints no runs can ask for less.** `Extraction` is runs plus a
+  `Status`, and `Page::status()` reads the second half alone: no walk, no
+  `getClientRects`, no field mirrors. `measure_status` puts it under a millisecond
+  against `measure_extraction`'s ~4ms on the same page, most of what is left being the
+  round trip itself. **Nothing calls it yet.** Pixel mode and half-block both paint a
+  picture rather than runs, so a dirty signal in either is asking for a forced layout
+  whose answer is thrown away; making `Session` ask the cheap question there is the
+  change this seam exists for, and it is a rule rather than machinery, so it belongs
+  in `Session` with a test and not in `Core`. `Session::apply_status` is already the
+  single place that knows what a title, a URL and a scroll offset mean, chrome-error
+  detection and the save-if-it-moved rule included, so the second caller adds no
+  second copy of either.
 
 The frame pipeline is not where the time goes and is not worth tuning: composing 300
 runs into a 120x40 grid and diffing it against the last one is ~40µs against a ~4ms

@@ -15,9 +15,14 @@ its style, and a `z`. The unit of everything painted: Chromium decides where
 text goes, and a run is one answer. `wwt_frame::TextRun`.
 
 **Extraction** — one pass of the injected script: every visible run, plus
-the title, the URL, the scroll geometry, and the caret. Deliberately one
-round trip, because it happens on every scroll frame. Nothing reads the page
-any other way. `wwt_page::Extraction`.
+the caret, plus a **status**. Deliberately one round trip, because it happens
+on every scroll frame. `wwt_page::Extraction`.
+
+**Status** — the half of a read that the chrome needs and the renderer does
+not: the title, the URL and the scroll geometry, and `scroll_progress` with
+them because that was always a fact about the geometry. `Page::status()`
+reads it on its own, without the walk, and costs under a millisecond against
+an extraction's ~4ms. `wwt_page::Status`.
 
 **Dirty signal** — the page saying it has changed. Comes from a debounced
 `MutationObserver`, a scroll listener, `load`, and the four field-state
