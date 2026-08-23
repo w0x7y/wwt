@@ -327,3 +327,62 @@ fn measure_extraction_of_a_heavy_page() {
         assert!(!extraction.runs.is_empty());
     });
 }
+
+/// The fidelity test for the cheap read: whatever `status()` skips, it must
+/// not skip an answer.
+///
+/// Both halves come from the same document at the same moment, so a field
+/// the two disagree about is a field `status()` computes differently rather
+/// than more cheaply, which is the only way this split can go wrong. Read on
+/// a page that has been scrolled, or `scroll_y` agrees at zero for free and
+/// the geometry half of the comparison proves nothing.
+#[test]
+fn a_status_read_says_what_an_extraction_says() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "tall.html").await;
+        page.scroll_by(200.0, viewport()).await.expect("scroll");
+        let moved = await_scroll_past(&page, 0.0).await;
+        assert!(moved > 0.0, "the fixture has to have moved for this to test anything");
+
+        let extraction = page.extract().await.expect("extract");
+        let status = page.status().await.expect("status");
+
+        assert_eq!(status, extraction.status);
+    });
+}
+
+/// What the chrome costs on its own. Run with:
+///
+///     cargo test -p wwt-page --test extraction measure_status -- --nocapture
+///
+/// The number to read it against is `measure_extraction`, on the same
+/// fixture in the same run: `heavy.html` is fifteen hundred paragraphs, and
+/// a status read walks none of them. This is the whole case for a mode that
+/// does not paint runs asking a different question, and it is a measurement
+/// rather than an assertion for the reason every other one here is.
+#[test]
+fn measure_status_of_a_heavy_page() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "heavy.html").await;
+
+        // One warm pass each, so both numbers are steady-state.
+        page.extract().await.expect("extract");
+        page.status().await.expect("status");
+
+        let start = std::time::Instant::now();
+        let extraction = page.extract().await.expect("extract");
+        let extract_time = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let status = page.status().await.expect("status");
+        let status_time = start.elapsed();
+
+        println!(
+            "heavy.html: extract {} runs in {extract_time:?}, status in {status_time:?}",
+            extraction.runs.len()
+        );
+        assert_eq!(status, extraction.status, "the cheap read still has to be right");
+    });
+}
