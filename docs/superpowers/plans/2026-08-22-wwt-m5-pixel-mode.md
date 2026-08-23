@@ -2265,7 +2265,7 @@ without one, `p` says so and leaves the text where it was. `:set pixel on`
 and `:set pixel off` do the same thing from the command line.
 ```
 
-- [ ] **Step 7: The manual pass**
+- [x] **Step 7: The manual pass**
 
 Not automatable, and the milestone is not done without it. Work through it on a real terminal and fix what it finds:
 
