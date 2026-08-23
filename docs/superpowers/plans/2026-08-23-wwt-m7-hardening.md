@@ -634,7 +634,7 @@ EOF
   - `wwt::event::Failure { TimedOut, Failed(String) }`, with `Failure::from_error(&anyhow::Error) -> Failure`
   - `Job::Extracted(TabId, Source, Result<Box<Extraction>, Failure>)`, `Job::Status(TabId, Result<Status, Failure>)`, `Job::Hints(TabId, Result<Vec<HintTarget>, Failure>)`, `Job::Failed(TabId, Failure)`
 
-- [ ] **Step 1: Write the failing timeout test**
+- [x] **Step 1: Write the failing timeout test**
 
 In the `mod tests` block of `crates/wwt-cdp/src/client.rs`:
 
@@ -664,12 +664,12 @@ In the `mod tests` block of `crates/wwt-cdp/src/client.rs`:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p wwt-cdp --lib`
 Expected: FAIL, `cannot find type TimedOut`.
 
-- [ ] **Step 3: Implement the deadlines**
+- [x] **Step 3: Implement the deadlines**
 
 In `crates/wwt-cdp/src/client.rs`, replace the `CALL_TIMEOUT` constant and its comment with:
 
@@ -760,7 +760,7 @@ pub use client::{Client, DEADLINE, Event, NAVIGATION_DEADLINE, TimedOut};
 
 (keeping whatever else that line already exports).
 
-- [ ] **Step 4: Give navigation the long deadline**
+- [x] **Step 4: Give navigation the long deadline**
 
 In `crates/wwt-page/src/extract.rs`, the three calls that start a navigation take `NAVIGATION_DEADLINE`:
 
@@ -772,12 +772,12 @@ Each becomes `self.client.call_on_with(&self.session_id, "...", json!({...}), ww
 
 Leave `LOAD_TIMEOUT` exactly as it is: it is the wait for `Page.loadEventFired` and already has its own thirty seconds.
 
-- [ ] **Step 5: Run to verify the timeout test passes**
+- [x] **Step 5: Run to verify the timeout test passes**
 
 Run: `cargo test -p wwt-cdp --lib`
 Expected: PASS.
 
-- [ ] **Step 6: Write the failing session tests**
+- [x] **Step 6: Write the failing session tests**
 
 In `crates/wwt/src/session.rs` tests:
 
@@ -854,12 +854,12 @@ In `crates/wwt/src/session.rs` tests:
 
 Use whichever existing helper the file already has for a session with one attached, read tab; the tests near `fn read(...)` at line ~2177 show the established shape. If no `ready_session` helper exists, use the one those tests use and rename these accordingly.
 
-- [ ] **Step 7: Run to verify they fail**
+- [x] **Step 7: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::tests::a_read_that_timed_out`
 Expected: FAIL, `cannot find type Failure`.
 
-- [ ] **Step 8: Implement `Failure` and the rule**
+- [x] **Step 8: Implement `Failure` and the rule**
 
 In `crates/wwt/src/event.rs`:
 
@@ -938,12 +938,12 @@ In `crates/wwt/src/session.rs`, `Job::Extracted`'s error arm:
 
 `Job::Hints`'s error arm uses `failure.message()`. `Job::Failed`'s arm sets `State::Stalled` on `Failure::TimedOut` and `State::Error(message)` otherwise.
 
-- [ ] **Step 9: Run to verify everything passes**
+- [x] **Step 9: Run to verify everything passes**
 
 Run: `cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 10: Clippy and commit**
+- [x] **Step 10: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
