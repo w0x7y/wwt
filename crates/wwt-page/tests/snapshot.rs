@@ -228,3 +228,41 @@ fn hints_from_a_snapshot_leave_out_what_has_no_box_and_what_is_off_screen() {
         );
     });
 }
+
+/// What reading a page the degraded way costs. Run with:
+///
+///     cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture
+///
+/// `heavy.html` is fifteen hundred paragraphs of which a dozen are on
+/// screen. The script path costs ~4ms because it stops measuring what
+/// nobody can see; a snapshot is the whole document and cannot. This test
+/// exists to make the gap a fact rather than a guess, and open question 2
+/// of the M6 spec is decided against the number it prints.
+#[test]
+fn measure_snapshot_of_a_heavy_page() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "heavy.html").await;
+        let vp = viewport();
+
+        // One warm pass each, so both numbers are steady-state rather than
+        // first-run, which is what `measure_extraction` does and the only
+        // way the two are comparable.
+        page.snapshot(vp).await.expect("snapshot");
+        page.extract().await.expect("extract");
+
+        let start = std::time::Instant::now();
+        let snapshot = page.snapshot(vp).await.expect("snapshot");
+        let snapshot_time = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let script = page.extract().await.expect("extract");
+        let script_time = start.elapsed();
+
+        eprintln!(
+            "heavy.html: snapshot {} runs in {snapshot_time:?}, script {} runs in {script_time:?}",
+            snapshot.runs.len(),
+            script.runs.len()
+        );
+    });
+}

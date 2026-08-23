@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M5** (pixel mode). Milestones M1–M7 are defined in
+Currently at **M6** (degradation). Milestones M1–M8 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 395 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 459 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -29,6 +29,8 @@ Currently at **M5** (pixel mode). Milestones M1–M7 are defined in
     cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
     cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture              # what a picture costs
     cargo test -p wwt --lib measure_pixel_compose -- --nocapture                 # and what composing one costs
+    cargo test -p wwt --lib measure_halfblock_frame -- --nocapture               # a degraded picture
+    cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture       # a degraded read
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
@@ -113,6 +115,7 @@ Consequences to preserve when adding features:
 | Crate | Responsibility | Hard rule |
 |---|---|---|
 | `wwt-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
+| `wwt-png` | Base64, inflate, the PNG container, unfilter | **Decodes what Chromium sends and refuses the rest.** No dependencies, and it exists so that none is added. |
 | `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
 | `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | `eval` is behind `test-support`. |
 | `wwt-term` | `TIOCGWINSZ` probe, diffing renderer | |
@@ -409,6 +412,55 @@ which is the one moment stdin belongs to nobody. `VMIN`/`VTIME` give the read
 a real timeout: a plain read would block forever on exactly the terminals the
 question exists to find. Without graphics, `p` is a notice and the frame you
 are looking at stands.
+
+## Degradation
+
+**A page that breaks the script is read another way, not given up on.** A failed
+`Source::Script` extraction degrades the tab and asks `DOMSnapshot` once; a failed
+`Source::Snapshot` is the end of the line and leaves the frame you are looking at
+alone. A degraded tab asks the snapshot first from then on, so a permanently broken
+page costs one round trip per scroll rather than two, and navigation clears the flag
+because a new document reinstalls `bootstrap.js`. That also makes reload the way back.
+
+**The effect names the source.** Not the page, and not a field the page sets: the rule
+is a decision, so it lives in `Session` where a test needs no browser. `Job::Extracted`
+carries a `Result` for the reason `Job::Hints` does, and carries the source because a
+failed scroll and a failed extraction used to arrive as the same `Job::Failed`.
+
+**A snapshot is the whole document.** The script path costs what is on screen and this
+one cannot, so a degraded read of `heavy.html` pays for all fifteen hundred paragraphs:
+`measure_snapshot` puts that at ~26ms against the script path's ~4ms for the same
+fourteen runs. Accepted rather than solved: it is a fallback and not a mode anyone
+chooses, and it is slow rather than unusable. Culling to the viewport is on our side,
+and it is the only reason it is bearable.
+
+**What a degraded tab loses** is the caret, wrapping inside a control, and the hint
+occlusion test. Everything else keeps working, because scrolling and input go over CDP
+and never through our script.
+
+**Without a graphics protocol the picture is half-block, not a notice.** `▀` with the
+top sample as foreground and the bottom as background, which is cells, so the diffing
+renderer and every overlay rule apply unchanged and a label over a picture costs
+nothing. `p` never refuses.
+
+**The picture is asked for at the size that will show it.** Twice the sample grid,
+because Chromium preserves the source aspect while fitting inside both bounds and a
+half cell is not square: asking for exactly the grid returns a letterboxed page. A few
+kilobytes rather than a few hundred, which is what makes decoding it in process
+reasonable.
+
+**`wwt-png` decodes what Chromium sends and refuses the rest.** Base64, IHDR, inflate,
+unfilter, always RGBA out. No interlacing, no palettes, no 16-bit: a decoder that
+accepts what it will never be given is untested code, and a wrong guess puts a
+plausible wrong picture on screen.
+
+**The decode happens in `on_frame`, never in `compose`.** Composing is what a hint
+label and a statusline update each cost. It is on the loop's thread because a frame
+arrives on the CDP arm of the `select!` and never as a job, and the numbers make that
+fine: `measure_halfblock_frame` is ~3.7ms of decode and compose against the 33ms
+pacing interval. That is a release build; unoptimised it is ~47ms, almost all of it
+inflate, which is why the measurement prints a number and asserts only that the frame
+reached cells.
 
 ## Performance
 

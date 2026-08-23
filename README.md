@@ -4,13 +4,15 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M5, pixel mode.** It renders a page, scrolls it, follows
+**Status: M6, degradation.** It renders a page, scrolls it, follows
 history, opens other URLs, reaches every link from the keyboard, types
 into forms, and clicks with the mouse. It keeps many pages open at once
 under one Chromium, follows the links that want a new tab, and comes
 back to the same tabs, still logged in, tomorrow. And on a keypress it
 shows you the page as it really looks, pixels and all, with the
-keyboard still yours. Reader mode is M6.
+keyboard still yours. When a piece of it does not work — a page that
+breaks wwt's own script, a terminal that cannot show a picture — it
+keeps going with a worse version rather than stopping. Reader mode is M8.
 
 ## Requirements
 
@@ -48,10 +50,16 @@ keyboard still yours. Reader mode is M6.
 
 `p` swaps the page between text and true pixels without moving it: the
 same viewport, the same scroll offset, the same tab, and hint labels
-still readable on top of the picture. It needs a terminal that speaks
-the Kitty graphics protocol, which wwt asks about once at startup;
-without one it says so and leaves your text where it was. `:set pixel
+still readable on top of the picture. On a terminal that speaks the
+Kitty graphics protocol, which wwt asks about once at startup, it is a
+picture; on one that does not it is half-block colour, which is the same
+page at half the vertical resolution rather than a refusal. `:set pixel
 on` and `:set pixel off` do the same from the command line.
+
+A page that breaks wwt's injected script is not lost: that tab says
+`[degraded]` and is read through Chromium's own DOM snapshot instead.
+You keep reading, scrolling, hinting and typing; you lose the insertion
+point and the wrapping inside a text field until the tab navigates.
 
 `Esc` is never forwarded to the page, so the keyboard is always one key
 away from being yours again. `Ctrl-]` exists for pages that want an
@@ -99,6 +107,7 @@ it, so it runs private, not logged in, and writes no session file.
 | Crate | Responsibility |
 |---|---|
 | `wwt-frame` | Coordinate model and the cell grid. No I/O. |
+| `wwt-png` | Base64 and PNG, decoded here so nothing is depended on. |
 | `wwt-cdp` | Chromium launcher and CDP client. |
 | `wwt-page` | Text-run extraction from a live page. |
 | `wwt-term` | Terminal probing and rendering. |
@@ -108,6 +117,8 @@ it, so it runs private, not logged in, and writes no session file.
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M6 design: `docs/superpowers/specs/2026-08-23-wwt-m6-design.md`
+- M6 plan: `docs/superpowers/plans/2026-08-23-wwt-m6-degradation.md`
 - M5 design: `docs/superpowers/specs/2026-08-22-wwt-m5-design.md`
 - M5 plan: `docs/superpowers/plans/2026-08-22-wwt-m5-pixel-mode.md`
 - M4 design: `docs/superpowers/specs/2026-08-21-wwt-m4-design.md`

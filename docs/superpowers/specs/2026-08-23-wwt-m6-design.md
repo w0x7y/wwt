@@ -372,15 +372,31 @@ measuring what nobody can see. On `heavy.html`, fifteen hundred paragraphs of wh
 dozen are visible, the fallback pays for all fifteen hundred, in JSON, on every dirty
 signal.
 
-This is accepted, not solved. It is a fallback rather than a mode anyone chooses, and
+The number, measured 2026-08-23: `measure_snapshot` reads `heavy.html` in **~26ms
+against the script path's ~4ms**, steady-state, both warmed, and both returning the
+same fourteen runs. Six to seven times the cost for an identical answer, which is
+exactly the shape the paragraph above predicts: the gap is the fifteen hundred
+paragraphs nobody can see.
+
+This is accepted, not solved. Twenty-six milliseconds is slow for a scroll and is not
+a page that fails to keep up, and it is a fallback rather than a mode anyone chooses:
 a page that reaches it is a page that would otherwise show nothing. `measure_snapshot`
-records the number beside `measure_extraction` so that the gap is a fact rather than a
-guess, and section 12 keeps open whether it needs a cap.
+records the number beside `measure_extraction` so that the gap stays a fact rather
+than a guess, and open question 2 is closed against it.
 
 Half-block costs the opposite of what pixel mode costs. The payload is a few kilobytes
 rather than a few hundred, the decode is a few thousand pixels, and the cells are the
 same cells any frame writes. `measure_halfblock_frame` records it beside
-`measure_pixel_frame`.
+`measure_pixel_frame`: **~3.7ms for the decode and the compose together**, against the
+33ms `FRAME_INTERVAL` the ack paces the stream at, so a frame is decoded on the loop's
+thread in a tenth of the time the next one takes to arrive.
+
+That number is a release build. Unoptimised it is ~47ms, an order of magnitude worse,
+almost all of it inflate. This is why `measure_halfblock_frame` prints rather than
+asserting a budget, the way every other measurement in the repo does: a wall-clock
+assertion would have said more about the profile than about the decoder. What it
+asserts instead is that the frame reached cells at all, since a picture that failed to
+decode would otherwise be the fastest run of all.
 
 ## 12. Testing
 
@@ -417,10 +433,14 @@ same cells any frame writes. `measure_halfblock_frame` records it beside
    heading) rather than approximately. It forces `font-size` into the computed styles
    the query asks for, and the probe found `visibility` had to go in beside it, since
    a snapshot reports hidden text that the script never sees. Section 3 has both.
-2. **Whether a full-document snapshot needs a cap.** Section 11 accepts the cost
-   without bounding it. If `measure_snapshot` on `heavy.html` is bad enough to make a
-   degraded tab unusable rather than merely slow, the answer is probably to stop
-   converting once the visible rows are filled, since `textBoxes` arrive in document
-   order. Decide with the number, not before it.
+2. ~~**Whether a full-document snapshot needs a cap.**~~ **Closed, 2026-08-23:
+   accepted uncapped.** `measure_snapshot` reads `heavy.html` in ~26ms against the
+   script path's ~4ms. That is merely slow and not unusable: a scroll on the worst
+   page in the fixtures still lands inside a frame's worth of time, on a path taken
+   only by a page that would otherwise show nothing at all. The cap stays unwritten
+   rather than deferred, because the shape of it is known if a milestone ever wants
+   it: `textBoxes` arrive in document order, so converting stops once the visible
+   rows are filled. Writing it now would be untested code guarding a cost nobody has
+   complained about.
 3. **Snapshot version strictness**, carried unchanged from M5's spec. M6 adds no field
    to `Snapshot`, so it still does not have to answer.

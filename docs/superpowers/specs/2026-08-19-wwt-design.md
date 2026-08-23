@@ -325,19 +325,25 @@ degrades to stale-but-labeled, never to empty.
 - **Injected script throws.** Caught at its top level and reported through the
   binding; that tab falls back to a CDP-native extractor that shares no code with our
   script, so a bug in the extractor cannot take a page from degraded to unusable.
-  **Open question — settle before M6 is planned.** The original choice was
-  `Accessibility.getFullAXTree`, but `AXNode` carries no geometry, so an AX-sourced
-  fallback cannot feed the geometric renderer and can only produce a reflowed linear
-  document — which is what couples it to reader mode. `DOMSnapshot.captureSnapshot`
-  meets the same independence requirement and does return layout geometry, so it
-  would feed the normal renderer and need no reflow layer. The trade is fidelity of
-  the degraded view against the size and placement of the milestone.
+  **Settled in M6: `DOMSnapshot.captureSnapshot`.** It returns layout geometry, so it
+  feeds the normal renderer and needs no reflow layer, and it is therefore independent
+  of reader mode rather than coupled to it. `Accessibility.getFullAXTree` was the
+  original choice and is rejected: `AXNode` carries no geometry, so an AX-sourced
+  fallback could only produce a reflowed linear document, which is what would have
+  tied the fallback to a view. What a snapshot cannot do — the caret, wrapping inside
+  a control, the hint occlusion test — is the fidelity that was traded for that
+  independence.
 - **Terminal resize.** Debounce 100ms, recompute the grid, push a new
   `Emulation.setDeviceMetricsOverride`, force re-extract. The page genuinely reflows.
 - **No Kitty graphics.** In M5 pixel mode is refused with a notice and the frame you
-  are looking at stands. From M6 it degrades to half-block unicode, then to labeled
-  placeholder blocks. Text mode is unaffected either way, which is the point of text
-  being the default.
+  are looking at stands. From M6 it degrades to half-block unicode, and there is no
+  tier below that. The third tier this said was coming, labeled placeholder blocks, is
+  deleted rather than deferred: the renderer writes truecolor for every styled cell
+  with no capability check at all, so a terminal that cannot show half-block cannot
+  show text mode either, and a fallback below half-block would guard a case that
+  cannot arise. A colour-capability probe, if one is ever wanted, is a change to text
+  mode first. Text mode is unaffected either way, which is the point of text being the
+  default.
 - **No Chromium installed.** Detected at startup with a clear prompt to either point
   at a system binary via config or fetch a pinned Chrome-for-Testing build into
   `~/.local/share/wwt/`. Never a silent download.
@@ -410,22 +416,26 @@ with tabs that cannot follow a `target=_blank` link is not one.
 **M5 — Pixel mode.** `Page.startScreencast`, the Kitty graphics protocol with unicode
 placeholders, and mode toggling. Without graphics the toggle is a notice rather than a
 worse picture: the half-block degradation path is M6's, because a fallback view belongs
-beside the reflow renderer and the fallback extractor rather than beside the protocol it
-is a fallback for.
+beside the fallback extractor rather than beside the protocol it is a fallback for.
 
-**M6 — Reader mode and the degradation path.** The reflow renderer, reader mode on
-top of it, and the fallback extractor that feeds it when the injected script throws.
-These are one milestone because they are one rendering path with two sources, not
-because they are related in purpose. Splitting the fallback out would mean building
-the reflow layer in one milestone and its second consumer in the next. See the open
-question in section 8: if the fallback is sourced from `DOMSnapshot` rather than the
-accessibility tree it needs no reflow, becomes independent of reader mode, and can
-land considerably earlier.
+**M6 — Degradation.** The fallback extractor sourced from `DOMSnapshot.captureSnapshot`,
+and the half-block path that shows a page on a terminal with no graphics protocol. Two
+halves that share no code and one purpose: the browser keeps working when a piece of it
+does not. Reader mode is not in it. Section 8's open question, answered, is what let it
+move: a `DOMSnapshot` fallback returns geometry, so it feeds the normal renderer, needs
+no reflow layer, and is independent of reader mode rather than the thing that had to be
+built beside it.
 
 **M7 — Hardening.** The Chromium supervisor and restart path, per-command deadlines,
 session recovery after a crash, and the background-tab eviction and lazy restore
-deferred from M4. Operational robustness, sharing nothing with M6
-but the fact that both were once one milestone.
+deferred from M4. Operational robustness, sharing nothing with M6 but the fact that
+both are about a browser that does not fall over.
+
+**M8 — Reader mode.** The reflow renderer and reader mode on top of it. Last because
+it is the one remaining piece that is a nicety rather than a foundation: section 8's
+answer took its second consumer away, and nothing else blocks it. Robustness comes
+first, since daily use begins at M4 and every milestone since has added something a
+crash now loses.
 
 Daily use realistically begins at M4. M1 through M3 are the foundation and should not
 be rushed to reach it.

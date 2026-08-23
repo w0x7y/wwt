@@ -203,6 +203,14 @@ anyway would spray a terminal that cannot read them with garbage, which is the o
 section 8 of the parent spec forbids. Half-block would have been the third answer here
 and is M6's.
 
+**Amended by M6, 2026-08-23.** The notice was explicitly the answer "until M6", and
+M6 arrived: `p` on a terminal with no graphics protocol now shows the page in
+half-block colour, at half the vertical resolution and in the same place at the same
+scroll offset, and never refuses. Nothing else in this section changes — the detection
+is the same probe answered at the same moment, and what it answers now decides which
+picture rather than whether there is one. See section 6 of
+`2026-08-23-wwt-m6-design.md`.
+
 ## 6. Compose
 
 In pixel mode `Session::compose` paints the tab bar and the statusline exactly as it
@@ -275,7 +283,7 @@ Section 8 of the parent spec holds throughout: never blank the frame you are loo
 
 | Failure | Behaviour |
 |---|---|
-| The terminal cannot do graphics | `p` is a notice, the mode does not change, the frame stands. |
+| The terminal cannot do graphics | `p` is a notice, the mode does not change, the frame stands. **Amended by M6: half-block colour instead.** |
 | The detection query is answered late | Treated as unsupported. A reply arriving after the window is discarded rather than read as a key. |
 | `Page.startScreencast` fails | A notice, and the mode falls back to text. The page is untouched. |
 | A frame arrives for a tab that is not focused | Acked and dropped. Focus moved while it was in flight. |

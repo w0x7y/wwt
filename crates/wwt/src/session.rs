@@ -2707,6 +2707,49 @@ mod tests {
         eprintln!("pixel compose, worst of 200: {worst:?}");
     }
 
+    /// What a degraded frame costs, from base64 to cells. Run with:
+    ///
+    ///     cargo test -p wwt --lib measure_halfblock_frame -- --nocapture
+    ///
+    /// The claim is that half-block is the cheap path: the payload is a few
+    /// kilobytes rather than a few hundred, and the decode is a few thousand
+    /// pixels. It runs on the loop's thread, so the number that matters is
+    /// this one against `FRAME_INTERVAL`, which is 33ms.
+    ///
+    /// It prints rather than asserting a budget, the way every other
+    /// measurement here does: inflate is an order of magnitude slower
+    /// unoptimised, so a wall-clock assertion would say more about the
+    /// profile than about the decoder. What is asserted is that the frame
+    /// really went through the decode, since a picture that failed to
+    /// decode would otherwise be the fastest run of all.
+    #[test]
+    fn measure_halfblock_frame() {
+        let mut session = session();
+        session.set_graphics(false);
+        session.on(key('p'));
+        let fixture = fixture_frame();
+
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..50 {
+            // Cloned outside the timer: the copy is the test's cost and not
+            // the loop's, which is handed the frame the websocket read.
+            let event = Event::Frame(tab0(), Box::new(fixture.clone()));
+            let start = std::time::Instant::now();
+            session.on(event);
+            let frame = session.compose();
+            worst = worst.max(start.elapsed());
+            std::hint::black_box(frame);
+        }
+        eprintln!("half-block frame and compose, worst of 50: {worst:?}");
+        let frame = session.compose();
+        assert_eq!(frame.image(), None, "half-block is cells and never an image");
+        assert_eq!(
+            frame.cell(CellPos { col: 0, row: 1 }).expect("a page cell").ch,
+            '\u{2580}',
+            "the picture was decoded rather than dropped"
+        );
+    }
+
     // Switching.
 
     #[test]

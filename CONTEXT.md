@@ -121,6 +121,26 @@ a scroll offset each, plus which one was in front. Not called a session,
 because `Session` already names the state machine and `wwt-cdp` already calls
 an attached target a session id. `wwt::store::Snapshot`.
 
+**Degraded** — a tab whose injected script threw, and which is therefore read
+by `DOMSnapshot` instead. Sticky until the tab navigates, because a new
+document reinstalls the script. It keeps runs, hints, scrolling and input; it
+loses the caret, wrapping inside a control, and the occlusion test that keeps
+a label off a covered link.
+
+**Source** — which way a page is read: `Script` or `Snapshot`. Named by the
+effect rather than chosen by the page, so the rule about when to reach for the
+second one is a decision `Session` makes and a test can exercise with no
+browser. `Source::Snapshot` is `DOMSnapshot.captureSnapshot` and has nothing
+to do with the `Snapshot` above, which is the session file.
+
+**Samples** — a picture as colours, one per half cell, so `rows` is twice the
+cell rows it covers. What pixel mode composes to on a terminal with no
+graphics protocol. `wwt_frame::Samples`.
+
+**Half-block** — a cell showing `▀` with the top sample as its foreground and
+the bottom as its background. Two colours in one cell, which is the whole
+reason `Style` has a background at all.
+
 **Action** — what a key means, given a mode. The whole keyboard is one
 table, `keymap::action_for(mode, key, vp)`, pure and total.
 
