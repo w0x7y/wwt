@@ -57,7 +57,7 @@ This is a throwaway probe, not code that is kept. It needs a real Kitty (or Ghos
 **Files:**
 - Create: `/tmp/kitty-probe.sh` (throwaway, not committed)
 
-- [ ] **Step 1: Write the probe**
+- [x] **Step 1: Write the probe**
 
 Two PNGs and one id. If the second image appears without the placeholder cells being rewritten, re-transmission updates in place.
 
@@ -102,13 +102,13 @@ PROBE
 chmod +x /tmp/kitty-probe.sh
 ```
 
-- [ ] **Step 2: Run it in a real Kitty and record the answer**
+- [x] **Step 2: Run it in a real Kitty and record the answer**
 
 Run: `/tmp/kitty-probe.sh`
 
 If it turns blue, section 4 of the spec stands as written and Task 5 keeps its "a new frame rewrites no cells" rule. If it does not, amend the spec's section 4 in the same commit as Task 5, per `CLAUDE.md`, to say that a frame is a delete, a transmit, a place and a placeholder rewrite, and change Task 5's `Renderer` accordingly. Either way, write the answer into the spec's open question 1 and mark it closed.
 
-- [ ] **Step 3: Delete the probe**
+- [x] **Step 3: Delete the probe**
 
 ```bash
 rm /tmp/kitty-probe.sh
@@ -130,7 +130,7 @@ The smallest possible change to the crate with the strictest rule. `Image` is da
 **Interfaces:**
 - Produces: `wwt_frame::Image { generation: u64, payload: String, area: CellRect }`, `wwt_frame::CellRect { col: u16, row: u16, cols: u16, rows: u16 }`, `Frame::image(&self) -> Option<&Image>`, `Frame::set_image(&mut self, image: Option<Image>)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In a new `crates/wwt-frame/src/image.rs`:
 
@@ -203,12 +203,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p wwt-frame image::`
 Expected: FAIL to compile, `file not found for module` or `unresolved import`, because `lib.rs` does not declare the module yet.
 
-- [ ] **Step 3: Declare the module and re-export**
+- [x] **Step 3: Declare the module and re-export**
 
 In `crates/wwt-frame/src/lib.rs`, add the module beside the others and the types beside the other re-exports:
 
@@ -230,12 +230,12 @@ pub use run::TextRun;
 pub use target::{HintTarget, TargetKind};
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p wwt-frame image::`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Write the failing test for the frame carrying one**
+- [x] **Step 5: Write the failing test for the frame carrying one**
 
 In `crates/wwt-frame/src/frame.rs`, in `mod tests`:
 
@@ -277,12 +277,12 @@ In `crates/wwt-frame/src/frame.rs`, in `mod tests`:
 
 If `TextRun::for_test` does not exist, build the `TextRun` the way the neighbouring tests in this file already do and keep the rest of the assertion identical.
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test -p wwt-frame frame::`
 Expected: FAIL, `no method named 'image'`.
 
-- [ ] **Step 7: Add the field, the getter and the setter**
+- [x] **Step 7: Add the field, the getter and the setter**
 
 In `crates/wwt-frame/src/frame.rs`, extend the struct and its constructor, and add the two methods beside `cursor`/`set_cursor`:
 
@@ -317,17 +317,17 @@ In `Frame::new`, initialise it to `None` alongside the other fields. Then:
     }
 ```
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [x] **Step 8: Run the tests to verify they pass**
 
 Run: `cargo test -p wwt-frame`
 Expected: PASS, all of them. The existing property tests must be untouched: `to_cell(to_css(c)) == c` and the origin-row roundtrip do not involve an image.
 
-- [ ] **Step 9: Clippy**
+- [x] **Step 9: Clippy**
 
 Run: `cargo clippy -p wwt-frame --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add crates/wwt-frame/src/image.rs crates/wwt-frame/src/lib.rs crates/wwt-frame/src/frame.rs
@@ -357,7 +357,7 @@ Unicode placeholders encode a cell's row and column as combining diacritics, dra
 **Interfaces:**
 - Produces: `graphics::diacritics::CODES: [char; 297]`, `graphics::diacritics::for_index(i: u16) -> Option<char>`.
 
-- [ ] **Step 1: Fetch the table**
+- [x] **Step 1: Fetch the table**
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/kovidgoyal/kitty/master/gen/rowcolumn-diacritics.txt \
@@ -368,7 +368,7 @@ wc -l /tmp/rowcolumn-diacritics.txt
 
 The file is one entry per line as `<hex codepoint>; <description>`, with comment lines starting `#`. If the URL has moved, find the current one in the kitty graphics protocol documentation rather than reconstructing the list by hand. **Do not invent entries.** If the table cannot be fetched, stop and say so: every later task in this milestone depends on it and a guessed table is worse than no task.
 
-- [ ] **Step 2: Generate the Rust source**
+- [x] **Step 2: Generate the Rust source**
 
 ```bash
 python3 - <<'GEN' > crates/wwt-term/src/graphics/diacritics.rs
@@ -443,7 +443,7 @@ mod tests {
 GEN
 ```
 
-- [ ] **Step 3: Create the module and declare it**
+- [x] **Step 3: Create the module and declare it**
 
 `crates/wwt-term/src/graphics/mod.rs`:
 
@@ -460,12 +460,12 @@ pub mod diacritics;
 
 In `crates/wwt-term/src/lib.rs`, add `pub mod graphics;` beside the existing modules.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test -p wwt-term graphics::diacritics`
 Expected: PASS, 5 tests. If `the_table_is_the_length_the_protocol_defines` fails, the fetched file is wrong or the parser dropped lines; fix the fetch, never the assertion.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy -p wwt-term --all-targets -- -D warnings
@@ -494,7 +494,7 @@ Three sequences and a chunker. All of it is a function from data to bytes, so al
 - Consumes: `wwt_frame::{CellRect, Image, Rgb}`, `graphics::diacritics::for_index`.
 - Produces: `graphics::protocol::IMAGE_ID: u32`, `transmit(payload: &str, out: &mut impl Write) -> io::Result<()>`, `place(area: CellRect, out: &mut impl Write) -> io::Result<()>`, `delete(out: &mut impl Write) -> io::Result<()>`, `placeholders(area: CellRect, out: &mut impl Write) -> io::Result<()>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/wwt-term/src/graphics/protocol.rs`:
 
@@ -696,12 +696,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p wwt-term graphics::protocol`
 Expected: FAIL to compile, `file not found for module 'protocol'`.
 
-- [ ] **Step 3: Declare the module**
+- [x] **Step 3: Declare the module**
 
 In `crates/wwt-term/src/graphics/mod.rs`:
 
@@ -710,12 +710,12 @@ pub mod diacritics;
 pub mod protocol;
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p wwt-term graphics::`
 Expected: PASS. `a_payload_shorter_than_one_chunk_is_one_terminated_sequence` asserts the literal id `7829364`, which is `0x777774`; if you changed `IMAGE_ID`, change the assertions with it rather than loosening them.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy -p wwt-term --all-targets -- -D warnings
@@ -745,7 +745,7 @@ The order matters and is not arbitrary. Cells are written first and the image se
 - Consumes: `graphics::protocol::{transmit, place, delete, placeholders}`, `wwt_frame::Image`.
 - Produces: no new public API. `Renderer::render` keeps its signature.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt-term/src/render.rs`, in `mod tests`. If the module has no helper for building a frame, add one beside these:
 
@@ -856,12 +856,12 @@ In `crates/wwt-term/src/render.rs`, in `mod tests`. If the module has no helper 
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p wwt-term render::`
 Expected: FAIL, `cannot find value 'graphics' in this scope` and the image assertions unmet.
 
-- [ ] **Step 3: Teach the renderer**
+- [x] **Step 3: Teach the renderer**
 
 In `crates/wwt-term/src/render.rs`, add the import and the remembered state:
 
@@ -941,12 +941,12 @@ The method itself:
     }
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cargo test -p wwt-term`
 Expected: PASS, including every pre-existing diffing test. If `a_new_frame_of_the_same_size_is_a_transmission_and_no_cells` fails, Task 1's answer was that re-transmission does not update in place: amend the spec's section 4 and change `replaced` to always be true, and say so in this task's commit body.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy -p wwt-term --all-targets -- -D warnings
@@ -980,7 +980,7 @@ The query is a transmission of a one-pixel image with `q=0`, which a terminal th
 **Interfaces:**
 - Produces: `graphics::detect::reply_is_support(reply: &str) -> bool`, `graphics::detect::query(timeout: Duration) -> bool`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/wwt-term/src/graphics/detect.rs`:
 
@@ -1079,12 +1079,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails, then declare the module**
+- [x] **Step 2: Run to verify it fails, then declare the module**
 
 Run: `cargo test -p wwt-term graphics::detect`
 Expected: FAIL, module not found. Add `pub mod detect;` to `crates/wwt-term/src/graphics/mod.rs`, then re-run and expect PASS, 4 tests.
 
-- [ ] **Step 3: Ask once at startup**
+- [x] **Step 3: Ask once at startup**
 
 In `crates/wwt/src/main.rs`, after the terminal probe and before raw mode is enabled, ask and carry the answer into `Startup`:
 
@@ -1097,12 +1097,12 @@ In `crates/wwt/src/main.rs`, after the terminal probe and before raw mode is ena
 
 Add `graphics: bool` to `Startup` and pass it through to `Session`, beside the grid and cell size it already carries. A session that was told the terminal cannot do graphics refuses pixel mode in Task 8.
 
-- [ ] **Step 4: Verify the workspace still builds and behaves**
+- [x] **Step 4: Verify the workspace still builds and behaves**
 
 Run: `cargo test --workspace`
 Expected: PASS. `Startup` gained a field, so every construction of it in tests needs the field; set it to `false` in existing tests, which is what a test with no terminal should say.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1133,7 +1133,7 @@ The page side is four calls and one predicate. The predicate is the same shape a
 **Interfaces:**
 - Produces: `Page::start_screencast(&self, vp: Viewport) -> Result<()>`, `Page::stop_screencast(&self) -> Result<()>`, `Page::ack_frame(&self, ack: i64) -> Result<()>`, `Page::screencast_frame(&self, event: &Event) -> Option<ScreencastFrame>`, and `pub struct ScreencastFrame { pub data: String, pub ack: i64 }`.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 `crates/wwt-page/tests/screencast.rs`. It uses the shared harness in `tests/common`, which hands out one Chromium a test at a time:
 
@@ -1240,12 +1240,12 @@ async fn a_frame_from_another_page_is_not_this_ones() {
 
 Match `common::browser()` and its `page(...)`/`client()` helpers to whatever the existing `wwt-page/tests/common` module actually exposes; the other test binaries in that directory are the reference. Do not add a second harness.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p wwt-page --test screencast`
 Expected: FAIL to compile, `no method named 'start_screencast'`.
 
-- [ ] **Step 3: Implement the page side**
+- [x] **Step 3: Implement the page side**
 
 `crates/wwt-page/src/screencast.rs`:
 
@@ -1347,12 +1347,12 @@ impl Page {
 
 `Page`'s fields are private to `extract.rs`. Add whatever crate-visible accessors this needs there (`pub(crate) fn client(&self) -> &Arc<Client>` and `pub(crate) fn session_id(&self) -> &str`) rather than making the fields public, and declare `pub mod screencast;` plus `pub use screencast::ScreencastFrame;` in `crates/wwt-page/src/lib.rs`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p wwt-page --test screencast`
 Expected: PASS, 3 tests. If `a_started_screencast_produces_a_frame` times out, the target is not the one the browser has in front: M4's rule that switching activates applies here too, and the harness may need `page.activate().await` before starting.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy -p wwt-page --all-targets -- -D warnings
@@ -1386,7 +1386,7 @@ One flag, one key, one command, and what compose does with it. All of it is deci
 - Consumes: `wwt_frame::{CellRect, Image}`, `wwt_page::ScreencastFrame`.
 - Produces: `Effect::StartScreencast(TabId)`, `Effect::StopScreencast(TabId)`, `Effect::AckFrame(TabId, i64)`, `Event::Frame(TabId, Box<ScreencastFrame>)`, `Setting::Pixel(bool)`, `Action::TogglePixel`.
 
-- [ ] **Step 1: Add the vocabulary**
+- [x] **Step 1: Add the vocabulary**
 
 In `crates/wwt/src/effect.rs`, inside `enum Effect`:
 
@@ -1424,7 +1424,7 @@ In `crates/wwt/src/keymap.rs`, in `fn normal`, beside the other single letters:
         KeyCode::Char('p') => Some(Action::TogglePixel),
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 In `crates/wwt/src/session.rs`, in `mod tests`:
 
@@ -1604,12 +1604,12 @@ Add the three helpers beside the existing ones in that module, following whateve
 
 `Caret`'s fields are `wwt-frame`'s; build it the way `caret.rs` and the existing insert-mode tests in `session.rs` already do rather than assuming these three names.
 
-- [ ] **Step 3: Run to verify they fail**
+- [x] **Step 3: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::`
 Expected: FAIL, `no field 'pixel' on type 'Session'`.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 In `Session`:
 
@@ -1727,12 +1727,12 @@ no image ever covers.
 
 The statusline says so: pass `pixel: self.pixel` into `Chrome` and have `chrome::paint` show `pixel` beside the mode when it is on, and nothing when it is off, because text is the default and a statusline that names the normal case wastes the row.
 
-- [ ] **Step 5: Run to verify they pass**
+- [x] **Step 5: Run to verify they pass**
 
 Run: `cargo test -p wwt --lib`
 Expected: PASS. `measure_switch` must still pass untouched: it runs in text mode and nothing about it changed.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1764,7 +1764,7 @@ The one piece of policy that belongs here rather than in `Session` is dropping a
 **Interfaces:**
 - Consumes: `Effect::{StartScreencast, StopScreencast, AckFrame}`, `Event::Frame`, `Page::{start_screencast, stop_screencast, ack_frame, screencast_frame}`.
 
-- [ ] **Step 1: Route the frame event**
+- [x] **Step 1: Route the frame event**
 
 In `Core::run`'s `select!`, the CDP arm asks two questions of an event today. It now asks three, cheapest first, which is the order every pass in this codebase uses:
 
@@ -1792,7 +1792,7 @@ In `Core::run`'s `select!`, the CDP arm asks two questions of an event today. It
                 },
 ```
 
-- [ ] **Step 2: Spawn the three effects**
+- [x] **Step 2: Spawn the three effects**
 
 In `Core::apply`, beside the existing arms. Each says what its failure means by choosing the job it reports:
 
@@ -1832,7 +1832,7 @@ In `Core::apply`, beside the existing arms. Each says what its failure means by 
 
 `page_vp()` is whatever accessor `Session` already exposes for the page viewport; if there is none, add `pub fn page_vp(&self) -> Viewport { self.vp }` beside the other accessors.
 
-- [ ] **Step 3: Nothing coalesces, and here is why**
+- [x] **Step 3: Nothing coalesces, and here is why**
 
 The spec's section 3 says a late frame is dropped rather than queued. Reading the ack
 protocol closely, there is nothing to drop: Chromium sends the next frame only once the
@@ -1848,7 +1848,7 @@ corrected when the plan was written, so there is no amendment owing here. If the
 pass in Task 11 finds a page that genuinely outruns the loop, the knob is
 `everyNthFrame` in `start_screencast` and not a buffer in the loop.
 
-- [ ] **Step 4: Write the test that catches a dropped ack**
+- [x] **Step 4: Write the test that catches a dropped ack**
 
 The one property worth holding down here is that every frame is answered, whatever
 becomes of the picture in it. In `crates/wwt/src/session.rs`, in `mod tests`, because
@@ -1908,12 +1908,12 @@ before pushing the ack. If Task 8's version pushes the ack unconditionally, tigh
                 ...
 ```
 
-- [ ] **Step 5: Run everything**
+- [x] **Step 5: Run everything**
 
 Run: `cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1941,7 +1941,7 @@ Three paths that already exist and now have a screencast in them. None of them i
 - Modify: `crates/wwt/src/session.rs`
 - Modify: `crates/wwt/src/core.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt/src/session.rs`, in `mod tests`:
 
@@ -2030,12 +2030,12 @@ In `crates/wwt/src/session.rs`, in `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::`
 Expected: FAIL on each of the six.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Every one of these is the same one-line question in an existing path: *if pixel mode is on, the screencast follows the focus*. Add a helper and call it from the four places focus changes or the geometry does:
 
@@ -2071,12 +2071,12 @@ In the resize path, the stored picture's area is recomputed against the new view
         }
 ```
 
-- [ ] **Step 4: Run to verify they pass, then the whole workspace**
+- [x] **Step 4: Run to verify they pass, then the whole workspace**
 
 Run: `cargo test -p wwt --lib session:: && cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -2106,7 +2106,7 @@ M5's claim is that a pixel frame is one escape sequence and not a repaint, and t
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-08-22-wwt-m5-design.md` (closing open questions 1 and 3)
 
-- [ ] **Step 1: Write the measurement**
+- [x] **Step 1: Write the measurement**
 
 In `crates/wwt-term/src/render.rs`, in `mod tests`. It needs no terminal, which is the point: the claim is about what is written, not about what a terminal does with it.
 
@@ -2157,7 +2157,7 @@ In `crates/wwt-term/src/render.rs`, in `mod tests`. It needs no terminal, which 
 
 Run it and record the number in the commit message.
 
-- [ ] **Step 2: Answer the measurement section 3 of the spec owes**
+- [x] **Step 2: Answer the measurement section 3 of the spec owes**
 
 Measure pixel-mode CPU on an animated page with `--disable-frame-rate-limit` and without it:
 
@@ -2170,11 +2170,11 @@ top -p "$(pgrep -d, -f 'chromium|wwt')"
 
 Then remove `--disable-frame-rate-limit` from the launch flags in `crates/wwt-cdp/src/launch.rs`, rebuild, and repeat. Record both numbers. If the flag costs materially more CPU in pixel mode than it saves in scroll latency, the answer is `everyNthFrame` in `start_screencast` rather than dropping the flag, because the flag is what M2's scroll latency rests on. Write the numbers and the decision into the spec's open question 3, and mark it closed.
 
-- [ ] **Step 3: Close open question 1**
+- [x] **Step 3: Close open question 1**
 
 Task 1's probe answered whether re-transmission updates a placement in place. Write the answer into the spec's open question 1 and mark it closed, along with any amendment to section 4 that the answer forced.
 
-- [ ] **Step 4: Update the glossary**
+- [x] **Step 4: Update the glossary**
 
 In `CONTEXT.md`, add to "What the browser is doing":
 
@@ -2199,7 +2199,7 @@ position in combining diacritics. A cell holding a real glyph instead shows
 the glyph, which is how a hint label lands on top of a picture.
 ```
 
-- [ ] **Step 5: Update the working notes**
+- [x] **Step 5: Update the working notes**
 
 In `CLAUDE.md`, change the milestone line to M5 and add a section after "Tabs and sessions":
 
@@ -2249,7 +2249,7 @@ Also add to the Commands block:
     cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture     # pixel frame cost
 ```
 
-- [ ] **Step 6: Update the README**
+- [x] **Step 6: Update the README**
 
 Change the status line to M5, add the key and the command, and say what happens without graphics:
 
@@ -2282,7 +2282,7 @@ Not automatable, and the milestone is not done without it. Work through it on a 
 11. `q` from pixel mode: the terminal is left clean, with no image and no escape residue.
 12. Run it in a terminal with no graphics support (`TERM=xterm` under something plain): `p` says so, and the text page is undisturbed.
 
-- [ ] **Step 8: Run everything one last time**
+- [x] **Step 8: Run everything one last time**
 
 ```bash
 cargo test --workspace
@@ -2295,7 +2295,7 @@ cargo test -p wwt-page --test interaction measure_scroll_latency -- --nocapture
 
 The last three are M2's, M3's and M4's numbers. M5 must not have moved them; if any has, find out why before calling the milestone done. Extraction runs in pixel mode exactly as it does in text mode, so `measure_extraction` in particular should be untouched.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add CONTEXT.md CLAUDE.md README.md crates/wwt-term/src/render.rs docs/superpowers/specs/2026-08-22-wwt-m5-design.md
