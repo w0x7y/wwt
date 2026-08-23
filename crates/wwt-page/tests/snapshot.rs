@@ -4,6 +4,7 @@
 mod common;
 
 use common::{harness, open, runtime, viewport};
+use wwt_frame::TargetKind;
 
 #[test]
 fn a_snapshot_reads_the_text_on_screen() {
@@ -135,6 +136,95 @@ fn a_snapshot_leaves_out_what_is_below_the_viewport() {
         assert!(
             !texts.iter().any(|t| t.contains("line 199")),
             "the bottom of a 4000px page is not on screen: {texts:?}"
+        );
+    });
+}
+
+#[test]
+fn a_snapshot_shows_what_is_typed_in_a_field() {
+    // A control's value is not in the DOM: `input.childNodes` is empty
+    // however much you type, so no text box can carry it. `eval` arranges
+    // the value the way a keystroke would; the assertion is on what the
+    // extraction says.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "fields.html").await;
+        page.eval("document.getElementById('typed').value = 'typed in'")
+            .await
+            .expect("type into the field");
+
+        let extraction = page.snapshot(viewport()).await.expect("snapshot");
+        let texts: Vec<&str> = extraction.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("typed in")), "runs were {texts:?}");
+    });
+}
+
+#[test]
+fn a_snapshot_shows_a_placeholder_for_an_empty_field_and_bullets_for_a_password() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "fields.html").await;
+        page.eval("document.getElementById('secret').value = 'hunter2'")
+            .await
+            .expect("set a password");
+
+        let extraction = page.snapshot(viewport()).await.expect("snapshot");
+        let texts: Vec<&str> = extraction.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("search the web")),
+            "an empty field shows its placeholder: {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains("\u{2022}\u{2022}\u{2022}")), "runs were {texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("hunter2")),
+            "a password must never be painted: {texts:?}"
+        );
+    });
+}
+
+#[test]
+fn a_snapshot_finds_the_things_worth_hinting() {
+    let h = harness();
+    runtime().block_on(async {
+        let targets =
+            open(&h, "interactive.html").await.snapshot_hints(viewport()).await.expect("hints");
+
+        assert!(
+            targets.iter().any(|t| t.kind == TargetKind::Editable),
+            "the input is hintable and entering insert mode is what a hint on it does: {targets:?}"
+        );
+        assert!(
+            targets.iter().filter(|t| t.kind == TargetKind::Clickable).count() >= 2,
+            "the link and the button: {targets:?}"
+        );
+        assert!(targets.iter().all(|t| t.rect.w > 0.0 && t.rect.h > 0.0), "{targets:?}");
+    });
+}
+
+#[test]
+fn hints_from_a_snapshot_leave_out_what_has_no_box_and_what_is_off_screen() {
+    // `display:none` has no layout box at all, so it never reaches us.
+    // The one 3000px down is culled here, the same way runs are.
+    //
+    // The covered link is deliberately NOT excluded: the script hit-tests
+    // a candidate and a snapshot has nothing to hit test with, so this
+    // path labels it. A spurious label costs a keystroke, and the
+    // alternative costs a round trip per candidate.
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "interactive.html").await;
+        let snapshot = page.snapshot_hints(viewport()).await.expect("snapshot hints");
+        let script = page.hints().await.expect("script hints");
+
+        let height = f64::from(viewport().css_height());
+        assert!(
+            snapshot.iter().all(|t| t.rect.y < height),
+            "nothing off screen, and the viewport is {height} tall: {snapshot:?}"
+        );
+        assert!(
+            snapshot.len() >= script.len(),
+            "the snapshot cannot exclude a covered link, so it finds at least as many: \
+             snapshot {snapshot:?} script {script:?}"
         );
     });
 }

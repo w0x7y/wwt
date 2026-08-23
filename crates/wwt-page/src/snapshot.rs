@@ -9,10 +9,12 @@
 //! It shares no code with `bootstrap.js` on purpose. That is what makes it
 //! a fallback rather than a second entry point to the same bug.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::json;
-use wwt_frame::{CssRect, Style, TextRun, Viewport};
+use wwt_frame::{CssRect, HintTarget, Style, TargetKind, TextRun, Viewport};
 
 use crate::color::parse_css_color;
 use crate::extract::{Extraction, Page};
@@ -34,9 +36,44 @@ const WEIGHT: usize = 1;
 const FONT_SIZE: usize = 2;
 const VISIBILITY: usize = 3;
 
+/// A field that is set for only a few nodes, sent as the indices that have
+/// one and the values they have.
+#[derive(Debug, Default, Deserialize)]
+struct RareStrings {
+    #[serde(default)]
+    index: Vec<usize>,
+    #[serde(default)]
+    value: Vec<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RareBools {
+    #[serde(default)]
+    index: Vec<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Nodes {
+    #[serde(default)]
+    node_name: Vec<i64>,
+    #[serde(default)]
+    attributes: Vec<Vec<i64>>,
+    #[serde(default)]
+    input_value: RareStrings,
+    #[serde(default)]
+    text_value: RareStrings,
+    #[serde(default)]
+    is_clickable: RareBools,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Layout {
+    #[serde(default)]
+    node_index: Vec<usize>,
+    #[serde(default)]
+    bounds: Vec<Vec<f64>>,
     #[serde(default)]
     styles: Vec<Vec<i64>>,
     #[serde(default)]
@@ -66,6 +103,8 @@ struct Document {
     #[serde(rename = "documentURL")]
     document_url: i64,
     title: i64,
+    #[serde(default)]
+    nodes: Nodes,
     layout: Layout,
     text_boxes: TextBoxes,
     #[serde(default)]
@@ -126,8 +165,13 @@ impl Page {
             .ok_or_else(|| anyhow!("the DOM snapshot contained no document"))?;
 
         let viewport_height = f64::from(vp.css_height());
+        // A control's value is not a text box, so it takes a second pass
+        // over the same answer rather than a second call.
+        let mut all = runs(&snapshot, document, viewport_height);
+        all.extend(field_runs(&snapshot, document, viewport_height));
+
         Ok(Extraction {
-            runs: runs(&snapshot, document, viewport_height),
+            runs: all,
             // A caret needs character positions inside a control, which
             // needs the mirror, which is script machinery. Insert mode
             // still types; it types blind.
@@ -138,6 +182,92 @@ impl Page {
             scroll_height: document.content_height,
             viewport_height,
         })
+    }
+}
+
+impl Page {
+    /// The interactive boxes, without running anything of ours.
+    ///
+    /// `isClickable` is Chromium's own answer to the question the script
+    /// asks with a tag sweep, so this is the rare place where the fallback
+    /// is the simpler of the two.
+    ///
+    /// What it cannot do is the occlusion test: the script hit-tests a
+    /// candidate before labelling it, and a snapshot has nothing to hit
+    /// test with, so a link behind a modal can still get a label here. A
+    /// spurious label costs a keystroke; the alternative is a round trip
+    /// per candidate.
+    pub async fn snapshot_hints(&self, vp: Viewport) -> Result<Vec<HintTarget>> {
+        let value = self
+            .client()
+            .call_on(
+                self.session_id(),
+                "DOMSnapshot.captureSnapshot",
+                // No styles and no paint order: a hint is a box and a kind,
+                // and neither is a question about how the box is painted.
+                json!({
+                    "computedStyles": [],
+                    "includePaintOrder": false,
+                    "includeDOMRects": false,
+                }),
+            )
+            .await
+            .context("capture a DOM snapshot for hints")?;
+
+        let snapshot: Snapshot =
+            serde_json::from_value(value).context("the DOM snapshot had an unexpected shape")?;
+        let document = snapshot
+            .documents
+            .first()
+            .ok_or_else(|| anyhow!("the DOM snapshot contained no document"))?;
+
+        let viewport_height = f64::from(vp.css_height());
+        let layout = &document.layout;
+        let layout_of = layout_index_by_node(layout);
+
+        let editable = |node_index: usize| {
+            matches!(
+                snapshot.string(document.nodes.node_name.get(node_index).copied().unwrap_or(-1)),
+                "INPUT" | "TEXTAREA" | "SELECT"
+            )
+        };
+
+        // A control is worth hinting whether or not Chromium calls it
+        // clickable, because hinting one is how insert mode is entered.
+        let candidates = document
+            .nodes
+            .is_clickable
+            .index
+            .iter()
+            .copied()
+            .chain((0..document.nodes.node_name.len()).filter(|&index| editable(index)));
+
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+        for node_index in candidates {
+            if !seen.insert(node_index) {
+                continue;
+            }
+            let Some(&layout_index) = layout_of.get(&node_index) else { continue };
+            let Some(bounds) = layout.bounds.get(layout_index) else { continue };
+            let Some(rect) = rect_of(bounds, document) else { continue };
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                continue;
+            }
+            if rect.y + rect.h <= 0.0 || rect.y >= viewport_height {
+                continue;
+            }
+            targets.push(HintTarget {
+                rect,
+                kind: if editable(node_index) {
+                    TargetKind::Editable
+                } else {
+                    TargetKind::Clickable
+                },
+            });
+        }
+
+        Ok(targets)
     }
 }
 
@@ -257,4 +387,92 @@ fn slice_utf16(text: &str, start: i64, length: i64) -> String {
         return String::new();
     }
     String::from_utf16_lossy(&units[start..end])
+}
+
+/// What a form control is showing, which no text box can say.
+///
+/// A control's value is element state and not DOM: `input.childNodes` is
+/// empty however much you type. The script mirrors the control into a
+/// hidden div to measure it; a snapshot cannot, so this paints the value
+/// into the control's own box and lets `paint_run` elide it. That is the
+/// difference between seeing what you typed and seeing where you typed.
+fn field_runs(snapshot: &Snapshot, document: &Document, viewport_height: f64) -> Vec<TextRun> {
+    let nodes = &document.nodes;
+    let layout = &document.layout;
+    let layout_of = layout_index_by_node(layout);
+
+    let values = rare_strings(&nodes.input_value);
+    let texts = rare_strings(&nodes.text_value);
+    let mut runs = Vec::new();
+
+    for (node_index, &name) in nodes.node_name.iter().enumerate() {
+        let name = snapshot.string(name);
+        if !matches!(name, "INPUT" | "TEXTAREA") {
+            continue;
+        }
+        let Some(&layout_index) = layout_of.get(&node_index) else { continue };
+        let Some(bounds) = layout.bounds.get(layout_index) else { continue };
+        let Some(rect) = rect_of(bounds, document) else { continue };
+        if rect.y + rect.h <= 0.0 || rect.y >= viewport_height {
+            continue;
+        }
+
+        let attribute = |wanted: &str| {
+            nodes
+                .attributes
+                .get(node_index)
+                .into_iter()
+                .flat_map(|pairs| pairs.chunks_exact(2))
+                .find(|pair| snapshot.string(pair[0]) == wanted)
+                .map(|pair| snapshot.string(pair[1]).to_string())
+        };
+
+        let value = values
+            .get(&node_index)
+            .or_else(|| texts.get(&node_index))
+            .map(|&index| snapshot.string(index).to_string())
+            .unwrap_or_default();
+
+        let text = if value.is_empty() {
+            // What the browser shows, which is the placeholder.
+            attribute("placeholder").unwrap_or_default()
+        } else if attribute("type").as_deref() == Some("password") {
+            // Never the value. The one run in this codebase that must not
+            // say what it knows.
+            "\u{2022}".repeat(value.chars().count())
+        } else {
+            value
+        };
+        if text.is_empty() {
+            continue;
+        }
+
+        let styles = Styles::of(snapshot, layout, layout_index);
+        runs.push(TextRun {
+            text,
+            baseline: rect.y + rect.h - styles.font_size() * DESCENDER,
+            rect,
+            style: styles.style(),
+            // Above the page's own text: a control is drawn over whatever
+            // is behind it, and its value is drawn over the control.
+            z: layout.paint_orders.get(layout_index).copied().unwrap_or(0) + 1,
+        });
+    }
+
+    runs
+}
+
+/// The layout tree indexes the node tree, and both passes here need the
+/// opposite. Built once rather than searched per control.
+fn layout_index_by_node(layout: &Layout) -> HashMap<usize, usize> {
+    let mut by_node = HashMap::new();
+    for (layout_index, &node_index) in layout.node_index.iter().enumerate() {
+        by_node.entry(node_index).or_insert(layout_index);
+    }
+    by_node
+}
+
+/// A rare field as a lookup from node index to its value.
+fn rare_strings(rare: &RareStrings) -> HashMap<usize, i64> {
+    rare.index.iter().copied().zip(rare.value.iter().copied()).collect()
 }

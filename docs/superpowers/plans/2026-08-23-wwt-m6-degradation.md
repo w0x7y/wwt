@@ -2737,7 +2737,7 @@ see is worse than one you can. Both come out of the query Task 9 already makes.
 **Interfaces:**
 - Produces: `impl Page { pub async fn snapshot_hints(&self, vp: Viewport) -> Result<Vec<HintTarget>> }`, matching `hints()`'s return type exactly, so `Effect::Hints` can name either.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `crates/wwt-page/tests/snapshot.rs`. `fields.html` and `interactive.html`
 are the fixtures the script path already uses for exactly these questions, so both
@@ -2841,7 +2841,7 @@ fn hints_from_a_snapshot_leave_out_what_has_no_box_and_what_is_off_screen() {
 
 Add `use wwt_frame::TargetKind;` to the test file's imports.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-page --test snapshot
@@ -2849,7 +2849,7 @@ cargo test -p wwt-page --test snapshot
 
 Expected: FAIL, `no method named snapshot_hints`, and the two field tests fail on content.
 
-- [ ] **Step 3: Implement the field pass**
+- [x] **Step 3: Implement the field pass**
 
 In `snapshot.rs`. Call it from `snapshot()` by extending the runs:
 
@@ -2951,7 +2951,7 @@ fn rare_strings(rare: &RareStrings) -> std::collections::HashMap<usize, i64> {
 }
 ```
 
-- [ ] **Step 4: Implement the hints**
+- [x] **Step 4: Implement the hints**
 
 ```rust
 impl Page {
@@ -3036,7 +3036,7 @@ impl Page {
 
 Add `HintTarget` and `TargetKind` to the `wwt_frame` import at the top of `snapshot.rs`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 ```bash
 cargo test -p wwt-page --test snapshot
@@ -3044,7 +3044,7 @@ cargo test -p wwt-page --test snapshot
 
 Expected: all nine pass. If `a_snapshot_finds_the_things_worth_hinting` reports four targets rather than three, print them: a `data:` document sometimes has a clickable body. Narrow the fixture rather than loosening the count, so the test keeps saying something.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
