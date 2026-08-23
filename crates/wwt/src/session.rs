@@ -393,6 +393,18 @@ impl Session {
             // none and the renderer deletes it from the terminal.
             self.picture = None;
             effects.push(Effect::StopScreencast(id));
+            // Nobody's runs were being maintained while the picture was up,
+            // so every tab's are suspect, not just the one in front. A
+            // background tab only takes the flag and spends it when focus
+            // arrives, which is M4's idling rule doing exactly its job: the
+            // one in front costs a read now and the rest cost nothing until
+            // you look at them. Marking only the focused tab left a tab you
+            // had visited in pixel mode painting stale runs on the switch
+            // back, because a switch spends a dirty flag and never sets one.
+            for tab in &mut self.tabs {
+                tab.dirty = true;
+            }
+            self.start_extract(id, effects);
         }
     }
 
@@ -765,8 +777,12 @@ impl Session {
 
     fn start_extract(&mut self, id: TabId, effects: &mut Vec<Effect>) {
         let focused = self.focused_id() == id;
+        // Only what is in front is painted as a picture. A background tab is
+        // read for its runs, which is what makes the first switch to it a
+        // repaint rather than a round trip.
+        let pixel = self.pixel && focused;
         let Some(tab) = self.tab_mut(id) else { return };
-        if tab.extracting || !tab.dirty {
+        if tab.reading || !tab.dirty {
             return;
         }
         // A background tab keeps its flag and spends it when focus arrives.
@@ -780,8 +796,22 @@ impl Session {
         if !focused && tab.read {
             return;
         }
-        tab.extracting = true;
+        tab.reading = true;
         tab.dirty = false;
+        // Pixel mode paints the picture and never the runs, so producing
+        // them is a forced layout for an answer `compose` throws away. Only
+        // the focused tab is a picture, and only a tab whose script works
+        // can be asked our cheap question at all: a degraded one asks the
+        // snapshot, which is the whole document either way.
+        //
+        // A tab nobody has read yet is the exception, whatever mode you are
+        // in. Reading it once is what puts a real title in the bar and gives
+        // it the runs that make the first switch to it a repaint, and a
+        // status carries neither of the two.
+        if pixel && tab.read && !tab.degraded {
+            effects.push(Effect::ReadStatus(id));
+            return;
+        }
         let source = if tab.degraded { Source::Snapshot } else { Source::Script };
         effects.push(Effect::Extract(id, source));
     }
@@ -902,6 +932,7 @@ impl Session {
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
         let id = match &job {
             Job::Extracted(id, _, _)
+            | Job::Status(id, _)
             | Job::Failed(id, _)
             | Job::Settled(id)
             | Job::Hints(id, _)
@@ -928,7 +959,7 @@ impl Session {
                     Ok(extraction) => extraction,
                     Err(message) => {
                         let tab = self.tab_mut(id).expect("resolved above");
-                        tab.extracting = false;
+                        tab.reading = false;
                         match source {
                             // The script broke. Read it the other way, once,
                             // and go on reading it that way until it
@@ -948,7 +979,7 @@ impl Session {
                 };
                 let extraction = *extraction;
                 let tab = self.tab_mut(id).expect("resolved above");
-                tab.extracting = false;
+                tab.reading = false;
                 tab.read = true;
                 tab.runs = extraction.runs;
                 tab.caret = extraction.caret;
@@ -956,6 +987,29 @@ impl Session {
                 // carries, and is applied by the one place that knows how.
                 self.apply_status(id, extraction.status, effects);
                 // The page may have changed again while we were extracting.
+                self.start_extract(id, effects);
+            }
+            Job::Status(_, result) => {
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.reading = false;
+                let status = match result {
+                    Ok(status) => status,
+                    // `status()` is the same injected script `extract()` is,
+                    // so it breaks the same way and earns the same answer:
+                    // degrade, and read the other way from now on. There is
+                    // no `Source` to branch on because a status is only ever
+                    // asked of a tab whose script works.
+                    Err(_) => {
+                        tab.degraded = true;
+                        tab.dirty = true;
+                        self.start_extract(id, effects);
+                        return;
+                    }
+                };
+                // Deliberately not `read`: a status carries no runs, and
+                // `read` is what says the first switch to this tab can be a
+                // repaint. Leaving pixel mode is what fills them in.
+                self.apply_status(id, status, effects);
                 self.start_extract(id, effects);
             }
             Job::Hints(_, result) => {
@@ -1036,7 +1090,7 @@ impl Session {
             }
             Job::Failed(_, message) => {
                 let tab = self.tab_mut(id).expect("resolved above");
-                tab.extracting = false;
+                tab.reading = false;
                 tab.navigating = false;
                 // The frame stays exactly as it was; only the statusline
                 // changes. Section 8: never blank the frame you are looking at.
@@ -2098,6 +2152,146 @@ mod tests {
         Event::Done(Job::Extracted(id, source, Ok(Box::new(extraction(url)))))
     }
 
+    // What a dirty signal costs while a picture is what you are looking at.
+
+    /// A ready session in pixel mode, which is where the cheap read applies.
+    fn ready_in_pixel() -> Session {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session
+    }
+
+    #[test]
+    fn a_dirty_signal_in_pixel_mode_asks_only_what_the_chrome_needs() {
+        // The runs an extraction would return are not painted in pixel mode:
+        // `compose` paints the picture instead. Asking for them is a forced
+        // layout on the same main thread that has to paint the next frame,
+        // for an answer that is thrown away.
+        let mut session = ready_in_pixel();
+
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::ReadStatus(tab0())]);
+    }
+
+    #[test]
+    fn a_dirty_signal_in_text_mode_still_asks_for_the_runs() {
+        let mut session = ready();
+
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![Effect::Extract(tab0(), Source::Script)],
+            "text mode paints the runs, so text mode has to have them"
+        );
+    }
+
+    #[test]
+    fn a_status_read_moves_the_statusline_and_is_worth_writing_down() {
+        // Everything a scroll in pixel mode has to keep true: where the
+        // statusline says you are, and where a restart would put you back.
+        let mut session = ready_in_pixel();
+        session.on(Event::Dirty(tab0()));
+        let mut moved = status("https://example.com");
+        moved.scroll_y = 240.0;
+
+        let effects = session.on(Event::Done(Job::Status(tab0(), Ok(moved))));
+
+        assert_eq!(session.focused().scroll_y, 240.0);
+        assert!(session.focused().progress > 0.0, "the statusline has to move with it");
+        assert_eq!(saved(&effects).map(|s| s.tabs[0].scroll_y), Some(240.0));
+    }
+
+    #[test]
+    fn a_second_dirty_signal_does_not_stack_a_second_status_read() {
+        let mut session = ready_in_pixel();
+        session.on(Event::Dirty(tab0()));
+
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![],
+            "one read in flight at a time, whichever kind it is"
+        );
+    }
+
+    #[test]
+    fn leaving_pixel_mode_asks_for_the_runs_again() {
+        // The runs in hand are whatever they were when pixel mode was
+        // entered, and the page has been free to change since. Without this
+        // the first frame of text is stale, and a tab opened while the
+        // picture was up has no runs at all.
+        let mut session = ready_in_pixel();
+        session.on(Event::Dirty(tab0()));
+        session.on(Event::Done(Job::Status(tab0(), Ok(status("https://example.com")))));
+
+        let effects = session.on(key('p'));
+
+        assert!(
+            effects.contains(&Effect::Extract(tab0(), Source::Script)),
+            "leaving pixel mode has to read the runs back: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_degraded_tab_in_pixel_mode_still_asks_the_snapshot() {
+        // `status()` is our script, and a degraded tab is one whose script
+        // throws. Asking it the cheap question asks the broken thing.
+        let mut session = ready_with_graphics();
+        session.on(Event::Done(failed(tab0())));
+        session.on(read(tab0(), Source::Snapshot, "https://example.com"));
+        session.on(key('p'));
+
+        assert_eq!(
+            session.on(Event::Dirty(tab0())),
+            vec![Effect::Extract(tab0(), Source::Snapshot)]
+        );
+    }
+
+    #[test]
+    fn a_tab_nobody_has_read_yet_is_read_for_its_runs_even_in_pixel_mode() {
+        // Reading a tab once when it opens is what puts a real title in the
+        // bar and makes the first switch to it a repaint. A status carries
+        // no runs, so it cannot be what does that.
+        let mut session = ready_in_pixel();
+        typed(&mut session, ":tabopen one.test");
+        session.on(code(KeyCode::Enter));
+
+        let effects = session.on(Event::Done(Job::Opened(TabId(1), Ok(()))));
+
+        assert!(
+            effects.contains(&Effect::Extract(TabId(1), Source::Script)),
+            "a tab with no runs needs the read that produces them: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn leaving_pixel_mode_leaves_every_tab_wanting_a_read() {
+        // A switch spends a dirty flag and never sets one, so a tab visited
+        // in pixel mode would paint the runs it had before the picture went
+        // up, for as long as nothing else changed it.
+        let mut session = ready_in_pixel();
+        open_two_more(&mut session);
+
+        session.on(key('p'));
+
+        assert!(
+            session.tabs.iter().all(|tab| tab.dirty || tab.reading),
+            "every tab has to be re-read, now or when you reach it"
+        );
+    }
+
+    #[test]
+    fn a_status_read_that_throws_degrades_the_tab_like_an_extraction_does() {
+        let mut session = ready_in_pixel();
+        session.on(Event::Dirty(tab0()));
+
+        let effects = session.on(Event::Done(Job::Status(tab0(), Err("no".to_string()))));
+
+        assert_eq!(
+            effects,
+            vec![Effect::Extract(tab0(), Source::Snapshot)],
+            "the same rule as a failed script extraction, and the same one retry"
+        );
+        assert!(session.focused().degraded);
+    }
+
     #[test]
     fn a_script_that_throws_is_read_the_other_way_instead() {
         let mut session = session();
@@ -2404,7 +2598,14 @@ mod tests {
         session.on(key('p'));
         let effects = session.on(key('p'));
         assert!(!session.pixel);
-        assert!(matches!(effects.as_slice(), [Effect::StopScreencast(_)]));
+        assert!(
+            effects.contains(&Effect::StopScreencast(tab0())),
+            "the pictures stop: {effects:?}"
+        );
+        assert!(
+            effects.contains(&Effect::Extract(tab0(), Source::Script)),
+            "and the runs come back, because nobody was keeping them: {effects:?}"
+        );
     }
 
     #[test]

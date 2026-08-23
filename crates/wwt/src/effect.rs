@@ -45,6 +45,14 @@ pub enum Source {
 pub enum Effect {
     /// Read the page.
     Extract(TabId, Source),
+    /// Read only what the chrome needs: the title, the URL and the scroll
+    /// geometry, without the walk that produces runs.
+    ///
+    /// What a dirty signal asks for in pixel mode, where the runs are not
+    /// painted and the walk is a forced layout on the main thread that has
+    /// to paint the next picture. It names no `Source`: it is our script or
+    /// it is nothing, because a degraded tab asks for an extraction instead.
+    ReadStatus(TabId),
     /// Ask the page for its interactive boxes.
     Hints(TabId, Source),
     Scroll(TabId, Scroll),

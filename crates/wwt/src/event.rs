@@ -7,7 +7,7 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 use wwt_cdp::Attached;
 use wwt_frame::{CellSize, GridSize, HintTarget};
-use wwt_page::{Extraction, ScreencastFrame};
+use wwt_page::{Extraction, ScreencastFrame, Status};
 
 use crate::effect::Source;
 use crate::tab::TabId;
@@ -44,13 +44,18 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub enum Job {
     /// The page was read, or could not be. One variant rather than two,
-    /// for the reason `Hints` is one: it is the only thing that clears
-    /// `extracting`, so there must be exactly one place that can forget
-    /// the extraction is over. It also carries which source answered,
+    /// for the reason `Hints` is one: it and `Status` are the only things
+    /// that clear `reading`, so each has to be the single place that can
+    /// forget its read is over. It also carries which source answered,
     /// because a failed script extraction and a failed snapshot mean
     /// different things and `Job::Failed` cannot tell them apart from a
     /// failed scroll.
     Extracted(TabId, Source, Result<Box<Extraction>, String>),
+    /// The chrome's half of a read came back, or could not. One variant
+    /// carrying a `Result` for the reason `Extracted` is one: it and
+    /// `Extracted` are the only two things that clear `reading`, and each
+    /// has to be the single place that can forget its read is over.
+    Status(TabId, Result<Status, String>),
     Failed(TabId, String),
     /// A navigation, history move, or reload finished.
     Settled(TabId),

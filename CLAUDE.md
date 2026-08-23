@@ -220,9 +220,10 @@ a tab and being told it opened, and `Job::Hints` is the only thing that clears
 `hinting`. So `f` is not asked at all on a tab that has not opened: setting the flag
 for a query nobody can answer left `f` dead on that tab for the rest of the run.
 `Tab::opened` names that window, and it is the question to ask before setting any of
-the three flags beside an effect. `navigating` and `extracting` are safe today by
-accident rather than by rule: `open_tab` already sets `navigating`, and an extraction
-is only ever asked for by a dirty signal, which a page has to exist to send.
+the three flags beside an effect. `navigating` and `reading` are safe today by
+accident rather than by rule: `open_tab` already sets `navigating`, and a read of
+either kind is only ever asked for by a dirty signal, which a page has to exist to
+send.
 
 ## Tabs and sessions
 
@@ -408,6 +409,24 @@ either way, so per-tab would buy a preference rather than a cost, and a new
 field in `Snapshot` is a version bump that costs every existing session file
 its tabs on upgrade.
 
+**A dirty signal in pixel mode asks only what the chrome needs.** The picture
+comes from the screencast, so the runs an extraction produces are thrown away by
+`compose`; `Effect::ReadStatus` gets the title, the URL and the scroll geometry
+without the walk. Three exceptions, each for a reason: a background tab is read
+in full because only what is in front is a picture, a tab nobody has read yet is
+read in full because a status carries neither runs nor a real title, and a
+degraded tab asks the snapshot because `status()` is the same injected script
+that already threw. A failed status read degrades the tab exactly as a failed
+extraction does, and `Job::Status` joins `Job::Extracted` as the second and last
+thing that clears `reading` — the flag is named for the question rather than for
+one of its two answers.
+
+**Leaving pixel mode marks every tab dirty, not just the one in front.** Nobody's
+runs were being maintained while the picture was up. A switch spends a dirty flag
+and never sets one, so marking only the focused tab left a tab you had visited in
+pixel mode painting stale runs on the switch back. A background tab takes the flag
+and pays nothing until you reach it, which is M4's idling rule doing its job.
+
 **Detection is asked once**, before raw mode and before the first paint,
 which is the one moment stdin belongs to nobody. `VMIN`/`VTIME` give the read
 a real timeout: a plain read would block forever on exactly the terminals the
@@ -513,18 +532,15 @@ them there:
 - **Nothing deep-copies a payload.** An extraction is every run on screen;
   `Client::send` and `Page::js` take their `Value` rather than clone it, or the whole
   of it is copied twice on the way to the caller.
-- **A read that paints no runs can ask for less.** `Extraction` is runs plus a
-  `Status`, and `Page::status()` reads the second half alone: no walk, no
-  `getClientRects`, no field mirrors. `measure_status` puts it under a millisecond
-  against `measure_extraction`'s ~4ms on the same page, most of what is left being the
-  round trip itself. **Nothing calls it yet.** Pixel mode and half-block both paint a
-  picture rather than runs, so a dirty signal in either is asking for a forced layout
-  whose answer is thrown away; making `Session` ask the cheap question there is the
-  change this seam exists for, and it is a rule rather than machinery, so it belongs
-  in `Session` with a test and not in `Core`. `Session::apply_status` is already the
-  single place that knows what a title, a URL and a scroll offset mean, chrome-error
-  detection and the save-if-it-moved rule included, so the second caller adds no
-  second copy of either.
+- **A read that paints no runs asks for less.** `Extraction` is runs plus a `Status`,
+  and `Page::status()` reads the second half alone: no walk, no `getClientRects`, no
+  field mirrors. `measure_status` puts it under a millisecond against
+  `measure_extraction`'s ~4ms on the same page, most of what is left being the round
+  trip itself. A dirty signal in pixel mode asks for that instead, because `compose`
+  paints the picture and never the runs, so the walk was a forced layout on the same
+  main thread that has to paint the next frame, for an answer that was thrown away.
+  Scrolling is what makes it matter: one scroll keystroke is one dirty signal, and in
+  pixel mode that used to be a full extraction per frame.
 
 The frame pipeline is not where the time goes and is not worth tuning: composing 300
 runs into a 120x40 grid and diffing it against the last one is ~40µs against a ~4ms

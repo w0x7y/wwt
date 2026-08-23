@@ -37,8 +37,10 @@ pub struct Tab {
     /// The page says it changed and we have not caught up yet. A background
     /// tab sets this and spends it when focus arrives.
     pub dirty: bool,
-    /// An extraction is in flight; a second would race it.
-    pub extracting: bool,
+    /// A read is in flight; a second would race it. Either kind: pixel mode
+    /// asks only for a status, and one flag rather than two is what keeps
+    /// the two from being asked at once.
+    pub reading: bool,
     /// This tab's injected script threw, so it is read by snapshot until it
     /// navigates. Not one of the in-flight flags: it outlives the effect
     /// that set it, on purpose.
@@ -74,7 +76,7 @@ impl Tab {
             progress: 0.0,
             scroll_y: 0.0,
             dirty: true,
-            extracting: false,
+            reading: false,
             degraded: false,
             navigating: false,
             hints: None,
@@ -104,7 +106,7 @@ mod tests {
             tab.dirty,
             "a page nobody has looked at is dirty by definition"
         );
-        assert!(!tab.extracting);
+        assert!(!tab.reading);
         assert_eq!(tab.url, "https://example.com");
     }
 

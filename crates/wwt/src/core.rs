@@ -365,6 +365,17 @@ impl Core {
                     })
                 }
 
+                // The cheap half of a read, and the one effect with no
+                // `Source`: it is our script or it is nothing. Reported as
+                // its own job because it is the only other thing that
+                // clears `reading`.
+                Effect::ReadStatus(id) => self.spawn(id, move |page| async move {
+                    Some(Job::Status(
+                        id,
+                        page.status().await.map_err(|error| error.to_string()),
+                    ))
+                }),
+
                 // Always a `Job::Hints`, however it went. A failure is not a
                 // `Job::Failed`: that one clears the extraction and
                 // navigation flags, and a hint query has finished neither of

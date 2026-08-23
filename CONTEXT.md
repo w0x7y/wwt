@@ -22,7 +22,8 @@ on every scroll frame. `wwt_page::Extraction`.
 not: the title, the URL and the scroll geometry, and `scroll_progress` with
 them because that was always a fact about the geometry. `Page::status()`
 reads it on its own, without the walk, and costs under a millisecond against
-an extraction's ~4ms. `wwt_page::Status`.
+an extraction's ~4ms. What a dirty signal asks for in pixel mode, where the
+runs would be thrown away. `wwt_page::Status`.
 
 **Dirty signal** — the page saying it has changed. Comes from a debounced
 `MutationObserver`, a scroll listener, `load`, and the four field-state
