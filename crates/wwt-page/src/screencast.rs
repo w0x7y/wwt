@@ -7,7 +7,6 @@
 use anyhow::{Context, Result};
 use serde_json::json;
 use wwt_cdp::Event;
-use wwt_frame::Viewport;
 
 use crate::extract::Page;
 
@@ -32,21 +31,24 @@ pub struct ScreencastFrame {
 }
 
 impl Page {
-    /// Start sending pictures of this page, at the size it is already laid
-    /// out for.
+    /// Start sending pictures of this page, no larger than the given size.
     ///
     /// PNG rather than JPEG: a lossy picture of text is the one thing a
     /// browser in a terminal must not produce, and both ends of this
     /// pipeline already speak PNG.
-    pub async fn start_screencast(&self, vp: Viewport) -> Result<()> {
+    ///
+    /// The size is the caller's decision and not the viewport's, because
+    /// a terminal without a graphics protocol wants a picture two orders
+    /// of magnitude smaller and Chromium is better at scaling than we are.
+    pub async fn start_screencast(&self, width: u32, height: u32) -> Result<()> {
         self.client()
             .call_on(
                 self.session_id(),
                 "Page.startScreencast",
                 json!({
                     "format": "png",
-                    "maxWidth": vp.css_width(),
-                    "maxHeight": vp.css_height(),
+                    "maxWidth": width,
+                    "maxHeight": height,
                     "everyNthFrame": 1,
                 }),
             )

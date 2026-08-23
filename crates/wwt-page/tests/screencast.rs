@@ -31,7 +31,7 @@ fn a_started_screencast_produces_a_frame() {
     runtime().block_on(async {
         let page = open(&h, "simple.html").await;
         page.activate().await.expect("bring it to the front");
-        page.start_screencast(viewport())
+        page.start_screencast(viewport().css_width(), viewport().css_height())
             .await
             .expect("start the screencast");
 
@@ -64,7 +64,7 @@ fn a_screencast_keeps_producing_frames_while_they_are_acked() {
         )
         .await;
         page.activate().await.expect("bring it to the front");
-        page.start_screencast(viewport()).await.expect("start");
+        page.start_screencast(viewport().css_width(), viewport().css_height()).await.expect("start");
 
         for _ in 0..3 {
             let frame = next_frame(&h.client, &page).await;
@@ -86,7 +86,7 @@ fn a_frame_from_another_page_is_not_this_ones() {
         two.activate().await.expect("bring it to the front");
 
         let mut events = h.client.subscribe();
-        two.start_screencast(viewport()).await.expect("start");
+        two.start_screencast(viewport().css_width(), viewport().css_height()).await.expect("start");
 
         let event = tokio::time::timeout(Duration::from_secs(10), async {
             loop {

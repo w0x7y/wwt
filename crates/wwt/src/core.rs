@@ -453,12 +453,11 @@ impl Core {
                         .map(|e| Job::Noted(id, e.to_string()))
                 }),
 
-                Effect::StartScreencast(id) => {
-                    let vp = self.session.viewport();
+                Effect::StartScreencast(id, size) => {
                     self.spawn(id, move |page| async move {
                         // A screencast that will not start is worth saying
                         // out loud: the mode is on and no picture is coming.
-                        page.start_screencast(vp)
+                        page.start_screencast(size.width, size.height)
                             .await
                             .err()
                             .map(|e| Job::Noted(id, e.to_string()))

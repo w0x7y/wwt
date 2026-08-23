@@ -1871,7 +1871,7 @@ process reasonable, and it is one parameter on a call that already takes it.
   ```
   `start_screencast` no longer takes a `Viewport`: what to ask for is a decision, and decisions are the session's.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/wwt/src/session.rs`'s `mod tests`:
 
@@ -1919,7 +1919,7 @@ In `crates/wwt/src/session.rs`'s `mod tests`:
 
 The helpers `session()`, `tab0()` and `key(..)` already exist in that test module; use them exactly as the neighbouring tests do, and use whatever grid the `session()` helper builds rather than the 80x24 above if it differs.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt --lib screencast
@@ -1927,7 +1927,7 @@ cargo test -p wwt --lib screencast
 
 Expected: FAIL to compile, `expected 1 argument, found 2` on `Effect::StartScreencast`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `crates/wwt/src/effect.rs`:
 
@@ -2009,7 +2009,7 @@ Then use it at every `Effect::StartScreencast` site. There are three: `set_pixel
 
 Keep whatever the existing arm does about failure; only the call's arguments change.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 cargo test --workspace
@@ -2017,7 +2017,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings

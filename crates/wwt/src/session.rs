@@ -25,7 +25,7 @@ use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
-use crate::effect::{Effect, Navigation, Scroll};
+use crate::effect::{Effect, FrameSize, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, action_for};
 use crate::keys;
@@ -376,7 +376,7 @@ impl Session {
         self.pixel = on;
         let id = self.focused_id();
         if on {
-            effects.push(Effect::StartScreencast(id));
+            effects.push(Effect::StartScreencast(id, self.frame_size()));
         } else {
             // The picture goes with the mode, so the next compose carries
             // none and the renderer deletes it from the terminal.
@@ -399,7 +399,16 @@ impl Session {
         if let Some(leaving) = leaving {
             effects.push(Effect::StopScreencast(leaving));
         }
-        effects.push(Effect::StartScreencast(self.focused_id()));
+        effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
+    }
+
+    /// How large a picture to ask for. See `FrameSize`.
+    fn frame_size(&self) -> FrameSize {
+        if self.graphics {
+            return FrameSize { width: self.vp.css_width(), height: self.vp.css_height() };
+        }
+        let grid = self.vp.grid();
+        FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
     }
 
     /// Say something in the statusline.
@@ -2046,11 +2055,46 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_with_graphics_is_asked_for_the_page_at_full_size() {
+        let mut session = ready_with_graphics();
+        let effects = session.on(key('p'));
+
+        let vp = page_viewport(GRID, CELL);
+        assert!(
+            effects.contains(&Effect::StartScreencast(
+                tab0(),
+                FrameSize { width: vp.css_width(), height: vp.css_height() }
+            )),
+            "effects were {effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_without_graphics_is_asked_for_twice_the_sample_grid() {
+        // Half-block wants cols by 2*rows samples. Twice that, because
+        // Chromium fits the frame inside both bounds while preserving the
+        // source aspect ratio, and the sample grid's aspect is a half
+        // cell, which is not square: asking for exactly the grid returns a
+        // frame that is short on one axis, which is a letterboxed page.
+        // Asked of the decision rather than through `p`, which still
+        // refuses a terminal with no graphics protocol. Half-block is what
+        // gives it something to do there, and that is the next task.
+        let mut session = ready();
+        session.set_graphics(false);
+
+        let grid = page_viewport(GRID, CELL).grid();
+        assert_eq!(
+            session.frame_size(),
+            FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
+        );
+    }
+
+    #[test]
     fn p_turns_pixel_mode_on_and_asks_for_pictures() {
         let mut session = ready_with_graphics();
         let effects = session.on(key('p'));
         assert!(session.pixel);
-        assert!(matches!(effects.as_slice(), [Effect::StartScreencast(_)]));
+        assert!(matches!(effects.as_slice(), [Effect::StartScreencast(..)]));
     }
 
     #[test]
@@ -2269,7 +2313,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::StartScreencast(id) if *id == arriving))
+                .any(|e| matches!(e, Effect::StartScreencast(id, _) if *id == arriving))
         );
     }
 
@@ -2284,7 +2328,7 @@ mod tests {
         assert!(
             !effects
                 .iter()
-                .any(|e| matches!(e, Effect::StartScreencast(_) | Effect::StopScreencast(_)))
+                .any(|e| matches!(e, Effect::StartScreencast(..) | Effect::StopScreencast(_)))
         );
     }
 
@@ -2317,7 +2361,7 @@ mod tests {
             CellSize { w: 9, h: 20 },
         ));
         assert!(effects.iter().any(|e| matches!(e, Effect::StopScreencast(_))));
-        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(_))));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(..))));
     }
 
     #[test]
@@ -2356,7 +2400,7 @@ mod tests {
         session.on(key('p'));
 
         let effects = session.on(key('x'));
-        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(_))));
+        assert!(effects.iter().any(|e| matches!(e, Effect::StartScreencast(..))));
         // Nothing is stopped: the tab is being closed and its target goes
         // with it.
         assert!(!effects.iter().any(|e| matches!(e, Effect::StopScreencast(_))));

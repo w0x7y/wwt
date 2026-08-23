@@ -108,7 +108,10 @@ async fn a_real_screencast_frame_becomes_the_picture_on_a_frame() {
     page.activate().await.expect("bring it to the front");
 
     let mut events = client.subscribe();
-    page.start_screencast(page_viewport(GRID, CELL))
+    page.start_screencast(
+        page_viewport(GRID, CELL).css_width(),
+        page_viewport(GRID, CELL).css_height(),
+    )
         .await
         .expect("start the screencast");
 

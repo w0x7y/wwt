@@ -12,6 +12,19 @@ use wwt_page::Input;
 use crate::store::Snapshot;
 use crate::tab::TabId;
 
+/// How large a picture to ask a page for, in CSS pixels.
+///
+/// A decision rather than a measurement: with a graphics protocol it is
+/// the viewport, and without one it is twice the sample grid, which is a
+/// few thousand pixels rather than a megapixel. Chromium does the scaling
+/// either way, so a degraded terminal never pays for a picture it cannot
+/// show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSize {
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Read the page.
@@ -55,7 +68,7 @@ pub enum Effect {
     Save(Snapshot),
     /// Start sending pictures of this tab. Only ever the focused one: a
     /// background tab is idle, which is the rule extraction already follows.
-    StartScreencast(TabId),
+    StartScreencast(TabId, FrameSize),
     StopScreencast(TabId),
     /// Tell the page a picture arrived, so it sends the next one. Carries
     /// the ack id from the frame, which is not a CDP session id.
