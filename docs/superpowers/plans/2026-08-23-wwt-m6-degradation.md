@@ -2284,7 +2284,7 @@ requirement: a bug in one must not be able to reach the other.
 - Consumes: `Extraction` and `parse_css_color`, both already in `wwt-page`.
 - Produces: `impl Page { pub async fn snapshot(&self, vp: Viewport) -> Result<Extraction> }`. The viewport is a parameter because a `Page` is a handle and stores none; `Core` already asks `self.session.viewport()` for exactly this, in the `Scroll` arm.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/wwt-page/tests/snapshot.rs`. Follow `extraction.rs` exactly: a sync `#[test]`, the shared `harness()`, and `runtime().block_on`, because each test binary launches one Chromium and hands it out a test at a time.
 
@@ -2414,7 +2414,7 @@ fn a_snapshot_leaves_out_what_is_below_the_viewport() {
 
 `snapshot.rs` needs `eval`, which is behind the `test-support` feature `wwt-page` already turns on for its own tests through a dev-dependency on itself. Nothing new is needed for it.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-page --test snapshot
@@ -2422,7 +2422,7 @@ cargo test -p wwt-page --test snapshot
 
 Expected: FAIL to compile, `no method named snapshot`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `crates/wwt-page/src/snapshot.rs`:
 
@@ -2695,7 +2695,7 @@ grep -n "pub(crate) fn client\|pub fn session_id\|pub struct Extraction" crates/
 
 Declare the module in `crates/wwt-page/src/lib.rs` beside the others, and re-export nothing new: `snapshot` is a method on `Page`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 cargo test -p wwt-page --test snapshot
@@ -2703,7 +2703,7 @@ cargo test -p wwt-page --test snapshot
 
 Expected: all five pass. The fidelity test is the one that will fail first if the baseline rule from Task 1 was recorded as "line box" and this code still uses the bottom. Fix the code to match the recorded answer, never the test to match the code.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
