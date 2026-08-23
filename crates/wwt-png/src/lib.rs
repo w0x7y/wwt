@@ -11,6 +11,7 @@
 //! plausible wrong picture on screen.
 
 pub mod base64;
+pub mod inflate;
 
 /// What can be wrong with a picture.
 ///

@@ -280,7 +280,7 @@ The crate exists to hold one algorithm, and this task is the easy end of it. M5'
 **Interfaces:**
 - Produces: `wwt_png::Error`, `wwt_png::base64::decode(&str) -> Result<Vec<u8>, Error>`. Task 3 adds `inflate`, Task 4 adds `decode` and `Png`, and Task 8 is the only consumer of any of it.
 
-- [ ] **Step 1: Create the crate**
+- [x] **Step 1: Create the crate**
 
 `crates/wwt-png/Cargo.toml`:
 
@@ -299,7 +299,7 @@ The empty `[dependencies]` is the point and stays empty. Add the member to the w
 members = ["crates/wwt-frame", "crates/wwt-png", "crates/wwt-term", "crates/wwt-cdp", "crates/wwt-page", "crates/wwt-ui", "crates/wwt"]
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `crates/wwt-png/src/base64.rs`:
 
@@ -359,7 +359,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-png
@@ -367,7 +367,7 @@ cargo test -p wwt-png
 
 Expected: FAIL, `cannot find function decode`.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Above the test module in `base64.rs`:
 
@@ -474,7 +474,7 @@ impl std::error::Error for Error {}
 
 `std` is not a dependency; `Display` and `Error` are core to being usable from `anyhow` at the boundary, and `wwt-frame` already implements traits from `std`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 ```bash
 cargo test -p wwt-png
@@ -482,7 +482,7 @@ cargo test -p wwt-png
 
 Expected: 6 passed.
 
-- [ ] **Step 6: Clippy and commit**
+- [x] **Step 6: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -509,7 +509,7 @@ The one piece of real algorithm in the milestone. It is `puff.c` in Rust: a bit 
 - Consumes: `wwt_png::Error` from Task 2.
 - Produces: `wwt_png::inflate::zlib(&[u8]) -> Result<Vec<u8>, Error>`, which takes a zlib stream (2-byte header, deflate data, 4-byte adler) and returns the bytes. Task 4 calls it with the concatenated IDAT data.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/wwt-png/src/inflate.rs`, test module at the bottom:
 
@@ -601,7 +601,7 @@ python3 -c "import zlib;print(', '.join(hex(b) for b in zlib.compress(b'a'*10,9)
 python3 -c "import zlib;print(', '.join(hex(b) for b in zlib.compress(bytes(range(32,80))*2,9)))"
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cargo test -p wwt-png inflate
@@ -609,7 +609,7 @@ cargo test -p wwt-png inflate
 
 Expected: FAIL, `cannot find function zlib`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Above the tests in `inflate.rs`. This is the whole algorithm; write it as given rather than improvising, and read the comments, which say which parts are load-bearing.
 
@@ -929,7 +929,7 @@ pub mod base64;
 pub mod inflate;
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 cargo test -p wwt-png
@@ -937,7 +937,7 @@ cargo test -p wwt-png
 
 Expected: 14 passed. If the dynamic-Huffman test fails, that is the part to debug first, and `python3 -c "import zlib; ..."` is how to make a smaller case: a stream whose text is 48 distinct bytes repeated is chosen precisely because zlib will not use fixed codes for it.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
