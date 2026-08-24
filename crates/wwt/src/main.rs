@@ -59,6 +59,11 @@ async fn main() -> Result<()> {
             true,
         ),
     };
+    // What a relaunch should launch onto. `None` for a private session, so
+    // the replacement gets a fresh temporary profile rather than trying to
+    // take the one another wwt is holding: the fallback is the same decision
+    // made twice, and it has to be made the same way both times.
+    let relaunch_profile = (!private).then(|| profile.clone()).flatten();
 
     let client = Arc::new(
         Client::connect(browser.ws_url())
@@ -103,6 +108,11 @@ async fn main() -> Result<()> {
             session_file,
             graphics,
             config: config.clone(),
+            // The browser is `Core`'s from here: the thing that restarts one
+            // has to hold it, and it is dropped when the loop ends exactly
+            // as it was when it was a local of `main`.
+            browser,
+            profile: relaunch_profile,
         },
     );
     // The statusline holds one notice, so the last of these is the one you

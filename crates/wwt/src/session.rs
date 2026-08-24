@@ -90,6 +90,13 @@ pub struct Session {
     /// Counts focus changes, and stamps `Tab::focused_at` with each one.
     /// See `evict`.
     focus_counter: u64,
+    /// The websocket closed and no replacement has arrived. Every tab is
+    /// detached; the frame on screen is the last true thing about them.
+    browser_lost: bool,
+    /// A relaunch is in flight. The fourth in-flight flag in this file, and
+    /// it is here for the reason the other three are: a held `j` after a
+    /// failed relaunch would otherwise ask for a browser per repeat.
+    relaunching: bool,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -147,6 +154,8 @@ impl Session {
             picture: None,
             generations: 0,
             focus_counter: 0,
+            browser_lost: false,
+            relaunching: false,
         }
     }
 
@@ -686,9 +695,48 @@ impl Session {
             }
             Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
+            Event::BrowserLost => self.on_browser_lost(&mut effects),
+            Event::BrowserBack => self.on_browser_back(&mut effects),
             Event::Done(job) => self.on_job(job, &mut effects),
         }
         effects
+    }
+
+    /// The browser died. Keep everything, ask for another.
+    fn on_browser_lost(&mut self, effects: &mut Vec<Effect>) {
+        self.browser_lost = true;
+        // `Tab::detach` and not `Session::detach`: there is no target on the
+        // other end to close, so emitting `Effect::Detach` would ask `Core`
+        // to close pages whose websocket is already gone.
+        for tab in &mut self.tabs {
+            tab.detach();
+        }
+        self.focused_mut().state = State::Notice("browser gone, restarting".to_string());
+        self.ask_for_a_browser(effects);
+    }
+
+    /// Ask for a browser, unless we already have.
+    ///
+    /// The fourth in-flight flag in this file, and it exists for the same
+    /// reason as the other three: a held `j` after a failed relaunch would
+    /// otherwise spawn a relaunch per repeat.
+    fn ask_for_a_browser(&mut self, effects: &mut Vec<Effect>) {
+        if self.relaunching {
+            return;
+        }
+        self.relaunching = true;
+        effects.push(Effect::Relaunch);
+    }
+
+    /// A browser arrived. Nothing has a target yet.
+    fn on_browser_back(&mut self, effects: &mut Vec<Effect>) {
+        self.browser_lost = false;
+        self.relaunching = false;
+        // Only the tab in front, because the restart path is lazy restore
+        // arrived at from the other direction. A background tab pays for
+        // its target when you reach it, which is M4's idling rule.
+        let id = self.focused_id();
+        self.reattach(id, effects);
     }
 
     /// A picture arrived.
@@ -744,6 +792,14 @@ impl Session {
     }
 
     fn run_action(&mut self, action: Action, effects: &mut Vec<Effect>) {
+        // With no browser there is nothing for most of these to act on, and
+        // a keystroke is how you ask for one back. Deliberately not a timer:
+        // an idle wwt costs ~zero CPU and that rule does not get an
+        // exception for the state where there is nothing to be busy about.
+        if self.browser_lost && action_touches_the_page(&action) {
+            self.ask_for_a_browser(effects);
+            return;
+        }
         match action {
             Action::Quit => {
                 // Stop before quitting, so the browser is not left painting
@@ -1109,6 +1165,18 @@ impl Session {
                 self.focused_mut().state = State::Error(message.clone());
                 return;
             }
+            // The second job with no tab, and for the same reason: a browser
+            // belongs to all of them.
+            Job::Relaunched(result) => {
+                self.relaunching = false;
+                if let Err(message) = result {
+                    // Stale frames and a label, never an exit. The tabs are
+                    // already written down, so quitting is yours to choose.
+                    self.focused_mut().state =
+                        State::Error(format!("no browser: {message}. any key retries"));
+                }
+                return;
+            }
             Job::Opened(id, _) => *id,
         };
         if self.tab_mut(id).is_none() {
@@ -1304,10 +1372,31 @@ impl Session {
             Job::Noted(_, message) => {
                 self.tab_mut(id).expect("resolved above").state = State::Error(message);
             }
-            Job::Unsaved(_) => unreachable!("answered above"),
+            Job::Unsaved(_) | Job::Relaunched(_) => unreachable!("answered above"),
         }
     }
 }
+
+/// Whether an action would have reached a page.
+///
+/// Quitting, the `:` line and mode changes all still work with no browser:
+/// they are ours, and taking them away would make a browser that lost its
+/// Chromium unusable rather than merely empty.
+fn action_touches_the_page(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Scroll(_)
+            | Action::ScrollTop
+            | Action::ScrollEnd
+            | Action::Back
+            | Action::Forward
+            | Action::Reload
+            | Action::Hints
+            | Action::Insert
+            | Action::Send(_)
+    )
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -3683,6 +3772,77 @@ mod tests {
             !effects.iter().any(|e| matches!(e, Effect::Detach(_))),
             "three attached tabs is not over a limit of three"
         );
+    }
+
+    // The supervisor.
+
+    #[test]
+    fn a_dead_browser_leaves_every_tab_where_it_was_and_asks_for_another() {
+        let mut session = four_ready_tabs();
+        session.tabs[0].scroll_y = 500.0;
+        session.focused_mut().runs = vec![run("still here")];
+        let effects = session.on(Event::BrowserLost);
+
+        assert!(effects.contains(&Effect::Relaunch));
+        assert!(
+            session.tabs.iter().all(|tab| tab.presence == Presence::Detached),
+            "there is no browser, so no tab has a target"
+        );
+        assert_eq!(session.tabs.len(), 4, "the tabs are what a restart comes back to");
+        assert_eq!(session.tabs[0].scroll_y, 500.0);
+        assert!(
+            !session.focused().runs.is_empty(),
+            "never blank the frame you are looking at"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Detach(_))),
+            "there is nothing on the other end to close"
+        );
+    }
+
+    #[test]
+    fn a_browser_that_came_back_is_asked_for_one_page() {
+        let mut session = four_ready_tabs();
+        session.on(Event::BrowserLost);
+        let effects = session.on(Event::BrowserBack);
+
+        let opens: Vec<_> = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::OpenTab { .. }))
+            .collect();
+        assert_eq!(opens.len(), 1, "the restart path is lazy restore");
+        assert_eq!(session.focused().presence, Presence::Opening);
+    }
+
+    #[test]
+    fn a_held_key_asks_for_one_relaunch_and_not_thirty() {
+        let mut session = four_ready_tabs();
+        session.on(Event::BrowserLost);
+        session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
+
+        let first = session.on(key('j'));
+        assert!(first.contains(&Effect::Relaunch), "a keystroke is how you ask again");
+        let second = session.on(key('j'));
+        assert!(
+            !second.contains(&Effect::Relaunch),
+            "one in flight is enough; the flag is cleared by its answer"
+        );
+        assert!(
+            !first.iter().any(|e| matches!(e, Effect::Scroll(..))),
+            "there is no page to scroll"
+        );
+    }
+
+    #[test]
+    fn a_relaunch_that_failed_leaves_the_frame_you_were_reading() {
+        let mut session = four_ready_tabs();
+        session.focused_mut().runs = vec![run("still here")];
+        let runs = session.focused().runs.len();
+        session.on(Event::BrowserLost);
+        session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
+
+        assert_eq!(session.focused().runs.len(), runs);
+        assert!(matches!(session.state(), State::Error(_) | State::Notice(_)));
     }
 
     #[test]

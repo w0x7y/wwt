@@ -32,6 +32,13 @@ pub enum Event {
     /// A page opened a tab for itself. The session has to make room for it
     /// before it can be prepared, because ids are minted on that side.
     TargetOpened(Attached),
+    /// The websocket closed. Every target died with it, so every tab has
+    /// lost its page, and the frame on screen is the last true thing there
+    /// is about them.
+    BrowserLost,
+    /// A replacement browser is connected and attached. No tab has a target
+    /// yet: this is the moment to ask for the one in front.
+    BrowserBack,
     /// Something that ran off the loop's thread finished.
     Done(Job),
 }
@@ -118,6 +125,11 @@ pub enum Job {
     /// left. The exception also cost `on_job` a variant it had to prove
     /// could not reach the bottom of the match.
     Noted(TabId, String),
+    /// A relaunch gave up. Only ever the failure: a browser that arrived is
+    /// `Event::BrowserBack`, because `Core` has to file the browser and the
+    /// client before the session can be told anything at all, exactly as
+    /// `Finished::Opened` files a page before reporting `Job::Opened`.
+    Relaunched(Result<(), String>),
     /// The session file could not be written. The one thing that fails
     /// without a tab to fail on, because the tabs are what it is made of.
     Unsaved(String),

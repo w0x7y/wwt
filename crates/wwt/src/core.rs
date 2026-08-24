@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
-use wwt_cdp::{Client, TargetId};
+use wwt_cdp::{Chromium, Client, TargetId};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::Page;
 use wwt_term::Renderer;
@@ -62,10 +62,17 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// finished opening is not: the `Page` it produced belongs to `Core`, and the
 /// session must never hold one, so the page is filed here and the session
 /// hears only that the tab opened.
-#[derive(Debug)]
+///
+/// No `Debug`, since M7: a `Chromium` and a `Client` have none, and neither
+/// is a thing whose innards would read usefully in a panic message.
 enum Finished {
     Job(Job),
     Opened(TabId, Result<Arc<Page>, String>),
+    /// A replacement browser, or the reason there is not one. It comes
+    /// this way rather than as a `Job` for the reason a `Page` does: a
+    /// `Chromium` and a `Client` are `Core`'s and must never reach the
+    /// session.
+    Relaunched(Result<(Chromium, Arc<Client>), String>),
 }
 
 impl From<Job> for Finished {
@@ -110,6 +117,19 @@ pub struct Core {
     pending: Option<Snapshot>,
     /// When the next picture may be asked for. See `FRAME_INTERVAL`.
     framed_at: Instant,
+
+    /// The browser itself, because the thing that restarts one has to hold
+    /// it. It was `main`'s until M7.
+    ///
+    /// An `Option` so a relaunch can take it and drop it before launching a
+    /// replacement: `Chromium` is kill_on_drop, and the dying browser has to
+    /// let go of the profile before another can take it.
+    browser: Option<Chromium>,
+    /// Which profile to relaunch onto, or `None` for a private session.
+    profile: Option<PathBuf>,
+    /// Which binary to relaunch, so a replacement is the browser the config
+    /// file named rather than whatever discovery finds second.
+    chromium: Option<PathBuf>,
 }
 
 /// What the browser starts as.
@@ -128,6 +148,15 @@ pub struct Startup {
     pub graphics: bool,
     /// What the config file said, or its defaults.
     pub config: crate::config::Config,
+    /// The browser itself, because the thing that restarts one has to hold
+    /// it. It was `main`'s until M7.
+    pub browser: Chromium,
+    /// Which profile to relaunch onto, or `None` for a private session.
+    ///
+    /// `None` also when the first launch fell back to a temporary profile,
+    /// so a relaunch of a private session gets a fresh temporary one rather
+    /// than trying to take the profile another wwt holds.
+    pub profile: Option<PathBuf>,
 }
 
 impl Core {
@@ -155,6 +184,9 @@ impl Core {
             session_file: startup.session_file,
             pending: None,
             framed_at: Instant::now(),
+            browser: Some(startup.browser),
+            profile: startup.profile,
+            chromium: startup.config.chromium.clone(),
         }
     }
 
@@ -185,6 +217,12 @@ impl Core {
         let mut cdp = self.client.subscribe();
         let mut resize_at: Option<Instant> = None;
         let mut save_at: Option<Instant> = None;
+        // Whether the websocket has closed. A closed receiver answers `None`
+        // immediately and forever, so the arm below has to be guarded off
+        // once it has answered that: unguarded, the loop spins at one
+        // hundred percent CPU under a browser that has gone, which is a
+        // worse failure than the one being handled.
+        let mut lost = false;
 
         let effects = self.session.begin();
         if self.apply(effects, &mut save_at, out)? {
@@ -222,20 +260,26 @@ impl Core {
                 // iterating every page to ask whose picture this is: in
                 // pixel mode a frame is much the most frequent event there
                 // is, and every other event would pay for that walk.
-                Some(event) = cdp.recv() => match Client::opened_by_a_page(&event) {
-                    Some(attached) => Some(Incoming::Event(Event::TargetOpened(attached))),
-                    None if event.method == wwt_page::SCREENCAST_FRAME => self
-                        .pages
-                        .iter()
-                        .find_map(|(id, page)| {
-                            page.screencast_frame(&event)
-                                .map(|frame| Incoming::Event(Event::Frame(*id, Box::new(frame))))
-                        }),
-                    None => self
-                        .pages
-                        .iter()
-                        .find(|(_, page)| page.is_dirty(&event))
-                        .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
+                incoming = cdp.recv(), if !lost => match incoming {
+                    // The websocket closed: the browser is gone and so is
+                    // every target in it.
+                    None => Some(Incoming::Event(Event::BrowserLost)),
+                    Some(event) => match Client::opened_by_a_page(&event) {
+                        Some(attached) => Some(Incoming::Event(Event::TargetOpened(attached))),
+                        None if event.method == wwt_page::SCREENCAST_FRAME => self
+                            .pages
+                            .iter()
+                            .find_map(|(id, page)| {
+                                page.screencast_frame(&event).map(|frame| {
+                                    Incoming::Event(Event::Frame(*id, Box::new(frame)))
+                                })
+                            }),
+                        None => self
+                            .pages
+                            .iter()
+                            .find(|(_, page)| page.is_dirty(&event))
+                            .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
+                    },
                 },
 
                 Some(finished) = self.jobs_rx.recv() => Some(Incoming::Finished(finished)),
@@ -269,8 +313,27 @@ impl Core {
             // A page is `Core`'s. This is where one is filed, because it is
             // the first point in the turn that can borrow `self` mutably.
             let event = match incoming {
+                // Before the general arm, which would otherwise take it:
+                // this one is here for the flag and not for the event.
+                Some(Incoming::Event(Event::BrowserLost)) => {
+                    lost = true;
+                    Some(Event::BrowserLost)
+                }
                 Some(Incoming::Event(event)) => Some(event),
                 Some(Incoming::Finished(Finished::Job(job))) => Some(Event::Done(job)),
+                Some(Incoming::Finished(Finished::Relaunched(Ok((browser, client))))) => {
+                    self.browser = Some(browser);
+                    self.client = Arc::clone(&client);
+                    // The subscription is a local, and it is the thing that
+                    // has to be replaced: this is why a relaunch is handled
+                    // here rather than in `apply`.
+                    cdp = self.client.subscribe();
+                    lost = false;
+                    Some(Event::BrowserBack)
+                }
+                Some(Incoming::Finished(Finished::Relaunched(Err(error)))) => {
+                    Some(Event::Done(Job::Relaunched(Err(error))))
+                }
                 Some(Incoming::Finished(Finished::Opened(id, Ok(page)))) => {
                     self.opening.remove(&id);
                     self.pages.insert(id, page);
@@ -516,6 +579,25 @@ impl Core {
                     });
                 }
 
+                Effect::Relaunch => {
+                    // Dropped before anything else happens. `Chromium` is
+                    // kill_on_drop and the profile directory is the lock:
+                    // Chromium refuses a user-data-dir another Chromium
+                    // holds, so relaunching while our own dying browser
+                    // still has it is the one failure this path would
+                    // inflict on itself, and it would present as an
+                    // inexplicable fall back to a private session.
+                    drop(self.browser.take());
+                    let profile = self.profile.clone();
+                    let binary = self.chromium.clone();
+                    let tx = self.jobs_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(Finished::Relaunched(
+                            relaunch(profile.as_deref(), binary.as_deref()).await,
+                        ));
+                    });
+                }
+
                 Effect::SetViewport(id, vp) => {
                     // A diff against a frame of different dimensions is
                     // meaningless.
@@ -590,4 +672,55 @@ impl Core {
         out.flush().context("flush the terminal")?;
         Ok(())
     }
+}
+
+/// How many times to try, and how long to wait between.
+///
+/// `Chromium::launch` carries its own twenty second startup timeout, which
+/// dominates the worst case: a browser that starts and never announces an
+/// endpoint costs about a minute before wwt gives up. Accepted. The
+/// alternative is a second deadline over the first, and the case it would
+/// improve is a machine that is already not working.
+const RELAUNCH_BACKOFF: &[Duration] = &[
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+];
+
+/// Start a browser to replace one that died, and connect to it.
+///
+/// The whole of the retrying, because how many times and how far apart are
+/// machinery: the decision that we try at all is the session's.
+async fn relaunch(
+    profile: Option<&std::path::Path>,
+    binary: Option<&std::path::Path>,
+) -> Result<(Chromium, Arc<Client>), String> {
+    let mut last = "never attempted".to_string();
+    for (attempt, wait) in RELAUNCH_BACKOFF.iter().enumerate() {
+        if attempt > 0 {
+            tokio::time::sleep(*wait).await;
+        }
+        match start(profile, binary).await {
+            Ok(pair) => return Ok(pair),
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(last)
+}
+
+/// One attempt: a browser, a connection, and the auto-attach that has to be
+/// on before the first target exists.
+///
+/// Deliberately no fall back to a temporary profile. That fallback is a
+/// startup path: a relaunch that cannot have the profile is a failed attempt
+/// and backs off, because the alternative is silently continuing without the
+/// cookie jar that was the reason for holding one.
+async fn start(
+    profile: Option<&std::path::Path>,
+    binary: Option<&std::path::Path>,
+) -> Result<(Chromium, Arc<Client>)> {
+    let browser = Chromium::launch(profile, binary).await?;
+    let client = Arc::new(Client::connect(browser.ws_url()).await?);
+    client.auto_attach().await?;
+    Ok((browser, client))
 }

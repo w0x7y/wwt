@@ -101,6 +101,11 @@ pub enum Effect {
     /// Tell the page a picture arrived, so it sends the next one. Carries
     /// the ack id from the frame, which is not a CDP session id.
     AckFrame(TabId, i64),
+    /// Start a browser to replace the one that died, and say how it went.
+    ///
+    /// `Session` decides that we try; `Core` decides how many times and how
+    /// far apart, because a count and a delay are machinery.
+    Relaunch,
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,
