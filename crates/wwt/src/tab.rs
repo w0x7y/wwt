@@ -112,6 +112,31 @@ impl Tab {
         self.hints = None;
     }
 
+    /// Let go of this tab's target, and keep the tab.
+    ///
+    /// The one place that says what a tab is without a browser behind it.
+    /// Eviction detaches one tab, a dead Chromium detaches all of them, and
+    /// a restored tab starts this way, so getting the list wrong here is
+    /// three bugs rather than one.
+    pub fn detach(&mut self) {
+        self.presence = Presence::Detached;
+        // Every answer in flight is an answer that will not arrive: `Core`
+        // holds no page for this tab any more. A flag left set is a flag
+        // nothing can clear, which is `f` dead for the rest of the run.
+        self.reading = false;
+        self.navigating = false;
+        self.hinting = false;
+        // Geometry, belonging to a document that is about to stop existing.
+        self.hints = None;
+        // A reattached page is a new document with our script freshly in
+        // it, so it has earned the fast path back. The same reason a
+        // navigation clears this.
+        self.degraded = false;
+        // The runs stay, and are what a switch back paints first. They are
+        // also no longer authoritative, which is what the flag says.
+        self.dirty = true;
+    }
+
     /// Whether an effect naming this tab would reach a page.
     pub fn attached(&self) -> bool {
         self.presence == Presence::Attached
@@ -121,6 +146,7 @@ impl Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wwt_frame::{CssRect, Style};
 
     #[test]
     fn a_new_tab_has_not_been_read_yet() {
@@ -164,6 +190,48 @@ mod tests {
         assert!(tab.attached());
         tab.presence = Presence::Detached;
         assert!(!tab.attached());
+    }
+
+    #[test]
+    fn a_detached_tab_keeps_what_it_looked_like_and_loses_what_it_was_waiting_for() {
+        let mut tab = Tab::new(TabId(0), "https://example.com".to_string());
+        tab.presence = Presence::Attached;
+        tab.title = "Example".to_string();
+        tab.scroll_y = 400.0;
+        tab.runs = vec![TextRun {
+            text: "text".to_string(),
+            rect: CssRect { x: 0.0, y: 0.0, w: 400.0, h: 20.0 },
+            baseline: 16.0,
+            style: Style::default(),
+            z: 0,
+        }];
+        tab.read = true;
+        tab.degraded = true;
+        tab.reading = true;
+        tab.navigating = true;
+        tab.hinting = true;
+        tab.hints = Some(Vec::new());
+
+        tab.detach();
+
+        assert_eq!(tab.presence, Presence::Detached);
+        // What it looked like, which is what makes switching back a repaint.
+        assert_eq!(tab.title, "Example");
+        assert_eq!(tab.scroll_y, 400.0);
+        assert_eq!(tab.runs.len(), 1);
+        // Answers that are never coming. `Core` drops every effect naming a
+        // tab with no page, so a flag left set here is a flag nothing will
+        // ever clear.
+        assert!(!tab.reading);
+        assert!(!tab.navigating);
+        assert!(!tab.hinting);
+        // Geometry belonging to a document that is about to stop existing.
+        assert_eq!(tab.hints, None);
+        // A new document reinstalls bootstrap.js, so the tab has earned
+        // another attempt at the fast path. The same reason navigation
+        // clears it.
+        assert!(!tab.degraded);
+        assert!(tab.dirty, "nothing about the old document is authoritative");
     }
 
     #[test]

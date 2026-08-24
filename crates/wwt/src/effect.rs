@@ -81,6 +81,10 @@ pub enum Effect {
     /// session has just made for it. It is already loading somewhere of its
     /// own choosing, so unlike `OpenTab` there is no url to give it.
     AdoptTab { id: TabId, target: Attached },
+    /// Let go of a tab's target and keep the tab. `CloseTab` without the
+    /// tab going away: the URL, the title, the scroll offset and the runs
+    /// are all still true, and the page is opened again when you come back.
+    Detach(TabId),
     CloseTab(TabId),
     /// Make this tab the one the browser has in front. Input dispatch is
     /// answered by whichever target is foreground, so ours and the browser's

@@ -287,6 +287,47 @@ impl Session {
         // is a save on its own terms.
     }
 
+    /// Give up a tab's target while keeping the tab.
+    ///
+    /// The one entry point, so eviction, a dead browser and a session
+    /// restored from disk all leave a tab in the same state.
+    // Its callers arrive with eviction; until then the tests are the only
+    // ones. An `expect` rather than an `allow` so the first real caller
+    // makes this line fail to compile and take itself away.
+    #[cfg_attr(not(test), expect(dead_code, reason = "eviction is the caller, and lands next"))]
+    fn detach(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        if !tab.attached() {
+            // Nothing to give up, and `Opening` must not be overwritten: its
+            // `Job::Opened` is still coming and would arrive as a surprise.
+            return;
+        }
+        tab.detach();
+        effects.push(Effect::Detach(id));
+        // Deliberately no save. The URL, the title and the offset are
+        // exactly what they were, and section 7 of the parent spec says a
+        // write happens when one of those changed.
+    }
+
+    /// Ask for the target a detached tab does not have.
+    ///
+    /// Reuses `Effect::OpenTab` rather than adding a reattach of its own: it
+    /// already carries the scroll offset, and its `Job::Opened` already
+    /// activates the tab, restarts the screencast and triggers the first
+    /// read. A reattach is an open, and inherits every rule that holds for
+    /// one.
+    fn reattach(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        if tab.presence != Presence::Detached {
+            return;
+        }
+        tab.presence = Presence::Opening;
+        tab.navigating = true;
+        tab.state = State::Loading;
+        let (url, scroll_y) = (tab.url.clone(), tab.scroll_y);
+        effects.push(Effect::OpenTab { id, url, scroll_y });
+    }
+
     /// Close a tab, and go wherever that leaves you.
     fn close_tab(&mut self, id: TabId, effects: &mut Vec<Effect>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
@@ -335,13 +376,20 @@ impl Session {
         let leaving = self.focused_id();
         self.focus = index;
         let id = self.focused_id();
+        // A tab that was evicted, or left behind by a browser that died,
+        // asks for its target back on the way in. Its runs are painted
+        // first, so this is a round trip behind a repaint rather than
+        // instead of one.
+        self.reattach(id, effects);
         self.follow_focus(Some(leaving), effects);
-        // The browser's foreground and ours have to be the same target, or
-        // input lands on the page you just left.
-        effects.push(Effect::Activate(id));
-        // Spends the dirty flag this tab has been accumulating in the
-        // background, and does nothing if it has none.
-        self.start_extract(id, effects);
+        if self.focused().attached() {
+            // The browser's foreground and ours have to be the same target,
+            // or input lands on the page you just left.
+            effects.push(Effect::Activate(id));
+            // Spends the dirty flag this tab has been accumulating in the
+            // background, and does nothing if it has none.
+            self.start_extract(id, effects);
+        }
         self.save(effects);
     }
 
@@ -819,6 +867,11 @@ impl Session {
         // repaint rather than a round trip.
         let pixel = self.pixel && focused;
         let Some(tab) = self.tab_mut(id) else { return };
+        // A tab with no target has no page to read. The dirty flag is kept
+        // rather than spent, and the reattach is what spends it.
+        if !tab.attached() {
+            return;
+        }
         if tab.reading || !tab.dirty {
             return;
         }
@@ -3310,6 +3363,80 @@ mod tests {
         eprintln!("switch, worst of 200: {worst:?}");
         // Loose on purpose: it runs on whatever machine CI has.
         assert!(worst < std::time::Duration::from_millis(5), "switch took {worst:?}");
+    }
+
+    // Detach and reattach.
+
+    /// Three tabs, all opened and read, focus on the last. `open_two_more`
+    /// with the fixture's own tab already read, which is what makes a
+    /// switch back to it a repaint.
+    fn ready_tabs() -> Session {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("first tab")];
+        open_two_more(&mut session);
+        session
+    }
+
+    #[test]
+    fn a_detached_tab_is_asked_for_again_when_you_switch_to_it() {
+        let mut session = ready_tabs();
+        let away = session.tabs[0].id;
+        let mut effects = Vec::new();
+        session.detach(away, &mut effects);
+        assert!(effects.contains(&Effect::Detach(away)));
+
+        session.tabs[0].scroll_y = 900.0;
+        let effects = session.on(alt('1'));
+
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::OpenTab { id, scroll_y, .. } if *id == away && *scroll_y == 900.0
+            )),
+            "a reattach is an open, and an open carries the offset: as two \
+             effects they are two tasks, and an extraction that wins that \
+             race reads offset zero and saves it"
+        );
+        assert_eq!(session.focused().presence, Presence::Opening);
+    }
+
+    #[test]
+    fn nothing_is_asked_of_a_detached_tab_while_it_is_away() {
+        // `Core` would drop the effect and the flag would never be cleared.
+        // This is the rule `Tab::opened` named in M4, under its new name.
+        let mut session = ready_tabs();
+        let away = session.tabs[0].id;
+        let mut effects = Vec::new();
+        session.detach(away, &mut effects);
+
+        let effects = session.on(Event::Dirty(away));
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Extract(id, _) if *id == away)),
+            "a detached tab has no page to read"
+        );
+        assert!(session.tabs[0].dirty, "the flag is kept and spent on reattach");
+        assert!(!session.tabs[0].reading);
+    }
+
+    #[test]
+    fn switching_to_a_detached_tab_paints_what_it_looked_like_first() {
+        // M4's repaint guarantee survives eviction: the runs are still
+        // here, so the switch is a repaint and the round trip happens
+        // behind it.
+        let mut session = ready_tabs();
+        let away = session.tabs[0].id;
+        let runs = session.tabs[0].runs.len();
+        assert!(runs > 0, "the fixture must have read this tab");
+        let mut effects = Vec::new();
+        session.detach(away, &mut effects);
+
+        session.on(alt('1'));
+        assert_eq!(session.focused().runs.len(), runs);
+        let frame = session.compose();
+        assert!(
+            (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
+            "the frame you switch to is the one the tab last looked like"
+        );
     }
 
     #[test]

@@ -464,19 +464,12 @@ impl Core {
                     });
                 }
 
-                Effect::CloseTab(id) => {
-                    // Taken out of the map first: whatever happens to the
-                    // target, nothing may still be sent to a tab the session
-                    // has already let go of.
-                    if let Some(page) = self.pages.remove(&id) {
-                        let tx = self.jobs_tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = page.close().await {
-                                let _ = tx.send(Finished::Job(Job::Noted(id, error.to_string())));
-                            }
-                        });
-                    }
-                }
+                // The same as closing, minus the tab going away. Taken out
+                // of the map first: whatever happens to the target, nothing
+                // may still be sent to a page the session has let go of.
+                Effect::Detach(id) => self.drop_page(id),
+
+                Effect::CloseTab(id) => self.drop_page(id),
 
                 Effect::Activate(id) => self.spawn(id, move |page| async move {
                     page.activate()
@@ -532,6 +525,23 @@ impl Core {
             }
         }
         Ok(false)
+    }
+
+    /// Let go of a page and close its target.
+    ///
+    /// Shared by closing a tab and detaching one, because to `Core` they are
+    /// the same act: the difference between them is entirely the session's,
+    /// which is where the tab lives.
+    fn drop_page(&mut self, id: TabId) {
+        let Some(page) = self.pages.remove(&id) else {
+            return;
+        };
+        let tx = self.jobs_tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = page.close().await {
+                let _ = tx.send(Finished::Job(Job::Noted(id, error.to_string())));
+            }
+        });
     }
 
     /// Tell one page how big its window is now.
