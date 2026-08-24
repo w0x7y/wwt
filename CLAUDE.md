@@ -228,8 +228,10 @@ any effect naming a page it does not hold, which is every effect between asking 
 a tab and being told it opened, and `Job::Hints` is the only thing that clears
 `hinting`. So `f` is not asked at all on a tab that has not opened: setting the flag
 for a query nobody can answer left `f` dead on that tab for the rest of the run.
-`Tab::opened` names that window, and it is the question to ask before setting any of
-the three flags beside an effect. `navigating` and `reading` are safe today by
+`Presence` names that window, and `Tab::attached` is the question to ask before
+setting any of the three flags beside an effect. Since M7 it is a three-state enum
+rather than a bool, because `Opening` has an answer coming and `Detached` has
+nothing: focusing the first should wait and focusing the second should ask. `navigating` and `reading` are safe today by
 accident rather than by rule: `open_tab` already sets `navigating`, and a read of
 either kind is only ever asked for by a dirty signal, which a page has to exist to
 send.
@@ -337,9 +339,9 @@ one place that decides, so `:open`, `:tabopen` and the command line argument all
 tasks, and an extraction that wins that race reads offset zero and writes it
 down, losing the position being restored.
 
-Eviction of background targets past a limit, and the lazy restore that shares
-its machinery, are deferred to M7. They introduce the one state this design
-does not have, a tab that exists without a target.
+Eviction of background targets past a limit, and the lazy restore that shares its
+machinery, were deferred to M7 and have landed. They introduce the one state this
+design did not have, a tab that exists without a target; see **Hardening**.
 
 ## Pixel mode
 
@@ -413,7 +415,7 @@ exception, since `Core` drops effects naming a page it does not hold.
 new tab's chrome until the first frame arrives, because the alternative is
 blanking the frame you are looking at.
 
-**The picture follows the focus from four places, and one of them cannot start
+**The picture follows the focus from four places, and not all of them can start
 it.** `focus_tab` and `close_tab` call `follow_focus`, which stops the old target
 and starts the new one. `open_tab` and `adopt_tab` cannot: `Core` drops any effect
 naming a page it does not hold, which is every effect between asking for a tab and
@@ -422,8 +424,16 @@ being told it opened, so a start emitted there is a start nobody hears. They cal
 start. Miss either half and pixel mode looks frozen on a new tab: the tab you left
 goes on sending frames that `on_frame` acks and discards for not naming the tab in
 front, so the last picture it sent stays on screen until something else starts a
-screencast. This is the same window `Tab::opened` names for the in-flight flags,
+screencast. This is the same window `Presence` names for the in-flight flags,
 and the screencast is the fourth thing with that shape.
+
+**Since M7, `focus_tab` is sometimes in that window too.** Switching to a detached
+tab reattaches it, so the tab is `Opening` when `follow_focus` runs and the start it
+emits is dropped like any other. Nothing is missing: `Job::Opened` starts the
+screencast exactly as it does for a new tab, and the stop for the tab being left
+still goes out, which is the half that would otherwise leave the old picture up. It
+is why the reattach is `Effect::OpenTab` and not an effect of its own — a reattach
+that invented its own path would have had to rediscover this.
 
 **Pixel mode is global and is not saved.** Only the focused tab screencasts
 either way, so per-tab would buy a preference rather than a cost, and a new
@@ -520,8 +530,9 @@ of the run. Getting that list wrong is three bugs rather than one.
 **A reattach is `Effect::OpenTab`.** It already carries the scroll offset, for
 M4's reason, and its `Job::Opened` already activates the tab, restarts the
 screencast and triggers the first read, so a reattach inherits every rule an open
-has rather than needing its own copy of them. This is now the fifth place the
-picture follows the focus.
+has rather than needing its own copy of them. It adds no fifth place for the
+picture to follow the focus from; it puts `focus_tab` into the window where a
+start is dropped and `Job::Opened` makes it good, which **Pixel mode** describes.
 
 **Eviction runs after any focus change, and `look_at` is the one place focus is
 assigned** when the tab under it changes. Opening a tab is a focus change too:

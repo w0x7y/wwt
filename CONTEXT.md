@@ -121,7 +121,9 @@ whichever target the browser has in front.
 **Idle** — what a background tab is, precisely: it is read once when it
 opens, so its title is real and the first switch to it is a repaint, and
 after that it re-extracts only while focused. A dirty signal for a background
-tab sets a flag that is spent when focus arrives.
+tab sets a flag that is spent when focus arrives. A restored tab has not
+opened yet and so has not been read: its title comes out of the session file
+instead, which is what makes lazy restore invisible in the tab bar.
 
 **Presence** — whether a tab has a target behind it, and if not, whether one
 is coming: `Opening`, `Attached`, `Detached`. `Core` drops every effect
