@@ -173,7 +173,11 @@ impl Session {
             // rather than as a row of blanks until each one loads.
             tab.title = restored.title;
             tab.scroll_y = restored.scroll_y;
-            tab.navigating = true;
+            // No target, and none asked for: the focused one is opened by
+            // `begin` and the rest wait to be reached. Startup launches one
+            // page rather than however many were open, and a tab you never
+            // switch to costs nothing at all.
+            tab.presence = Presence::Detached;
             session.tabs.push(tab);
         }
         session.focus = focus.min(session.tabs.len().saturating_sub(1));
@@ -471,19 +475,24 @@ impl Session {
     /// and read the ones it does.
     pub fn begin(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        // Collected first, because opening a tab is decided per tab and
-        // `start_extract` borrows the whole session.
-        let wanted: Vec<(TabId, String, f64, bool)> = self
-            .tabs
-            .iter()
-            .map(|tab| (tab.id, tab.url.clone(), tab.scroll_y, tab.attached()))
-            .collect();
-        for (id, url, scroll_y, attached) in wanted {
-            if attached {
-                self.start_extract(id, &mut effects);
-            } else {
+        // Only the tab in front. A restored tab is detached, and detached
+        // tabs are opened when you reach them: the same machinery eviction
+        // uses, pointed at startup. The tab bar is already complete, because
+        // titles and urls came out of the session file.
+        let id = self.focused_id();
+        match self.focused().presence {
+            Presence::Detached => self.reattach(id, &mut effects),
+            // A tab the constructor already asked for: a command-line url,
+            // or the `about:blank` a session with nothing in it gets.
+            Presence::Opening => {
+                let (url, scroll_y) = {
+                    let tab = self.focused();
+                    (tab.url.clone(), tab.scroll_y)
+                };
                 effects.push(Effect::OpenTab { id, url, scroll_y });
             }
+            // `Session::new`, which tests use and nothing else does.
+            Presence::Attached => self.start_extract(id, &mut effects),
         }
         effects
     }
@@ -1909,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn restoring_asks_for_every_tab_that_was_open() {
+    fn restoring_brings_back_every_tab_and_a_page_for_one_of_them() {
         let mut session = Session::restore(
             GRID,
             CELL,
@@ -1921,19 +1930,14 @@ mod tests {
         assert_eq!(session.focused().url, "https://two.test", "you come back where you were");
         assert_eq!(
             session.begin(),
-            vec![
-                Effect::OpenTab {
-                    id: TabId(0),
-                    url: "https://one.test".to_string(),
-                    scroll_y: 120.0
-                },
-                Effect::OpenTab {
-                    id: TabId(1),
-                    url: "https://two.test".to_string(),
-                    scroll_y: 120.0
-                },
-            ]
+            vec![Effect::OpenTab {
+                id: TabId(1),
+                url: "https://two.test".to_string(),
+                scroll_y: 120.0
+            }],
+            "the tab you were looking at, and no page for the ones you were not"
         );
+        assert_eq!(session.tabs[0].presence, Presence::Detached);
     }
 
     #[test]
@@ -2002,7 +2006,10 @@ mod tests {
     }
 
     #[test]
-    fn every_restored_tab_is_read_once_so_the_bar_has_real_titles() {
+    fn a_restored_tab_is_opened_and_read_when_you_reach_it_and_not_before() {
+        // The bar has real titles from the file, so nothing is read to fill
+        // it in. M4 read every restored tab once for that; the file has
+        // carried the titles since, and a page is what costs something.
         let mut session = Session::restore(
             GRID,
             CELL,
@@ -2010,15 +2017,98 @@ mod tests {
             None,
         );
         session.begin();
+        assert_eq!(session.tabs[0].title, "saved", "the bar reads as the tabs you left");
 
-        // Tab 0 is in the background and has never been read. It is read
-        // anyway, once, which is what makes the first switch to it instant.
+        // Nothing is asked of tab 0 until you look at it.
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
+
+        let effects = session.on(alt('1'));
+        assert!(effects.contains(&Effect::OpenTab {
+            id: tab0(),
+            url: "https://one.test".to_string(),
+            scroll_y: 120.0
+        }));
+
         let effects = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
         assert!(effects.contains(&Effect::Extract(tab0(), Source::Script)));
 
-        // And having been read, it goes quiet.
         session.on(Event::Done(Job::Extracted(tab0(), Source::Script, Ok(Box::new(extraction("https://one.test"))))));
-        assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
+        assert!(session.tabs[0].read, "reaching a restored tab is what reads it");
+    }
+
+    /// One tab as the session file holds it.
+    ///
+    /// `snapshot_of` gives every tab the same title and offset, which is
+    /// enough for most of these and not for the ones about what a restored
+    /// tab remembers.
+    fn saved_tab(url: &str, title: &str, scroll_y: f64) -> SavedTab {
+        SavedTab { url: url.to_string(), title: title.to_string(), scroll_y }
+    }
+
+    #[test]
+    fn a_restored_session_opens_the_tab_you_were_looking_at_and_no_others() {
+        let snapshot = Snapshot {
+            version: crate::store::VERSION,
+            focus: 1,
+            tabs: vec![
+                saved_tab("https://a.example", "A", 0.0),
+                saved_tab("https://b.example", "B", 250.0),
+                saved_tab("https://c.example", "C", 0.0),
+            ],
+        };
+        let mut session = Session::restore(GRID, CELL, Some(snapshot), None);
+        let effects = session.begin();
+
+        let opens: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::OpenTab { id, url, scroll_y } => Some((*id, url.clone(), *scroll_y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opens.len(), 1, "one page, however many tabs were open");
+        assert_eq!(opens[0].1, "https://b.example");
+        assert_eq!(opens[0].2, 250.0);
+        assert_eq!(session.tabs[0].presence, Presence::Detached);
+        assert_eq!(session.tabs[2].presence, Presence::Detached);
+    }
+
+    #[test]
+    fn a_restored_tab_reads_as_itself_in_the_bar_before_it_has_a_page() {
+        // Titles come from the file, so the bar is complete on the first
+        // frame rather than a row of blanks that fills in.
+        let snapshot = Snapshot {
+            version: crate::store::VERSION,
+            focus: 0,
+            tabs: vec![saved_tab("https://a.example", "Anemone", 0.0)],
+        };
+        let session = Session::restore(GRID, CELL, Some(snapshot), None);
+        assert_eq!(session.tabs[0].title, "Anemone");
+    }
+
+    #[test]
+    fn a_url_on_the_command_line_is_the_tab_that_opens() {
+        let snapshot = Snapshot {
+            version: crate::store::VERSION,
+            focus: 0,
+            tabs: vec![saved_tab("https://a.example", "A", 0.0)],
+        };
+        let mut session = Session::restore(
+            GRID,
+            CELL,
+            Some(snapshot),
+            Some("https://new.example".to_string()),
+        );
+        let effects = session.begin();
+        let opens: Vec<_> = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::OpenTab { .. }))
+            .collect();
+        assert_eq!(opens.len(), 1);
+        assert!(matches!(
+            opens[0],
+            Effect::OpenTab { url, .. } if url == "https://new.example"
+        ));
     }
 
     // The session file.
