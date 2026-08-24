@@ -76,6 +76,11 @@ pub struct Tab {
     pub hinting: bool,
     /// Whether this tab has a target behind it. See `Presence`.
     pub presence: Presence,
+    /// When this tab was last focused, as a count and never a clock.
+    ///
+    /// A counter, so the recency rule is asserted with data and its tests
+    /// need neither a browser nor time.
+    pub focused_at: u64,
     /// This tab has been read at least once, so its title is real and its
     /// runs are worth painting. Until then it is read even in the background:
     /// that first read is what makes the first switch to it instant.
@@ -100,6 +105,7 @@ impl Tab {
             hints: None,
             hinting: false,
             presence: Presence::Opening,
+            focused_at: 0,
             read: false,
         }
     }

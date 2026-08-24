@@ -87,6 +87,9 @@ pub struct Session {
     /// Counts pictures. The renderer diffs on this rather than on the
     /// payload, so two frames that encode identically are still two frames.
     generations: u64,
+    /// Counts focus changes, and stamps `Tab::focused_at` with each one.
+    /// See `evict`.
+    focus_counter: u64,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -143,6 +146,7 @@ impl Session {
             pixel: false,
             picture: None,
             generations: 0,
+            focus_counter: 0,
         }
     }
 
@@ -188,6 +192,9 @@ impl Session {
             tab.navigating = true;
             session.tabs.push(tab);
         }
+        // The tab you left off on is the one you have most recently looked
+        // at, and every other restored tab is equally long ago.
+        session.look_at(session.focus);
         session
     }
 
@@ -206,6 +213,24 @@ impl Session {
 
     fn focused_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.focus]
+    }
+
+    /// Look at the tab at `index`, and note when.
+    ///
+    /// The one place `focus` is assigned when the tab under it changes, so
+    /// that the recency stamp cannot be forgotten at one of the four sites
+    /// focus lands: switching, opening, adopting, and closing the tab you
+    /// were on. A tab you just opened is the one you are looking at, and a
+    /// stamp missed there makes the newest tab look like the oldest and
+    /// evicts it first.
+    ///
+    /// Not called where `focus` merely shifts because a tab to the left
+    /// went: you are looking at the same page, and only its index moved.
+    fn look_at(&mut self, index: usize) {
+        self.focus = index;
+        self.focus_counter += 1;
+        let counter = self.focus_counter;
+        self.focused_mut().focused_at = counter;
     }
 
     pub fn focused_id(&self) -> TabId {
@@ -237,13 +262,17 @@ impl Session {
         let mut tab = Tab::new(id, url.clone());
         tab.navigating = true;
         self.tabs.push(tab);
-        self.focus = self.tabs.len() - 1;
+        self.look_at(self.tabs.len() - 1);
         effects.push(Effect::OpenTab {
             id,
             url,
             scroll_y: 0.0,
         });
         self.save(effects);
+        // A target is about to exist, so make room for it now rather than
+        // at the next switch: a session built by opening tabs and never
+        // switching would otherwise never reach the limit at all.
+        self.evict(effects);
     }
 
     /// The open tabs, as they would be restored.
@@ -279,8 +308,11 @@ impl Session {
         let mut tab = Tab::new(id, String::new());
         tab.navigating = true;
         self.tabs.push(tab);
-        self.focus = self.tabs.len() - 1;
+        self.look_at(self.tabs.len() - 1);
         effects.push(Effect::AdoptTab { id, target });
+        // Room for the target the browser is about to hand us, for the
+        // reason `open_tab` makes room.
+        self.evict(effects);
         // Deliberately no save. The browser has not said where this tab is
         // going yet, and a tab with no url in the file is one a restart
         // cannot come back to. Its first extraction changes the url, which
@@ -291,10 +323,6 @@ impl Session {
     ///
     /// The one entry point, so eviction, a dead browser and a session
     /// restored from disk all leave a tab in the same state.
-    // Its callers arrive with eviction; until then the tests are the only
-    // ones. An `expect` rather than an `allow` so the first real caller
-    // makes this line fail to compile and take itself away.
-    #[cfg_attr(not(test), expect(dead_code, reason = "eviction is the caller, and lands next"))]
     fn detach(&mut self, id: TabId, effects: &mut Vec<Effect>) {
         let Some(tab) = self.tab_mut(id) else { return };
         if !tab.attached() {
@@ -355,7 +383,7 @@ impl Session {
         }
         // The page you were looking at went, and its right-hand neighbour
         // has taken its index, which is where the eye already is.
-        self.focus = index.min(self.tabs.len() - 1);
+        self.look_at(index.min(self.tabs.len() - 1));
         let id = self.focused_id();
         // No stop for the tab that went: it is being closed, and its target
         // goes with it.
@@ -374,7 +402,7 @@ impl Session {
             return;
         }
         let leaving = self.focused_id();
-        self.focus = index;
+        self.look_at(index);
         let id = self.focused_id();
         // A tab that was evicted, or left behind by a browser that died,
         // asks for its target back on the way in. Its runs are painted
@@ -391,6 +419,43 @@ impl Session {
             self.start_extract(id, effects);
         }
         self.save(effects);
+        self.evict(effects);
+    }
+
+    /// Hold no more live targets than the limit, by letting go of the tab
+    /// you looked at longest ago.
+    ///
+    /// Eligible means attached, not focused, and with nothing in flight. A
+    /// background tab mid-navigation has a url that still names where it is
+    /// leaving, so detaching it and reattaching later would take you back
+    /// to the page you navigated away from.
+    ///
+    /// If nothing is eligible, nothing is evicted: the limit is a target
+    /// and not a guarantee. The alternative is racing an answer that is
+    /// already on its way in order to honour a number whose whole purpose
+    /// is to bound memory.
+    fn evict(&mut self, effects: &mut Vec<Effect>) {
+        let focused = self.focused_id();
+        loop {
+            let attached = self.tabs.iter().filter(|tab| tab.attached()).count();
+            if attached <= self.max_tabs {
+                return;
+            }
+            let oldest = self
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    tab.attached()
+                        && tab.id != focused
+                        && !tab.reading
+                        && !tab.navigating
+                        && !tab.hinting
+                })
+                .min_by_key(|tab| tab.focused_at)
+                .map(|tab| tab.id);
+            let Some(id) = oldest else { return };
+            self.detach(id, effects);
+        }
     }
 
     /// The tab `steps` along from the focused one, wrapping.
@@ -3436,6 +3501,97 @@ mod tests {
         assert!(
             (0..frame.grid().rows).any(|r| frame.row_text(r).contains("first tab")),
             "the frame you switch to is the one the tab last looked like"
+        );
+    }
+
+    // Eviction.
+
+    /// Four tabs, all attached and read, focus on the last.
+    fn four_ready_tabs() -> Session {
+        let mut session = ready();
+        for (n, url) in [(1u32, "one.test"), (2, "two.test"), (3, "three.test")] {
+            typed(&mut session, &format!(":tabopen {url}"));
+            session.on(code(KeyCode::Enter));
+            session.on(Event::Done(Job::Opened(TabId(n), Ok(()))));
+            session.on(Event::Done(Job::Extracted(
+                TabId(n),
+                Source::Script,
+                Ok(Box::new(extraction(&format!("https://{url}")))),
+            )));
+        }
+        session
+    }
+
+    #[test]
+    fn the_tab_you_looked_at_longest_ago_is_the_one_that_goes() {
+        let mut session = four_ready_tabs();
+        let oldest = session.tabs[0].id;
+
+        // Visit 1, 2, 3 in order, leaving tab 0 the least recently seen.
+        session.on(alt('2'));
+        session.on(alt('3'));
+        session.on(alt('4'));
+
+        session.max_tabs = 3;
+        let effects = session.on(alt('2'));
+
+        assert!(effects.contains(&Effect::Detach(oldest)));
+        assert_eq!(session.tabs[0].presence, Presence::Detached);
+        assert_eq!(session.tabs.len(), 4, "an evicted tab is still a tab");
+    }
+
+    #[test]
+    fn the_tab_you_are_looking_at_is_never_the_one_that_goes() {
+        let mut session = four_ready_tabs();
+        session.max_tabs = 1;
+        let effects = session.on(alt('2'));
+        let focused = session.focused_id();
+        assert!(!effects.contains(&Effect::Detach(focused)));
+        assert!(session.focused().attached() || session.focused().presence == Presence::Opening);
+    }
+
+    #[test]
+    fn a_tab_with_an_answer_coming_is_left_alone() {
+        // Its url still names where it is leaving, so reattaching later
+        // would take you back to the page it navigated away from.
+        let mut session = four_ready_tabs();
+        session.max_tabs = 2;
+        let busy = session.tabs[0].id;
+        session.tab_mut(busy).expect("fixture").navigating = true;
+
+        let effects = session.on(alt('4'));
+        assert!(!effects.contains(&Effect::Detach(busy)));
+    }
+
+    #[test]
+    fn nothing_eligible_means_nothing_evicted() {
+        // The limit is a target and not a guarantee. The alternative is
+        // racing an answer that is already on its way in order to honour a
+        // number that exists to bound memory.
+        let mut session = four_ready_tabs();
+        session.max_tabs = 1;
+        for tab in &mut session.tabs {
+            tab.reading = true;
+        }
+        let effects = session.on(alt('2'));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Detach(_))));
+    }
+
+    #[test]
+    fn a_tab_already_away_does_not_count_against_the_limit() {
+        // The limit counts live targets, which is what costs memory, and
+        // not tabs, which are cheap and all of which the bar goes on
+        // showing.
+        let mut session = four_ready_tabs();
+        session.max_tabs = 3;
+        let mut effects = Vec::new();
+        let away = session.tabs[0].id;
+        session.detach(away, &mut effects);
+
+        let effects = session.on(alt('3'));
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Detach(_))),
+            "three attached tabs is not over a limit of three"
         );
     }
 
