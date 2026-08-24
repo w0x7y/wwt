@@ -691,7 +691,13 @@ const RELAUNCH_BACKOFF: &[Duration] = &[
 ///
 /// The whole of the retrying, because how many times and how far apart are
 /// machinery: the decision that we try at all is the session's.
-async fn relaunch(
+///
+/// Public so that `tests/supervisor.rs` can kill a browser and watch one
+/// come back. `Core::run` cannot be driven from a test: it builds an
+/// `EventStream` over stdin and loops until told to quit, so the half of
+/// this path that needs a browser is reached here and the half that is a
+/// rule is a unit test in `session.rs`.
+pub async fn relaunch(
     profile: Option<&std::path::Path>,
     binary: Option<&std::path::Path>,
 ) -> Result<(Chromium, Arc<Client>), String> {

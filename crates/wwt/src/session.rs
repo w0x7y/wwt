@@ -3607,6 +3607,40 @@ mod tests {
         eprintln!("switch, worst of 200: {worst:?}");
         // Loose on purpose: it runs on whatever machine CI has.
         assert!(worst < std::time::Duration::from_millis(5), "switch took {worst:?}");
+
+        // A switch to an evicted tab is still a repaint: the runs are cached
+        // and the round trip happens behind them. The number that matters is
+        // that it is the same order as an attached switch and not an
+        // extraction, because that is M4's guarantee surviving M7.
+        let mut effects = Vec::new();
+        session.detach(TabId(0), &mut effects);
+        session.detach(TabId(2), &mut effects);
+        let mut detached = std::time::Duration::ZERO;
+        for step in 0..200 {
+            let to = if step % 2 == 0 { alt('1') } else { alt('3') };
+            let start = std::time::Instant::now();
+            let effects = session.on(to);
+            let frame = session.compose();
+            detached = detached.max(start.elapsed());
+
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::Extract(..))),
+                "an evicted tab is repainted from its runs, not re-read"
+            );
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::OpenTab { .. })),
+                "and asked for again behind the frame you are already looking at"
+            );
+            // The reattach leaves it `Opening`, and the answer never comes
+            // in a test, so put it back where the next round expects it.
+            session.tab_mut(session.focused_id()).expect("focused").detach();
+            std::hint::black_box(frame);
+        }
+        eprintln!("switch to an evicted tab, worst of 200: {detached:?}");
+        assert!(
+            detached < std::time::Duration::from_millis(5),
+            "detached switch took {detached:?}"
+        );
     }
 
     // Detach and reattach.

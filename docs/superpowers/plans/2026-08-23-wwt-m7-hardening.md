@@ -990,7 +990,7 @@ The spine. Nothing here evicts anything yet; this task builds the mechanism and 
 - Consumes: `Presence` from task 1.
 - Produces: `Tab::detach(&mut self)`; `Effect::Detach(TabId)`; `Session::detach(&mut self, id: TabId, effects: &mut Vec<Effect>)`.
 
-- [ ] **Step 1: Write the failing tab test**
+- [x] **Step 1: Write the failing tab test**
 
 In `crates/wwt/src/tab.rs` tests:
 
@@ -1034,12 +1034,12 @@ In `crates/wwt/src/tab.rs` tests:
 
 If `TextRun` has no `Default`, build one the way the existing session tests build theirs.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p wwt --lib tab::`
 Expected: FAIL, `no method named detach`.
 
-- [ ] **Step 3: Implement `Tab::detach`**
+- [x] **Step 3: Implement `Tab::detach`**
 
 In `crates/wwt/src/tab.rs`, beside `mark_dirty`:
 
@@ -1070,7 +1070,7 @@ In `crates/wwt/src/tab.rs`, beside `mark_dirty`:
     }
 ```
 
-- [ ] **Step 4: Write the failing session tests**
+- [x] **Step 4: Write the failing session tests**
 
 ```rust
     #[test]
@@ -1134,12 +1134,12 @@ In `crates/wwt/src/tab.rs`, beside `mark_dirty`:
 
 Use the helpers the existing tab tests use (`two_ready_tabs` is the shape at line ~1718; reuse the real name). If `Frame` has no `is_empty_page`, assert on the composed frame the way the neighbouring M4 tests do.
 
-- [ ] **Step 5: Run to verify they fail**
+- [x] **Step 5: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::tests::a_detached_tab`
 Expected: FAIL, `no method named detach on Session`.
 
-- [ ] **Step 6: Implement the session half**
+- [x] **Step 6: Implement the session half**
 
 Add `Detach(TabId)` to `Effect` in `crates/wwt/src/effect.rs`:
 
@@ -1224,7 +1224,7 @@ In `start_extract`, after the `let Some(tab) = self.tab_mut(id) else { return };
         }
 ```
 
-- [ ] **Step 7: Implement the core half**
+- [x] **Step 7: Implement the core half**
 
 In `crates/wwt/src/core.rs`, beside the `Effect::CloseTab` arm:
 
@@ -1258,12 +1258,12 @@ and the helper, beside `resize_page`:
     }
 ```
 
-- [ ] **Step 8: Run to verify it passes**
+- [x] **Step 8: Run to verify it passes**
 
 Run: `cargo test -p wwt --lib`
 Expected: PASS.
 
-- [ ] **Step 9: Clippy and commit**
+- [x] **Step 9: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1305,7 +1305,7 @@ EOF
 - Consumes: `Session::detach` (task 4), `Config::max_tabs` and `Session::max_tabs` (task 2).
 - Produces: `Tab::focused_at: u64`; `Session::evict(&mut self, effects: &mut Vec<Effect>)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -1381,12 +1381,12 @@ EOF
 
 Add a `four_ready_tabs()` helper beside the existing fixtures, built the same way `two_ready_tabs` is, with four tabs all `Attached` and `read`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::tests::the_tab_you_looked_at_longest_ago`
 Expected: FAIL, `no field focused_at`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `crates/wwt/src/tab.rs`, add to `Tab`:
 
@@ -1456,12 +1456,12 @@ And the rule itself:
 
 The loop rather than a single detach: lowering `max_tabs` between runs, or restoring a session wider than the limit, can leave several to give up at once, and one focus change should reach the limit rather than approach it.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cargo test -p wwt --lib`
 Expected: PASS.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1498,7 +1498,7 @@ EOF
 - Consumes: `Presence::Detached` (task 1), `reattach` (task 4).
 - Produces: nothing new; `begin` changes what it emits.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -1570,12 +1570,12 @@ EOF
 
 Add a `saved(url, title, scroll_y) -> SavedTab` helper if the file has none.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::tests::a_restored_session_opens`
 Expected: FAIL, three `OpenTab` effects where one was expected.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `Session::restore`, for each restored tab replace `tab.navigating = true;` with:
 
@@ -1617,12 +1617,12 @@ Replace the body of `begin` with:
     }
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cargo test --workspace`
 Expected: PASS. `crates/wwt/tests/smoke.rs` exercises `begin` against a real browser; if a smoke test asserted that every restored tab opens, it is asserting the old behaviour and should be updated to assert the new one, with a comment saying why.
 
-- [ ] **Step 5: Clippy and commit**
+- [x] **Step 5: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -1664,7 +1664,7 @@ EOF
 - Consumes: `Session::detach`, `Session::reattach` (task 4).
 - Produces: `Effect::Relaunch`; `Event::BrowserLost`; `Event::BrowserBack`; `Job::Relaunched(Result<(), String>)`; `Startup::browser: Chromium`; `Startup::profile: Option<PathBuf>`.
 
-- [ ] **Step 1: Write the failing session tests**
+- [x] **Step 1: Write the failing session tests**
 
 ```rust
     #[test]
@@ -1735,12 +1735,12 @@ EOF
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test -p wwt --lib session::tests::a_dead_browser`
 Expected: FAIL, no variant `BrowserLost`.
 
-- [ ] **Step 3: Implement the vocabulary**
+- [x] **Step 3: Implement the vocabulary**
 
 `crates/wwt/src/effect.rs`:
 
@@ -1776,7 +1776,7 @@ and in `Job`:
 
 Add `Job::Relaunched` to the `id` match at the top of `on_job` as a second no-tab case beside `Job::Unsaved`.
 
-- [ ] **Step 4: Implement the session rules**
+- [x] **Step 4: Implement the session rules**
 
 Add to `Session`: `browser_lost: bool` and `relaunching: bool`, both `false` in `empty`.
 
@@ -1877,12 +1877,12 @@ fn action_touches_the_page(action: &Action) -> bool {
 }
 ```
 
-- [ ] **Step 5: Run to verify the session tests pass**
+- [x] **Step 5: Run to verify the session tests pass**
 
 Run: `cargo test -p wwt --lib`
 Expected: PASS.
 
-- [ ] **Step 6: Give `Core` the browser**
+- [x] **Step 6: Give `Core` the browser**
 
 In `crates/wwt/src/core.rs`:
 
@@ -2019,16 +2019,16 @@ In `crates/wwt/src/core.rs`:
   }
   ```
 
-- [ ] **Step 7: Hand the browser over in `main`**
+- [x] **Step 7: Hand the browser over in `main`**
 
 In `crates/wwt/src/main.rs`, pass `browser` and `profile` into `Startup` instead of holding `browser` as a local for the life of `main`. The `private` flag still decides the session file exactly as it does now, and `profile` passed to `Startup` is `None` when the launch fell back to a temporary one, so a relaunch of a private session gets a fresh temporary profile rather than trying to take the one another wwt holds.
 
-- [ ] **Step 8: Run the workspace**
+- [x] **Step 8: Run the workspace**
 
 Run: `cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 9: Clippy and commit**
+- [x] **Step 9: Clippy and commit**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
@@ -2073,7 +2073,7 @@ EOF
 - Modify: `docs/superpowers/specs/2026-08-19-wwt-design.md`, `CONTEXT.md`, `CLAUDE.md`, `README.md`
 - Modify: `docs/superpowers/plans/2026-08-23-wwt-m7-hardening.md` (tick the boxes)
 
-- [ ] **Step 1: Measure what a detached switch costs**
+- [x] **Step 1: Measure what a detached switch costs**
 
 Extend `measure_switch` in `crates/wwt/src/session.rs` with a detached case, printing both numbers:
 
@@ -2086,7 +2086,7 @@ Extend `measure_switch` in `crates/wwt/src/session.rs` with a detached case, pri
 
 Run: `cargo test -p wwt --lib measure_switch -- --nocapture` and record both numbers in the commit body.
 
-- [ ] **Step 2: Prove a deadline is typed, against a real browser**
+- [x] **Step 2: Prove a deadline is typed, against a real browser**
 
 Add to `crates/wwt-cdp/tests/browser.rs`:
 
@@ -2113,7 +2113,7 @@ async fn a_page_that_will_not_answer_produces_a_timeout_and_not_a_refusal() {
 }
 ```
 
-- [ ] **Step 3: Prove a killed browser is replaced by a working one**
+- [x] **Step 3: Prove a killed browser is replaced by a working one**
 
 `Core::run` cannot be driven from a test: it builds an `EventStream` over stdin and loops
 until told to quit. So the browser test covers the half that needs a browser, and task 7's
@@ -2185,7 +2185,7 @@ Add `tempfile = { workspace = true }` to `crates/wwt/Cargo.toml` under `[dev-dep
 Note the second test costs the full backoff (about five seconds) before it fails, which is
 the price of asserting the behaviour rather than the shape.
 
-- [ ] **Step 4: Write the amendments into the parent spec**
+- [x] **Step 4: Write the amendments into the parent spec**
 
 In `docs/superpowers/specs/2026-08-19-wwt-design.md`, section 8:
 
@@ -2195,7 +2195,7 @@ In `docs/superpowers/specs/2026-08-19-wwt-design.md`, section 8:
 - Section 7: restore is lazy, and the sentence about a tab being read once when it opens now says something slightly different, because a lazily restored tab has not opened yet.
 - Wherever the spec says the whole configuration surface is one flag and two environment variables, replace it with a pointer to `config.toml`.
 
-- [ ] **Step 5: Update the glossary**
+- [x] **Step 5: Update the glossary**
 
 In `CONTEXT.md`, under "What the browser is doing", add:
 
@@ -2232,7 +2232,7 @@ the second degrades a tab.
 
 Under "The screen", beside `State`, note that `Stalled` is what a timed-out read produces.
 
-- [ ] **Step 6: Update the working notes**
+- [x] **Step 6: Update the working notes**
 
 In `CLAUDE.md`:
 
@@ -2256,11 +2256,11 @@ In `CLAUDE.md`:
   - `toml` is the one dependency added since the set was fixed, and it was asked for.
 - In **Crates**, note `wwt`'s new `config.rs`.
 
-- [ ] **Step 7: Update the README**
+- [x] **Step 7: Update the README**
 
 Document `config.toml`: where it lives, the three keys, that a missing file is normal, and that a bad one is a notice rather than a refusal. Mention that a session of many tabs holds `max_tabs` live pages.
 
-- [ ] **Step 8: The manual pass**
+- [x] **Step 8: The manual pass**
 
 Run `cargo run -p wwt -- example.com` in a real terminal and confirm, noting anything surprising:
 
@@ -2271,7 +2271,7 @@ Run `cargo run -p wwt -- example.com` in a real terminal and confirm, noting any
 5. Load a page running `while(true){}` in a script and press `j`: `[stalled]` within five seconds, `Alt-2` still switches away, `r` recovers it.
 6. Put a typo in `config.toml`: a notice, and wwt still starts.
 
-- [ ] **Step 9: Run everything one last time**
+- [x] **Step 9: Run everything one last time**
 
 ```bash
 cargo test --workspace
@@ -2279,7 +2279,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 Expected: PASS, clean.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add -A

@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M6** (degradation). Milestones M1–M8 are defined in
+Currently at **M7** (hardening). Milestones M1–M8 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 459 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 509 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -26,15 +26,24 @@ Currently at **M6** (degradation). Milestones M1–M8 are defined in
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
     cargo test -p wwt-page --test extraction measure_extraction -- --nocapture   # extraction latency
     cargo test -p wwt-page --test interaction measure_hints -- --nocapture       # hint query latency
-    cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency
+    cargo test -p wwt --lib measure_switch -- --nocapture                        # tab switch latency, attached and detached
     cargo test -p wwt-term --lib measure_pixel_frame -- --nocapture              # what a picture costs
     cargo test -p wwt --lib measure_pixel_compose -- --nocapture                 # and what composing one costs
     cargo test -p wwt --lib measure_halfblock_frame -- --nocapture               # a degraded picture
     cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture       # a degraded read
     cargo test -p wwt-page --test extraction measure_status -- --nocapture       # what the chrome alone costs
+    cargo test -p wwt --test supervisor -- --nocapture                           # a browser killed and replaced
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
+
+`$XDG_CONFIG_HOME/wwt/config.toml` is the user's, and has three keys:
+`max_tabs` (live targets, the focused one included, default 8), `search` (a URL
+with `{}` where the query goes) and `chromium` (a path, which `WWT_CHROMIUM`
+still beats, because a variable is set for one run and a file for all of them).
+A missing file is the normal case and says nothing; anything wrong with one is a
+statusline notice and the default, because a browser that will not start because
+of a typo is worse than one that starts and tells you.
 
 Unit tests in `src/` must run without Chromium; anything needing a browser goes in
 `tests/`. Each test *binary* launches one Chromium and hands it out a test at a time
@@ -121,7 +130,7 @@ Consequences to preserve when adding features:
 | `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | `eval` is behind `test-support`. |
 | `wwt-term` | `TIOCGWINSZ` probe, diffing renderer | |
 | `wwt-ui` | Modes, chrome, `:` commands, hint labels | Depends on `wwt-frame` only. No pages, no CDP, no terminal. |
-| `wwt` | Binary: the `Session` state machine, the core loop, keymap, key table, input pump | |
+| `wwt` | Binary: the `Session` state machine, the core loop, keymap, key table, input pump, `config.rs` | |
 
 `Frame` is the single output type every rendering mode produces, so text mode, and
 later pixel and reader modes, cannot diverge in how they reach the screen.
@@ -493,6 +502,65 @@ fine: `measure_halfblock_frame` is ~3.7ms of decode and compose against the 33ms
 pacing interval. That is a release build; unoptimised it is ~47ms, almost all of it
 inflate, which is why the measurement prints a number and asserts only that the frame
 reached cells.
+
+## Hardening
+
+**A tab can exist without a target.** `Presence` is `Opening`, `Attached` or
+`Detached`, and the three features M7 adds are that one state pointed three ways:
+eviction detaches the tab you looked at longest ago, a dead browser detaches all
+of them, and a restored tab starts that way. Building the state first is why the
+three are one mechanism rather than three.
+
+**`Tab::detach` is the one place that says what survives.** What it keeps is what
+the tab looked like: url, title, offset and runs, which is what makes switching
+back a repaint. What it drops is every in-flight flag, because `Core` holds no
+page for that tab any more and a flag nothing can clear is `f` dead for the rest
+of the run. Getting that list wrong is three bugs rather than one.
+
+**A reattach is `Effect::OpenTab`.** It already carries the scroll offset, for
+M4's reason, and its `Job::Opened` already activates the tab, restarts the
+screencast and triggers the first read, so a reattach inherits every rule an open
+has rather than needing its own copy of them. This is now the fifth place the
+picture follows the focus.
+
+**Eviction runs after any focus change, and `look_at` is the one place focus is
+assigned** when the tab under it changes. Opening a tab is a focus change too:
+stamping recency only on a switch made a tab you had just opened look like the
+one you had looked at longest ago, so the newest was the first evicted. **The
+limit is a target and not a guarantee**: a tab with work in flight is never
+taken, because its url still names where it is leaving.
+
+**The old browser is dropped before the new one launches.** `Chromium` is
+kill_on_drop and the profile directory is the lock, so relaunching while our own
+dying browser still holds it is the one failure this path would inflict on
+itself, and it would present as an inexplicable fall back to a private session.
+
+**The CDP arm is guarded off once it has answered `None`.** A closed receiver
+answers `None` immediately and forever, so an unguarded arm spins the loop at one
+hundred percent under a browser that has gone, which is worse than the failure
+being handled.
+
+**A timed-out read sets `Stalled` and does not degrade.** `DOMSnapshot` needs the
+same main thread our script does, so asking it costs a second deadline for the
+same answer. A degraded tab is one whose *script* is broken; a stalled one is a
+page that is not running. **A stalled tab needs no retry policy**, because a
+wedged page cannot run the observer that would ask again: a keystroke or a reload
+is how it is asked.
+
+**Relaunching is asked for by a keystroke and never by a timer.** An idle wwt
+costs ~zero CPU, and that rule does not get an exception for the state where
+there is nothing to be busy about. `relaunching` is the fourth in-flight flag,
+and it is there so a held `j` after a failed relaunch asks once rather than once
+a repeat.
+
+**Restore is lazy: startup launches one page.** The bar is complete on the first
+frame either way, because titles and urls have been in the session file since M4.
+A restored tab that has never been read shows loading for one round trip when you
+reach it, where an evicted tab paints its cached runs at once. Both are right,
+and the difference is real: one of them has been read and one has not.
+
+**`toml` is the one dependency added since the set was fixed**, and it was asked
+for.
 
 ## Performance
 

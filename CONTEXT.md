@@ -83,8 +83,9 @@ everything after it.
 **Chrome** — the two rows that are ours: the **tab bar** on top, and at the
 bottom the statusline, or the `:` line when one is open. Both unconditional,
 so opening a tab never reflows a page. **State** is what the statusline says
-about the page — loading, ready, an error, a notice — and it is never a
-reason to blank the frame.
+about the page — loading, ready, an error, a notice, or **stalled**, which is
+what a read that ran out its deadline produces — and it is never a reason to
+blank the frame.
 
 ## What the browser is doing
 
@@ -121,6 +122,22 @@ whichever target the browser has in front.
 opens, so its title is real and the first switch to it is a repaint, and
 after that it re-extracts only while focused. A dirty signal for a background
 tab sets a flag that is spent when focus arrives.
+
+**Presence** — whether a tab has a target behind it, and if not, whether one
+is coming: `Opening`, `Attached`, `Detached`. `Core` drops every effect
+naming a tab that is not attached, so it is the question to ask before
+emitting one, or before setting an in-flight flag beside it.
+
+**Detached** — a tab with no target, which is still a tab: its url, title,
+scroll offset and runs are all true, and the page is opened again when you
+reach it. Three things produce one: eviction, a browser that died, and a
+session restored from disk. `Tab::detach` is the one place that says what
+survives.
+
+**Eviction** — letting go of the target of the tab you looked at longest
+ago, once more than `max_tabs` are live. The limit counts targets and not
+tabs, and is a target rather than a guarantee: a tab with work in flight is
+never taken.
 
 **Snapshot** — the open tabs on their way to or from disk: a URL, a title and
 a scroll offset each, plus which one was in front. Not called a session,
@@ -188,6 +205,16 @@ identifies one attached target on it; every command a page issues is
 the lock: Chromium refuses one another Chromium holds, so a second wwt gets a
 temporary profile and writes no session file. The instance holding the
 profile owns that file.
+
+**Relaunch** — replacing a Chromium that died: drop the old one first,
+because it holds the profile lock, then three attempts with backoff. What
+survives is what a tab was; what does not is form contents and per-tab
+history. Asked for by a keystroke and never by a timer.
+
+**Failure** — why something did not work, in the only two kinds the session
+treats differently: `TimedOut`, meaning the page is not running, and
+`Failed`, meaning it answered with a refusal. The first sets `Stalled`; only
+the second degrades a tab.
 
 **Adoption** — taking over a target a page opened for itself, reported by
 **auto-attach** and told apart from one we created by its `openerId`. Its

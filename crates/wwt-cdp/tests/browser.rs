@@ -99,3 +99,27 @@ async fn a_browser_with_no_profile_directory_gets_a_temporary_one() {
         .expect("launch on a temp profile");
     assert!(browser.ws_url().starts_with("ws://"));
 }
+
+/// The stalled rule rests on a timeout being tellable apart from a page
+/// whose script threw, and a unit test can only prove that for a socket
+/// nobody is listening to. This proves it for a real browser that is
+/// answering, just not that fast.
+#[tokio::test]
+async fn a_page_that_will_not_answer_produces_a_timeout_and_not_a_refusal() {
+    let browser = Chromium::launch(None, None).await.expect("launch chromium");
+    let client = Client::connect(browser.ws_url()).await.expect("connect");
+    // A deadline no round trip can meet. `call_with` is what makes the wait
+    // bearable in a test.
+    let error = client
+        .call_with(
+            "Browser.getVersion",
+            json!({}),
+            std::time::Duration::from_nanos(1),
+        )
+        .await
+        .expect_err("a nanosecond is not enough for a round trip");
+    assert!(
+        error.downcast_ref::<wwt_cdp::TimedOut>().is_some(),
+        "a deadline is a kind of failure and not a message about one: {error:?}"
+    );
+}

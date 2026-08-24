@@ -308,6 +308,12 @@ A page that opens a tab for itself, through `target=_blank` or `window.open`, cr
 target we did not ask for. It is adopted: the binding, the bootstrap and the viewport
 are installed before it is allowed to run, and it becomes a real tab.
 
+Restore is lazy: the focused tab opens and every other restored tab starts with no
+target at all, paying for one only when it is reached. The tab bar is complete on the
+first frame regardless, because titles and URLs come out of the session file. The
+sentence above about a tab extracting once when it opens still holds and now says
+something slightly narrower, since a lazily restored tab has not opened yet.
+
 Session state, meaning open URLs, titles and scroll positions, is serialized to disk on
 change so a crash restores. The instance holding the profile owns that file; a second
 instance, which cannot have the profile, runs on a temporary one and writes nothing.
@@ -318,10 +324,22 @@ Governing principle: **never blank the frame you are looking at.** Every failure
 degrades to stale-but-labeled, never to empty.
 
 - **Chromium dies.** Websocket close is the signal. A supervisor restarts it with
-  backoff and rebuilds tabs from the session file. Scroll positions survive; form
-  contents do not.
+  backoff and rebuilds tabs from the live session state. Scroll positions survive; form
+  contents and per-tab history do not. **Amended in M7:** the rebuild is from live state
+  and not from the session file. The file is a debounced copy, up to `SAVE_DEBOUNCE`
+  behind, so rebuilding from it would discard up to a second of navigation at the moment
+  it is least worth discarding. The file remains what a cold start reads. Every tab
+  detaches, keeping its url, title, offset and runs, so the frame you were reading stays
+  up; the focused tab asks for a target when the replacement arrives and the rest wait to
+  be reached.
 - **Page hangs.** Every CDP command carries a deadline. On timeout the tab is marked
   stalled in the statusline, keeps its last frame, and remains switchable-away-from.
+  **Settled in M7:** two deadline classes, 30s for a navigation and 5s for everything
+  else, and a timeout is typed so that it can be told apart from a script that threw. A
+  timed-out read does *not* fall back to `DOMSnapshot`: that fallback answers a different
+  failure, and the snapshot needs the same main thread our script does. A stalled tab
+  needs no retry policy, because a wedged page cannot run the observer that would ask
+  again; a keystroke or a reload is how it is asked.
 - **Injected script throws.** Caught at its top level and reported through the
   binding; that tab falls back to a CDP-native extractor that shares no code with our
   script, so a bug in the extractor cannot take a page from degraded to unusable.
@@ -345,14 +363,17 @@ degrades to stale-but-labeled, never to empty.
   mode first. Text mode is unaffected either way, which is the point of text being the
   default.
 - **No Chromium installed.** Detected at startup with a clear prompt to either point
-  at a system binary via config or fetch a pinned Chrome-for-Testing build into
+  at a system binary via `chromium` in `config.toml`, or fetch a pinned
+  Chrome-for-Testing build into
   `~/.local/share/wwt/`. Never a silent download.
 - **Too many tabs.** Background targets beyond a configurable limit are closed while
   their URL and scroll offset remain in the session, and are transparently restored
-  on switch. **Deferred from M4 to M7.** It introduces the one state the tab design
-  otherwise does not have, a tab that exists without a target, and every rule about
-  tabs needs a second reading once it can. Lazy restore at startup is the same
-  machinery pointed elsewhere and is deferred with it.
+  on switch. **Settled in M7.** "Configurable" is `max_tabs` in `config.toml`, defaulting
+  to eight, and it counts live targets rather than tabs: the bar goes on showing all of
+  them. The limit is a target and not a guarantee, because a tab with work in flight is
+  never evicted and racing an answer already on its way would be a worse bargain than
+  holding one target too many for a moment. Lazy restore at startup is the same machinery
+  pointed elsewhere and lands with it.
 
 ## 9. Testing
 

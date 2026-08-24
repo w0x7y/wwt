@@ -4,15 +4,17 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M6, degradation.** It renders a page, scrolls it, follows
+**Status: M7, hardening.** It renders a page, scrolls it, follows
 history, opens other URLs, reaches every link from the keyboard, types
 into forms, and clicks with the mouse. It keeps many pages open at once
 under one Chromium, follows the links that want a new tab, and comes
 back to the same tabs, still logged in, tomorrow. And on a keypress it
 shows you the page as it really looks, pixels and all, with the
 keyboard still yours. When a piece of it does not work — a page that
-breaks wwt's own script, a terminal that cannot show a picture — it
-keeps going with a worse version rather than stopping. Reader mode is M8.
+breaks wwt's own script, a page wedged in a loop, a terminal that cannot
+show a picture, a Chromium that died — it keeps going with a worse
+version rather than stopping, and starting it costs one page however
+many tabs you left open. Reader mode is M8.
 
 ## Requirements
 
@@ -102,6 +104,35 @@ you had open at `$XDG_DATA_HOME/wwt/session.json`. The profile is what
 makes logins durable, and it is also the lock: a second wwt cannot have
 it, so it runs private, not logged in, and writes no session file.
 
+Starting wwt loads one page, whatever the tab bar says: the tab you were
+looking at. The rest are real tabs with their titles and addresses
+already in the bar, and each loads when you first reach it. The same
+thing happens in the other direction while you browse: past `max_tabs`
+live pages, the tab you looked at longest ago gives up its page and
+keeps everything else, so switching back paints what it looked like
+straight away and reloads behind that.
+
+A page stuck in a loop of its own says `[stalled]` rather than freezing
+wwt: you can still switch away from it, and `Ctrl-r` is how it comes
+back. If Chromium itself dies, the page you were reading stays on the
+screen, wwt starts another one, and your tabs come back where they were.
+If it cannot, the frame still stays and the next key tries again.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/wwt/config.toml`, which wwt only ever reads. Having no
+such file is the ordinary case; a file wwt cannot make sense of is a
+notice in the statusline and the defaults, never a refusal to start.
+
+    max_tabs = 8                            # live pages, the one in front included
+    search = "https://duckduckgo.com/?q={}" # where anything that is not a URL goes
+    chromium = "/usr/bin/chromium"          # which browser to launch
+
+`max_tabs` counts pages and not tabs: the bar goes on showing all of
+them however many are loaded. `search` wants `{}` where the query goes.
+`chromium` is a path, and `WWT_CHROMIUM` still beats it, because a
+variable is set for one run and a file is written for all of them.
+
 ## Layout
 
 | Crate | Responsibility |
@@ -117,6 +148,8 @@ it, so it runs private, not logged in, and writes no session file.
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M7 design: `docs/superpowers/specs/2026-08-23-wwt-m7-design.md`
+- M7 plan: `docs/superpowers/plans/2026-08-23-wwt-m7-hardening.md`
 - M6 design: `docs/superpowers/specs/2026-08-23-wwt-m6-design.md`
 - M6 plan: `docs/superpowers/plans/2026-08-23-wwt-m6-degradation.md`
 - M5 design: `docs/superpowers/specs/2026-08-22-wwt-m5-design.md`
