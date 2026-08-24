@@ -128,17 +128,22 @@ fn command_line(buffer: &str, cols: u16) -> String {
     fit(&format!(":{buffer}"), usize::from(cols))
 }
 
-/// Truncate or pad a string to exactly `width` characters.
+/// Exactly `width` characters of `s`, and never a control character.
+///
+/// Every string the chrome paints comes through here, which is why the
+/// flattening is here rather than at each of the four callers. A chrome row
+/// is one row: a newline in it reaches the terminal as a newline and tears
+/// the frame from that cell to the end of the paint. Two things arrive with
+/// one in them, and neither is ours to trust: a page's `<title>`, and a TOML
+/// parse error, which is several lines of pointing at the column.
 fn fit(s: &str, width: usize) -> String {
-    let count = s.chars().count();
-    if count >= width {
-        s.chars().take(width).collect()
-    } else {
-        let mut out = String::with_capacity(width);
-        out.push_str(s);
+    let flat = s.chars().map(|c| if c.is_control() { ' ' } else { c });
+    let mut out: String = flat.take(width).collect();
+    let count = out.chars().count();
+    if count < width {
         out.extend(std::iter::repeat_n(' ', width - count));
-        out
     }
+    out
 }
 
 /// The narrowest slot worth painting: a number, a space, and a character or
@@ -294,6 +299,28 @@ mod tests {
             60,
         );
         assert!(line.contains("[degraded]"), "line was {line:?}");
+    }
+
+    #[test]
+    fn a_message_with_a_newline_in_it_stays_on_one_row() {
+        // A chrome row is one row. A TOML parse error is several lines of
+        // pointing at the column, and a page's title is whatever the page
+        // says: either reaches the terminal as a newline and tears the
+        // frame from that cell to the end of the paint.
+        let line = statusline(
+            &Chrome {
+                ..showing(
+                    &Mode::Normal,
+                    &State::Error("line 1\n  |\n1 | broken".to_string()),
+                    "https://example.com",
+                    "a\ttitle\nof sorts",
+                )
+            },
+            60,
+        );
+        assert!(!line.contains('\n'), "line was {line:?}");
+        assert!(!line.contains('\t'), "line was {line:?}");
+        assert_eq!(line.chars().count(), 60);
     }
 
     #[test]
