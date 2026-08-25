@@ -4,10 +4,10 @@ Type=Application
 Name=World Wide Terminal
 GenericName=Web Browser
 Comment=Browse the web from a terminal
-Exec=wwt %u
+Exec=wwt --launch %u
 TryExec=wwt
 Icon=wwt
-Terminal=true
+Terminal=false
 Categories=Network;WebBrowser;
 Keywords=Internet;WWW;Browser;Web;Terminal;
 MimeType=text/html;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
@@ -16,4 +16,4 @@ Actions=new-session;
 
 [Desktop Action new-session]
 Name=New Session
-Exec=wwt --new
+Exec=wwt --launch --new

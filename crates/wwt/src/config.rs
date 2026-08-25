@@ -1,6 +1,6 @@
 //! What wwt reads out of `config.toml`, and what it does when it cannot.
 //!
-//! Three keys, and no more until something needs a fourth: a configuration
+//! Four keys, and no more until something needs a fifth: a configuration
 //! file fills up with settings nobody asked for unless it is defended.
 //!
 //! Nothing here can fail. A file that is not TOML, a key we do not know, a
@@ -27,6 +27,9 @@ pub struct Config {
     /// Which browser to launch. `WWT_CHROMIUM` still wins over it, because
     /// a variable is set for one run and a file is written for all of them.
     pub chromium: Option<PathBuf>,
+    /// The terminal command used by the desktop launcher. The first item is
+    /// the executable and the rest are its arguments before the wwt command.
+    pub terminal: Vec<String>,
 }
 
 impl Default for Config {
@@ -35,6 +38,7 @@ impl Default for Config {
             max_tabs: 8,
             search: DEFAULT_SEARCH.to_string(),
             chromium: None,
+            terminal: vec!["kitty".to_string(), "-e".to_string()],
         }
     }
 }
@@ -92,6 +96,24 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 Some(path) => config.chromium = Some(PathBuf::from(path)),
                 None => complaints.push("chromium must be a path".to_string()),
             },
+            "terminal" => match value.as_array() {
+                Some(parts)
+                    if parts
+                        .first()
+                        .and_then(|part| part.as_str())
+                        .is_some_and(|command| !command.is_empty())
+                        && parts.iter().all(|part| part.as_str().is_some()) =>
+                {
+                    config.terminal = parts
+                        .iter()
+                        .filter_map(|part| part.as_str().map(str::to_owned))
+                        .collect();
+                }
+                Some(_) => {
+                    complaints.push("terminal must be a non-empty array of strings".to_string())
+                }
+                None => complaints.push("terminal must be an array of strings".to_string()),
+            },
             other => complaints.push(format!("unknown setting: {other}")),
         }
     }
@@ -117,6 +139,7 @@ mod tests {
             max_tabs = 3
             search = "https://example.com/find?q={}"
             chromium = "/opt/chromium/chrome"
+            terminal = ["foot", "-e"]
             "#,
         );
         assert!(complaints.is_empty(), "{complaints:?}");
@@ -126,6 +149,33 @@ mod tests {
             config.chromium.as_deref(),
             Some(Path::new("/opt/chromium/chrome"))
         );
+        assert_eq!(config.terminal, ["foot", "-e"]);
+    }
+
+    #[test]
+    fn a_terminal_command_can_be_configured() {
+        let (config, complaints) = parse(r#"terminal = ["alacritty", "-e"]"#);
+
+        assert!(complaints.is_empty(), "{complaints:?}");
+        assert_eq!(config.terminal, ["alacritty", "-e"]);
+    }
+
+    #[test]
+    fn an_empty_terminal_command_keeps_kitty_and_says_so() {
+        let (config, complaints) = parse("terminal = []");
+
+        assert_eq!(config.terminal, Config::default().terminal);
+        assert_eq!(complaints.len(), 1);
+        assert!(complaints[0].contains("non-empty"));
+    }
+
+    #[test]
+    fn a_blank_terminal_executable_keeps_kitty_and_says_so() {
+        let (config, complaints) = parse(r#"terminal = ["", "-e"]"#);
+
+        assert_eq!(config.terminal, Config::default().terminal);
+        assert_eq!(complaints.len(), 1);
+        assert!(complaints[0].contains("non-empty"));
     }
 
     #[test]
