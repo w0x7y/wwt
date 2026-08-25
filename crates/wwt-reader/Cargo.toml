@@ -1,0 +1,7 @@
+[package]
+name = "wwt-reader"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+wwt-frame = { path = "../wwt-frame" }
