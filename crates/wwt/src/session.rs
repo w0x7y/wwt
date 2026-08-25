@@ -642,7 +642,7 @@ impl Session {
         // point at, which is what makes them readable, and the chrome still
         // owns its rows.
         if let Mode::Hint(session) = &self.mode {
-            session.paint(&mut frame, &self.vp);
+            session.paint(&mut frame);
         }
 
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
@@ -1080,7 +1080,11 @@ impl Session {
     }
 
     fn enter_hints(&mut self, targets: Vec<HintTarget>) {
-        let session = HintSession::new(targets);
+        let cells = targets
+            .iter()
+            .map(|target| target.label_cell(&self.vp))
+            .collect();
+        let session = HintSession::new(cells);
         if session.is_empty() {
             // Entering a mode with nothing in it would only need escaping.
             self.focused_mut().state = State::Notice("no hints".to_string());
@@ -1093,7 +1097,18 @@ impl Session {
     fn on_filtered(&mut self, filtered: Filtered, effects: &mut Vec<Effect>) {
         match filtered {
             Filtered::Waiting(_) => {}
-            Filtered::Activate(target) => self.activate(target, effects),
+            Filtered::Activate(index) => {
+                let target = self
+                    .focused()
+                    .hints
+                    .as_ref()
+                    .and_then(|targets| targets.get(index))
+                    .cloned();
+                self.mode = Mode::Normal;
+                if let Some(target) = target {
+                    self.activate(target, effects);
+                }
+            }
             // Nothing matches, so there is nothing left to type. Leaving is
             // friendlier than sitting there waiting for an Esc.
             Filtered::None => self.mode = Mode::Normal,
@@ -1813,6 +1828,19 @@ mod tests {
         ]));
         session.on(key('z'));
         assert_eq!(session.mode(), &Mode::Normal, "nothing left to type is nothing to wait for");
+    }
+
+    #[test]
+    fn a_stale_hint_index_leaves_hint_mode_without_clicking() {
+        let mut session = ready();
+        session.on(key('f'));
+        session.on(hinted(vec![target(TargetKind::Clickable)]));
+        session.on(Event::Dirty(tab0()));
+
+        let effects = session.on(key('s'));
+
+        assert_eq!(effects, Vec::new());
+        assert_eq!(session.mode(), &Mode::Normal);
     }
 
     #[test]

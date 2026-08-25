@@ -432,14 +432,11 @@ mod tests {
     #[test]
     fn the_statusline_shows_what_has_been_typed_at_the_hints() {
         use crate::hint::HintSession;
-        use wwt_frame::{CssRect, HintTarget, TargetKind};
+        use wwt_frame::CellPos;
 
-        let targets = vec![HintTarget {
-            rect: CssRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
-            kind: TargetKind::Clickable,
-        }];
+        let cells = vec![CellPos { col: 0, row: 1 }];
         let line = statusline(
-            &showing(&Mode::Hint(HintSession::new(targets)),
+            &showing(&Mode::Hint(HintSession::new(cells)),
             &State::Ready, "https://example.com", ""), 60,
         );
         assert!(line.starts_with("-- HINT  (1) --"), "line was {line:?}");

@@ -178,7 +178,7 @@ fn insert(key: KeyEvent) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wwt_frame::{CellSize, GridSize, HintTarget};
+    use wwt_frame::{CellPos, CellSize, GridSize};
     use wwt_ui::hint::HintSession;
 
     fn vp() -> Viewport {
@@ -211,7 +211,7 @@ mod tests {
     }
 
     fn hint_mode() -> Mode {
-        Mode::Hint(HintSession::new(Vec::<HintTarget>::new()))
+        Mode::Hint(HintSession::new(Vec::<CellPos>::new()))
     }
 
     #[test]

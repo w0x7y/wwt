@@ -1,6 +1,6 @@
 //! Hint labels: assignment, filtering, and painting.
 
-use wwt_frame::{CellPos, Frame, HintTarget, Rgb, Style, Viewport};
+use wwt_frame::{CellPos, Frame, Rgb, Style};
 
 /// The home row and the keys nearest it. Fourteen characters label 14
 /// targets with one keystroke and 196 with two, which covers all but the
@@ -50,29 +50,29 @@ pub fn labels(count: usize) -> Vec<String> {
 pub enum Filtered {
     /// Still narrowing, with this many targets left.
     Waiting(usize),
-    /// One target left. Click it.
-    Activate(HintTarget),
+    /// One target left. Return its original index.
+    Activate(usize),
     /// Nothing matches what was typed. The caller leaves hint mode.
     None,
 }
 
-/// One pass through hint mode: the targets the page reported, their labels,
-/// and what has been typed so far.
+/// One pass through hint mode: label cells, their labels, and what has been
+/// typed so far.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HintSession {
-    targets: Vec<HintTarget>,
+    cells: Vec<CellPos>,
     labels: Vec<String>,
     typed: String,
 }
 
 impl HintSession {
-    pub fn new(targets: Vec<HintTarget>) -> Self {
-        let labels = labels(targets.len());
-        Self { targets, labels, typed: String::new() }
+    pub fn new(cells: Vec<CellPos>) -> Self {
+        let labels = labels(cells.len());
+        Self { cells, labels, typed: String::new() }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.targets.is_empty()
+        self.cells.is_empty()
     }
 
     pub fn typed(&self) -> &str {
@@ -95,10 +95,9 @@ impl HintSession {
     /// Labels are painted after the page, so they cover the text underneath.
     /// That is what makes them readable, and it is undone the moment hint
     /// mode ends.
-    pub fn paint(&self, frame: &mut Frame, vp: &Viewport) {
+    pub fn paint(&self, frame: &mut Frame) {
         for index in self.matching() {
-            let cell: CellPos = self.targets[index].label_cell(vp);
-            frame.paint_text(cell, &self.labels[index], LABEL_STYLE);
+            frame.paint_text(self.cells[index], &self.labels[index], LABEL_STYLE);
         }
     }
 
@@ -120,7 +119,7 @@ impl HintSession {
         let matching = self.matching();
         match matching.len() {
             0 => Filtered::None,
-            1 => Filtered::Activate(self.targets[matching[0]].clone()),
+            1 => Filtered::Activate(matching[0]),
             n => Filtered::Waiting(n),
         }
     }
@@ -129,19 +128,15 @@ impl HintSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wwt_frame::{CellSize, CssRect, GridSize, TargetKind};
+    use wwt_frame::GridSize;
 
-    fn vp() -> Viewport {
-        Viewport::new(GridSize { cols: 80, rows: 24 }, CellSize { w: 9, h: 20 })
-    }
-
-    /// `count` targets stacked one cell apart, so each label lands on its
+    /// `count` cells stacked one row apart, so each label lands on its
     /// own row and the painted result is readable.
-    fn targets(count: usize) -> Vec<HintTarget> {
+    fn cells(count: usize) -> Vec<CellPos> {
         (0..count)
-            .map(|i| HintTarget {
-                rect: CssRect { x: 0.0, y: (i as f64) * 20.0, w: 40.0, h: 20.0 },
-                kind: TargetKind::Clickable,
+            .map(|row| CellPos {
+                col: 0,
+                row: u16::try_from(row).expect("the fixture fits in a terminal"),
             })
             .collect()
     }
@@ -184,7 +179,7 @@ mod tests {
 
     #[test]
     fn typing_narrows_the_matching_set() {
-        let mut session = HintSession::new(targets(100));
+        let mut session = HintSession::new(cells(100));
         let first = ALPHABET[0] as char;
         match session.push(first) {
             Filtered::Waiting(n) => assert!(n > 0 && n < 100, "narrowed to {n} of 100"),
@@ -195,24 +190,24 @@ mod tests {
 
     #[test]
     fn a_unique_prefix_activates_its_target() {
-        let mut session = HintSession::new(targets(3));
+        let mut session = HintSession::new(cells(3));
         // Three targets get one-character labels, so the first character
         // identifies one.
         match session.push(ALPHABET[1] as char) {
-            Filtered::Activate(target) => assert_eq!(target.rect.y, 20.0),
+            Filtered::Activate(index) => assert_eq!(index, 1),
             other => panic!("expected an activation, got {other:?}"),
         }
     }
 
     #[test]
     fn a_prefix_that_matches_nothing_says_so() {
-        let mut session = HintSession::new(targets(3));
+        let mut session = HintSession::new(cells(3));
         assert!(matches!(session.push('z'), Filtered::None));
     }
 
     #[test]
     fn backspace_widens_the_set_again() {
-        let mut session = HintSession::new(targets(100));
+        let mut session = HintSession::new(cells(100));
         session.push(ALPHABET[0] as char);
         match session.pop() {
             Filtered::Waiting(n) => assert_eq!(n, 100),
@@ -222,10 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn labels_paint_at_each_targets_top_left_cell() {
-        let session = HintSession::new(targets(3));
+    fn labels_paint_at_the_cells_the_caller_supplied() {
+        let session = HintSession::new(cells(3));
         let mut frame = Frame::new(GridSize { cols: 80, rows: 24 });
-        session.paint(&mut frame, &vp());
+        session.paint(&mut frame);
         assert_eq!(frame.row_text(0), (ALPHABET[0] as char).to_string());
         assert_eq!(frame.row_text(1), (ALPHABET[1] as char).to_string());
         assert_eq!(frame.row_text(2), (ALPHABET[2] as char).to_string());
@@ -233,10 +228,10 @@ mod tests {
 
     #[test]
     fn a_filtered_out_label_stops_being_painted() {
-        let mut session = HintSession::new(targets(100));
+        let mut session = HintSession::new(cells(100));
         session.push(ALPHABET[0] as char);
         let mut frame = Frame::new(GridSize { cols: 80, rows: 24 });
-        session.paint(&mut frame, &vp());
+        session.paint(&mut frame);
         // With 100 targets the labels are two characters wide, so typing the
         // alphabet's first character keeps the first fourteen and drops the
         // rest. Row 14 held one of the dropped ones.
