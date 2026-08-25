@@ -126,26 +126,26 @@ Build minimum honest reflow: paragraphs and preformatted text, wrapping without 
 - Consumes: task 1's semantic types and `wwt_frame::{CellPos, Frame, Style}`.
 - Produces: `SourcePos`, `Layout::new`, `Layout::rows`, and `Layout::paint`.
 
-- [ ] **Step 1: Write failing wrapping tests**
+- [x] **Step 1: Write failing wrapping tests**
 
 Test wrapping at spaces, a word wider than the terminal, one blank row between paragraphs, preserved preformatted spaces/breaks, hard-wrapped preformatted lines, and a one-column terminal.
 
 Run: `cargo test -p wwt-reader layout::`
 Expected: FAIL, no layout.
 
-- [ ] **Step 2: Implement character-based wrapping**
+- [x] **Step 2: Implement character-based wrapping**
 
 Count Rust `char`s, matching `Frame::paint_text`. Prefer the last fitting space, omit the breaking space, split a too-long word, make progress at width one, never exceed width, and carry block/character source position per row. Never use byte indices as source offsets.
 
 Until task 3 adds presentation, headings, lists and quotes use paragraph wrapping and preformatted keeps its own path. That temporary rendering is internal to the pure crate and no reader view can reach it yet.
 
-- [ ] **Step 3: Paint the visible window**
+- [x] **Step 3: Paint the visible window**
 
 `Layout::paint(frame, top_row, origin_row, page_rows)` copies only visible rows through `Frame::paint_text`, never touches chrome rows and never constructs a second frame.
 
 Add tests that painting begins at `top_row` and is clipped to the page area.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 cargo test -p wwt-reader
