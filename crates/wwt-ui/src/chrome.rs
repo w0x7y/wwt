@@ -97,7 +97,7 @@ fn statusline(chrome: &Chrome, cols: u16) -> String {
     let left = if title.is_empty() {
         format!("{}{view}{degraded}{tag}{url}", mode_tag(mode))
     } else {
-        format!("{}{view}{degraded}{tag}{url} — {title}", mode_tag(mode))
+        format!("{}{view}{degraded}{tag}{url} | {title}", mode_tag(mode))
     };
 
     let percent = format!("{:>3}%", (progress * 100.0).round() as i64);
@@ -105,7 +105,9 @@ fn statusline(chrome: &Chrome, cols: u16) -> String {
 
     // On a very narrow terminal the percentage is what gets dropped, not the
     // URL: knowing where you are matters more than how far down you are.
-    if cols <= percent.chars().count() + 1 + "[reader]".chars().count() {
+    // Reader also keeps its whole view tag, since it replaces the live page.
+    let view_width = if reader { "[reader]".chars().count() } else { 0 };
+    if cols <= percent.chars().count() + 1 + view_width {
         return fit(&left, cols);
     }
 
@@ -342,6 +344,31 @@ mod tests {
 
         assert_eq!(line.chars().count(), 10);
         assert!(line.starts_with("[reader]"), "line was {line:?}");
+    }
+
+    #[test]
+    fn a_narrow_ordinary_status_keeps_its_progress() {
+        let line = statusline(
+            &showing(&Mode::Normal, &State::Ready, "https://example.com", "Example"),
+            10,
+        );
+
+        assert_eq!(line.chars().count(), 10);
+        assert!(line.ends_with("  0%"), "line was {line:?}");
+    }
+
+    #[test]
+    fn a_narrow_pixel_status_keeps_its_progress() {
+        let line = statusline(
+            &Chrome {
+                pixel: true,
+                ..showing(&Mode::Normal, &State::Ready, "https://example.com", "Example")
+            },
+            10,
+        );
+
+        assert_eq!(line.chars().count(), 10);
+        assert!(line.ends_with("  0%"), "line was {line:?}");
     }
 
     #[test]

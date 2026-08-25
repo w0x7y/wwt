@@ -917,8 +917,18 @@ impl Session {
                 }
                 effects.push(Effect::Quit);
             }
-            Action::TogglePixel if self.focused().reader.active => {
+            Action::TogglePixel
+                if self.focused().reader.wanted || self.focused().reader.active =>
+            {
+                let pending = !self.focused().reader.active
+                    && matches!(
+                        self.focused().state,
+                        State::Notice(ref message) if message == "reading"
+                    );
                 self.leave_reader(effects);
+                if pending {
+                    self.focused_mut().state = State::Ready;
+                }
                 self.set_pixel(true, effects);
             }
             Action::TogglePixel => self.set_pixel(!self.pixel, effects),
@@ -1081,6 +1091,9 @@ impl Session {
     fn action_touches_the_page(&self, action: &Action) -> bool {
         match action {
             Action::Scroll(_) | Action::Hints if self.focused().reader.active => false,
+            Action::TogglePixel => {
+                self.focused().reader.wanted || self.focused().reader.active || !self.pixel
+            }
             _ => matches!(
                 action,
                 Action::Scroll(_)
@@ -1921,7 +1934,7 @@ mod tests {
     }
 
     // The extraction handshake: two flags, and the rule that a page which
-    // changed while we were reading it gets read again — once.
+    // changed while we were reading it gets read again, once.
 
     #[test]
     fn the_first_thing_a_session_does_is_read_the_page() {
@@ -2026,6 +2039,27 @@ mod tests {
         assert!(session.focused().reader.document.is_some());
         assert!(session.focused().reader.layout.is_some());
         assert!(!session.focused().reader.active);
+    }
+
+    #[test]
+    fn pixel_key_cancels_pending_reader_before_its_answer() {
+        let mut session = ready_with_graphics();
+        assert_eq!(session.on(key('r')), vec![Effect::ReadReader(tab0())]);
+
+        assert_eq!(
+            session.on(key('p')),
+            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+        );
+        assert!(session.pixel);
+        assert!(!session.focused().reader.wanted);
+
+        session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("late reader"))),
+        )));
+
+        assert!(!session.focused().reader.active);
+        assert!(session.pixel);
     }
 
     #[test]
@@ -2459,6 +2493,21 @@ mod tests {
             assert!(session.focused().reader.active);
             assert_eq!(session.mode(), &Mode::Normal);
         }
+    }
+
+    #[test]
+    fn pixel_key_keeps_reader_visible_while_a_missing_browser_relaunches() {
+        let mut session = ready_with_graphics();
+        cache_reader(&mut session, "reader text");
+        session.on(key('r'));
+        session.on(Event::BrowserLost);
+        session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
+
+        assert_eq!(session.on(key('p')), vec![Effect::Relaunch]);
+        assert!(session.focused().reader.active);
+        assert!(session.focused().reader.wanted);
+        assert!(!session.pixel);
+        assert!(session.compose().row_text(1).contains("reader text"));
     }
 
     #[test]
