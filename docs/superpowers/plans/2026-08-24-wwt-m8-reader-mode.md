@@ -361,31 +361,31 @@ Make cached content visible. Scrolling and links remain for task 8.
 **Interfaces:**
 - Produces `Action::ToggleReader`, `Session::set_reader`, `Chrome::reader`.
 
-- [ ] **Step 1: Add the key test**
+- [x] **Step 1: Add the key test**
 
 Bare `r` in normal mode is `ToggleReader`; `Ctrl-r` remains `Reload`; other modes do not gain the key.
 
-- [ ] **Step 2: Write entry/exit and late-answer tests**
+- [x] **Step 2: Write entry/exit and late-answer tests**
 
 Assert first `r` leaves real runs composed while the job is away; clean cache enters with no effect; second `r` cancels pending entry; late success caches but does not activate; exit immediately repaints cached runs and preserves `scroll_y`.
 
-- [ ] **Step 3: Implement entry and exit**
+- [x] **Step 3: Implement entry and exit**
 
 Entry sets wanted. Clean cache activates immediately; otherwise it leaves page active, shows `reading`, and calls `start_reader` when the shared read slot is free. Exit clears wanted/active and starts normal extraction only if page data is dirty. Never scroll or save.
 
-- [ ] **Step 4: Give compose explicit precedence**
+- [x] **Step 4: Give compose explicit precedence**
 
 Reader layout, else pixel picture, else page runs. Paint hints next and chrome last. A reader frame carries no image, deleting an old graphics placement.
 
-- [ ] **Step 5: Add chrome tag and selected progress**
+- [x] **Step 5: Add chrome tag and selected progress**
 
 `Chrome` takes named `reader: bool`. Reader suppresses `[pixel]`; `[degraded]` may remain. Session passes reader `top/max_top` while active, page progress otherwise. Add narrow-line and tag-order tests.
 
-- [ ] **Step 6: Stop/start screencast only on actual view change**
+- [x] **Step 6: Stop/start screencast only on actual view change**
 
 Successful entry from pixel stops focused screencast. Exit to pixel starts it. Merely asking for a first document keeps the picture running because it is the frame standing while the query is away.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 cargo test -p wwt-ui

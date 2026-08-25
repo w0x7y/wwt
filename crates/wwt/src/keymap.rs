@@ -50,6 +50,8 @@ pub enum Action {
 
     /// Swap between showing the page as text and as a picture.
     TogglePixel,
+    /// Swap between the live page and its semantic reader document.
+    ToggleReader,
 
     /// Forward this key to the page verbatim.
     Send(KeyEvent),
@@ -128,6 +130,7 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
         KeyCode::Char('L') => Some(Action::Forward),
         KeyCode::Char('f') => Some(Action::Hints),
         KeyCode::Char('p') => Some(Action::TogglePixel),
+        KeyCode::Char('r') => Some(Action::ToggleReader),
         KeyCode::Char('i') => Some(Action::Insert),
         KeyCode::Char(':') => Some(Action::EnterCommand(String::new())),
         KeyCode::Char('o') => Some(Action::EnterCommand("open ".to_string())),
@@ -243,6 +246,25 @@ mod tests {
         assert_eq!(action_for(&normal_mode(), key('H'), vp()), Some(Action::Back));
         assert_eq!(action_for(&normal_mode(), key('L'), vp()), Some(Action::Forward));
         assert_eq!(action_for(&normal_mode(), ctrl('r'), vp()), Some(Action::Reload));
+    }
+
+    #[test]
+    fn bare_r_toggles_reader_without_taking_ctrl_r_from_reload() {
+        assert_eq!(action_for(&normal_mode(), key('r'), vp()), Some(Action::ToggleReader));
+        assert_eq!(action_for(&normal_mode(), ctrl('r'), vp()), Some(Action::Reload));
+    }
+
+    #[test]
+    fn r_keeps_its_existing_meaning_outside_normal_mode() {
+        assert_eq!(
+            action_for(&command_mode(), key('r'), vp()),
+            Some(Action::CommandPush('r'))
+        );
+        assert_eq!(action_for(&hint_mode(), key('r'), vp()), Some(Action::HintPush('r')));
+        assert_eq!(
+            action_for(&Mode::Insert, key('r'), vp()),
+            Some(Action::Send(key('r')))
+        );
     }
 
     #[test]
