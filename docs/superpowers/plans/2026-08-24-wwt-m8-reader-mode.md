@@ -591,7 +591,7 @@ Prove the feature against Chromium and a PTY, record its costs, apply the parent
 - Modify: `CONTEXT.md`, `CLAUDE.md`, `README.md`
 - Modify: this plan, ticking completed boxes
 
-- [ ] **Step 1: Measure extraction**
+- [x] **Step 1: Measure extraction**
 
 Add `measure_reader_extract` beside the reader browser tests. Warm the page, read `heavy.html` repeatedly, print steady-state duration and assert only that a non-empty valid document arrived. Record the observed release number in the final commit body and in the M8 spec's testing/cost section if it materially changes a design assumption.
 
@@ -601,7 +601,7 @@ Run:
 cargo test -p wwt-page --test reader measure_reader_extract --release -- --nocapture
 ```
 
-- [ ] **Step 2: Measure layout**
+- [x] **Step 2: Measure layout**
 
 Build a semantic document large enough for several thousand rows and add `measure_reader_layout`. Reflow at representative narrow and wide widths, print both, and assert rows and source anchors remain valid rather than assert wall-clock budgets.
 
@@ -611,7 +611,7 @@ Run:
 cargo test -p wwt-reader measure_reader_layout --release -- --nocapture
 ```
 
-- [ ] **Step 3: Add the PTY flow**
+- [x] **Step 3: Add the PTY flow**
 
 Drive the real binary against a noisy fixture:
 
@@ -623,7 +623,7 @@ Drive the real binary against a noisy fixture:
 
 Use the existing PTY harness. Do not create a second terminal driver.
 
-- [ ] **Step 4: Apply the five parent amendments**
+- [x] **Step 4: Apply the five parent amendments**
 
 Make M8 spec section 10's changes in `2026-08-19-wwt-design.md`:
 
@@ -634,7 +634,7 @@ Make M8 spec section 10's changes in `2026-08-19-wwt-design.md`:
 - record in-memory lifecycle and no snapshot persistence;
 - discharge the M8 milestone boundary.
 
-- [ ] **Step 5: Update the glossary and working notes**
+- [x] **Step 5: Update the glossary and working notes**
 
 In `CONTEXT.md`, add:
 
@@ -649,11 +649,11 @@ In `CLAUDE.md`:
 - add both measurement commands;
 - add a Reader Mode section recording the page-stands-still rule, semantic-vs-layout boundary, source-anchor resize rule, local hint geometry, no snapshot persistence, and pixel precedence.
 
-- [ ] **Step 6: Update README**
+- [x] **Step 6: Update README**
 
 Add `r` to the key table and explain in user language: what content is chosen, that reader scroll is separate, `f` follows links, `i` returns to the live page, and a second `r` returns to the original position. Add the M8 spec and plan to Documentation and change status from M7 hardening to M8 reader mode.
 
-- [ ] **Step 7: Manual pass in a real terminal**
+- [x] **Step 7: Manual pass in a real terminal**
 
 Record surprises and fix what they expose:
 
@@ -668,7 +668,7 @@ Record surprises and fix what they expose:
 9. Kill Chromium in reader: content scrolls locally, the browser restarts, and the reader refreshes without blanking.
 10. A page with no readable text and a page whose main thread is wedged: real/cached frame stands with the correct label.
 
-- [ ] **Step 8: Run every check and measurement**
+- [x] **Step 8: Run every check and measurement**
 
 ```bash
 cargo test --workspace
@@ -687,7 +687,7 @@ cargo test -p wwt-reader measure_reader_layout --release -- --nocapture
 
 Expected: all pass; M2 through M7 figures stay in their established order of magnitude. Investigate a moved ordinary-path number before calling M8 complete.
 
-- [ ] **Step 9: Tick the plan and commit**
+- [x] **Step 9: Tick the plan and commit**
 
 Commit implementation test changes with their owning crate if the PTY or measurement exposes code work. The final documentation commit is:
 

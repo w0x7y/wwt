@@ -1,7 +1,7 @@
 # wwt M8 — Reader mode
 
 **Date:** 2026-08-24
-**Status:** Draft, pre-implementation
+**Status:** Implemented
 **Parent spec:** `2026-08-19-wwt-design.md` (sections 4, 6, 7, 8 and 11 govern here).
 
 This is a delta against the system design, not a replacement for it. Where the two
@@ -571,7 +571,10 @@ Most of M8 is pure, and its tests split at the same seam as the code.
   views, and late answers obey the later key. No browser: these are decisions.
 - **End to end:** through a PTY, enter reader mode on a noisy fixture, scroll, hint a
   link, and assert the destination. A second flow enters halfway down a real page, reads,
-  exits, and asserts the original real-page rows return.
+  exits, and asserts the original real-page rows return. The repository had no PTY
+  harness when M8 began, contrary to the implementation plan. The test delegates PTY
+  ownership to util-linux `script` and observes the real binary's output rather than
+  implementing another terminal renderer.
 
 Two measurements are added and print rather than assert wall-clock budgets:
 `measure_reader_extract` on the existing `heavy.html`, beside script and snapshot reads,
@@ -583,6 +586,13 @@ a dirty signal beyond setting a flag.
 
 No M2 through M7 measurement is allowed to move. Reader code is off every ordinary path
 until `r` is pressed.
+
+On the release build used to finish M8, five steady-state reader reads of `heavy.html`
+had a 19.6 ms median and a 17.4 to 21.1 ms range. Pure reflow of 3,000 paragraphs took
+2.74 ms at 40 columns for 12,000 rows and 1.59 ms at 120 columns for 6,000 rows.
+Extraction is the meaningful cost and occurs only when reader is requested or its active
+document becomes dirty; layout is cheap enough to rebuild every cached reader tab on
+resize as designed.
 
 ## 13. Open questions
 

@@ -12,13 +12,13 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M7** (hardening). Milestones M1–M8 are defined in
+Currently at **M8** (reader mode). Milestones M1–M8 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 509 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 597 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -32,6 +32,8 @@ Currently at **M7** (hardening). Milestones M1–M8 are defined in
     cargo test -p wwt --lib measure_halfblock_frame -- --nocapture               # a degraded picture
     cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture       # a degraded read
     cargo test -p wwt-page --test extraction measure_status -- --nocapture       # what the chrome alone costs
+    cargo test -p wwt-page --test reader measure_reader_extract --release -- --nocapture  # semantic extraction
+    cargo test -p wwt-reader measure_reader_layout --release -- --nocapture      # pure narrow and wide reflow
     cargo test -p wwt --test supervisor -- --nocapture                           # a browser killed and replaced
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
@@ -125,6 +127,7 @@ Consequences to preserve when adding features:
 | Crate | Responsibility | Hard rule |
 |---|---|---|
 | `wwt-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
+| `wwt-reader` | Semantic reader data, width-specific reflow, source anchors, link ranges, painting | **No I/O; depends on `wwt-frame` only.** |
 | `wwt-png` | Base64, inflate, the PNG container, unfilter | **Decodes what Chromium sends and refuses the rest.** No dependencies, and it exists so that none is added. |
 | `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
 | `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | `eval` is behind `test-support`. |
@@ -132,8 +135,8 @@ Consequences to preserve when adding features:
 | `wwt-ui` | Modes, chrome, `:` commands, hint labels | Depends on `wwt-frame` only. No pages, no CDP, no terminal. |
 | `wwt` | Binary: the `Session` state machine, the core loop, keymap, key table, input pump, `config.rs` | |
 
-`Frame` is the single output type every rendering mode produces, so text mode, and
-later pixel and reader modes, cannot diverge in how they reach the screen.
+`Frame` is the single output type every view produces, so text, pixel and reader
+cannot diverge in how they reach the screen.
 
 ## The injected script
 
@@ -342,6 +345,39 @@ down, losing the position being restored.
 Eviction of background targets past a limit, and the lazy restore that shares its
 machinery, were deferred to M7 and have landed. They introduce the one state this
 design did not have, a tab that exists without a target; see **Hardening**.
+
+## Reader mode
+
+`r` puts the focused tab's semantic reader document in front. Reader is a per-tab
+view, not a fifth `wwt_ui::Mode`: normal, insert, hint and command still answer what
+keys mean, while reader answers which document normal mode is looking at.
+
+**The page stands still.** Reader scroll changes `top_row` in the cached layout and
+never emits page scroll or save effects. The live page keeps its exact `scroll_y`, so
+leaving reader is a repaint rather than a scroll-back round trip. `i`, `p` and every
+navigation leave reader before touching the page.
+
+**Meaning crosses the browser boundary; cells do not.** `Page::reader()` returns a
+`Document` of blocks, spans and URL destinations with no CSS geometry. The pure
+`wwt-reader` crate turns that document into width-specific rows, source anchors and
+link ranges. A resize records the source at the old top row and lays the same source
+at or immediately before the new top, without another reader query.
+
+**Reader interactions stay in reader geometry.** Hint labels start at direct cell
+positions from visible link ranges, and a left click is hit-tested against those same
+ranges. Activation follows the stored destination instead of fabricating a CSS click.
+No reader mouse or hint action goes through `Viewport`.
+
+**Reader state is memory, not session data.** The document, layout, local row and
+selected view follow their tab through switches, eviction and Chromium replacement.
+They are absent from `Snapshot`, so a cold start opens the real page at its saved
+offset. A failed first read keeps the real page; a failed refresh keeps the old reader
+layout.
+
+**Reader owns presentation over pixel.** The global pixel preference remains true
+behind reader, but an active reader suppresses its screencast and composes no image.
+Leaving reader resumes pixels when that preference was on. `[reader]` and `[pixel]`
+therefore never describe the same visible frame.
 
 ## Pixel mode
 
