@@ -408,25 +408,25 @@ Interpret the existing controls in reader geometry and send nothing to the hidde
 **Interfaces:**
 - Produces a view-neutral `ScrollAmount` and reader activation by `LinkId`.
 
-- [ ] **Step 1: Refactor scroll actions without changing effects**
+- [x] **Step 1: Refactor scroll actions without changing effects**
 
 `Action::Scroll(f64)` currently bakes CSS pixels into the keymap. Replace the scroll variants with semantic amounts: lines, half-page, page, top, end. Session converts them to the exact existing CSS distances for page view and to rows for reader view.
 
 Before changing implementation, pin every current normal key to its existing `Effect::Scroll` value. Run those tests after the refactor to prove normal behaviour is identical.
 
-- [ ] **Step 2: Write local-scroll tests**
+- [x] **Step 2: Write local-scroll tests**
 
 Assert line, half-page, page, top/end and wheel clamp `top_row`; emit no effect and no save; update reader progress; and do not trigger M7 relaunch while browser is lost. Page view still emits the old effects.
 
-- [ ] **Step 3: Implement local scrolling**
+- [x] **Step 3: Implement local scrolling**
 
 One line is one layout row. Half-page and page use page rows with the existing two context rows. Wheel is three rows. Clamp through `max_top` and use saturating arithmetic.
 
-- [ ] **Step 4: Write reader-hint tests**
+- [x] **Step 4: Write reader-hint tests**
 
 `f` takes only visible distinct links from `Layout`, emits no `Effect::Hints`, paints their cells through `HintSession`, and reports `no hints` when none are visible. Selecting same-tab leaves reader and emits existing navigation; `_blank` uses `open_tab` and leaves the source tab's reader state intact in the background.
 
-- [ ] **Step 5: Generalize hint activation ownership**
+- [x] **Step 5: Generalize hint activation ownership**
 
 Session must remember whether the open `HintSession` indexes page targets or reader link ids. Keep this session-only, for example:
 
@@ -439,15 +439,15 @@ enum HintSource {
 
 Clear it whenever hint mode ends or the view/tab changes. `wwt-ui::Mode` still knows only the hint session.
 
-- [ ] **Step 6: Write and implement mouse tests**
+- [x] **Step 6: Write and implement mouse tests**
 
 Wheel scrolls locally. Left press on a visible `LinkRange` follows the destination. Press elsewhere does nothing. Releases are consumed. No reader mouse event converts through `Viewport` or emits `Effect::Send`.
 
-- [ ] **Step 7: Make browser-loss classification view-aware**
+- [x] **Step 7: Make browser-loss classification view-aware**
 
 Replace pure `action_touches_the_page` with a session-aware question. Reader scroll and local hints work with no browser; following a destination, entering insert, or leaving for navigation still asks M7 to relaunch.
 
-- [ ] **Step 8: Verify and commit**
+- [x] **Step 8: Verify and commit**
 
 ```bash
 cargo test -p wwt --lib keymap::

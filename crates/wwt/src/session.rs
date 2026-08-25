@@ -21,7 +21,7 @@ use wwt_frame::{
     Viewport,
 };
 use wwt_page::{Input, MouseInput, ScreencastFrame, Status};
-use wwt_reader::Layout;
+use wwt_reader::{Layout, LinkId};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
@@ -29,14 +29,14 @@ use wwt_ui::hint::{Filtered, HintSession};
 
 use crate::effect::{Effect, FrameSize, Navigation, Scroll, Source};
 use crate::event::{Event, Failure, Job};
-use crate::keymap::{Action, action_for};
+use crate::keymap::{Action, ScrollAmount, action_for};
 use crate::keys;
 use crate::store::{SavedTab, Snapshot};
 use crate::tab::{Presence, Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
-const WHEEL_ROWS: f64 = 3.0;
+const WHEEL_ROWS: i32 = 3;
 
 /// What Chromium navigates to when it cannot reach a host.
 const CHROME_ERROR_SCHEME: &str = "chrome-error://";
@@ -53,12 +53,20 @@ enum Picture {
     Blocks(Samples),
 }
 
+/// What the indices in the open UI hint session name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HintSource {
+    Page,
+    Reader(Vec<LinkId>),
+}
+
 pub struct Session {
     grid: GridSize,
     cell: CellSize,
     vp: Viewport,
 
     mode: Mode,
+    hint_source: Option<HintSource>,
 
     tabs: Vec<Tab>,
     focus: usize,
@@ -145,6 +153,7 @@ impl Session {
             cell,
             vp: page_viewport(grid, cell),
             mode: Mode::Normal,
+            hint_source: None,
             tabs: Vec::new(),
             focus: 0,
             next_id: 0,
@@ -241,6 +250,7 @@ impl Session {
     /// Not called where `focus` merely shifts because a tab to the left
     /// went: you are looking at the same page, and only its index moved.
     fn look_at(&mut self, index: usize) {
+        self.clear_hints();
         self.focus = index;
         self.focus_counter += 1;
         let counter = self.focus_counter;
@@ -534,6 +544,7 @@ impl Session {
         if on == self.pixel {
             return;
         }
+        self.clear_hints();
         self.pixel = on;
         let id = self.focused_id();
         let reader_active = self.focused().reader.active;
@@ -566,6 +577,7 @@ impl Session {
     }
 
     fn set_reader(&mut self, on: bool, effects: &mut Vec<Effect>) {
+        self.clear_hints();
         let id = self.focused_id();
         let was_active = self.focused().reader.active;
         if on {
@@ -635,7 +647,7 @@ impl Session {
     /// `on_frame` acks and discards for naming a tab that is no longer in
     /// front, and the picture on screen stays the last one it sent.
     fn leave_for_a_new_tab(&mut self, effects: &mut Vec<Effect>) {
-        if !self.pixel {
+        if !self.pixel || self.focused().reader.active {
             return;
         }
         effects.push(Effect::StopScreencast(self.focused_id()));
@@ -873,7 +885,7 @@ impl Session {
         // a keystroke is how you ask for one back. Deliberately not a timer:
         // an idle wwt costs ~zero CPU and that rule does not get an
         // exception for the state where there is nothing to be busy about.
-        if self.browser_lost && action_touches_the_page(&action) {
+        if self.browser_lost && self.action_touches_the_page(&action) {
             self.ask_for_a_browser(effects);
             return;
         }
@@ -893,8 +905,9 @@ impl Session {
             }
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
+            Action::Hints if self.focused().reader.active => self.enter_reader_hints(),
             Action::Hints => match self.focused().hints.clone() {
-                Some(targets) => self.enter_hints(targets),
+                Some(targets) => self.enter_page_hints(targets),
                 // `f` pressed twice before the first answer comes back is
                 // one question, not two.
                 //
@@ -917,9 +930,13 @@ impl Session {
 
             // Scrolling does not settle the way a navigation does; the
             // page's own scroll listener reports when it has moved.
-            Action::Scroll(dy) => effects.push(Effect::Scroll(self.focused_id(), Scroll::By(dy))),
-            Action::ScrollTop => effects.push(Effect::Scroll(self.focused_id(), Scroll::Top)),
-            Action::ScrollEnd => effects.push(Effect::Scroll(self.focused_id(), Scroll::End)),
+            Action::Scroll(amount) => {
+                if self.focused().reader.active {
+                    self.scroll_reader(amount);
+                } else {
+                    effects.push(Effect::Scroll(self.focused_id(), self.page_scroll(amount)));
+                }
+            }
             Action::Back => self.navigate(Navigation::Back, effects),
             Action::Forward => self.navigate(Navigation::Forward, effects),
             Action::Reload => self.navigate(Navigation::Reload, effects),
@@ -933,6 +950,7 @@ impl Session {
                     effects.push(Effect::Blur(self.focused_id()));
                 }
                 self.mode = Mode::Normal;
+                self.hint_source = None;
             }
 
             Action::CommandPush(c) => {
@@ -987,6 +1005,69 @@ impl Session {
         }
     }
 
+    fn page_scroll(&self, amount: ScrollAmount) -> Scroll {
+        let rows = self.vp.grid().rows;
+        let pixels = |rows: i32| f64::from(rows) * f64::from(self.cell.h);
+        match amount {
+            ScrollAmount::Lines(lines) => Scroll::By(pixels(lines)),
+            ScrollAmount::HalfPages(pages) => {
+                Scroll::By(pixels(i32::from((rows / 2).max(1)) * pages))
+            }
+            ScrollAmount::Pages(pages) => {
+                Scroll::By(pixels(i32::from(rows.saturating_sub(2).max(1)) * pages))
+            }
+            ScrollAmount::Top => Scroll::Top,
+            ScrollAmount::End => Scroll::End,
+        }
+    }
+
+    fn scroll_reader(&mut self, amount: ScrollAmount) {
+        let page_rows = usize::from(self.vp.grid().rows);
+        let max_top = self
+            .focused()
+            .reader
+            .layout
+            .as_ref()
+            .map_or(0, |layout| layout.rows().saturating_sub(page_rows));
+        let top = self.focused().reader.top_row;
+        let shifted = |rows: i32| {
+            if rows >= 0 {
+                top.saturating_add(rows as usize)
+            } else {
+                top.saturating_sub(rows.unsigned_abs() as usize)
+            }
+        };
+        let next = match amount {
+            ScrollAmount::Lines(lines) => shifted(lines),
+            ScrollAmount::HalfPages(pages) => {
+                shifted(i32::from((self.vp.grid().rows / 2).max(1)) * pages)
+            }
+            ScrollAmount::Pages(pages) => {
+                shifted(i32::from(self.vp.grid().rows.saturating_sub(2).max(1)) * pages)
+            }
+            ScrollAmount::Top => 0,
+            ScrollAmount::End => max_top,
+        };
+        self.focused_mut().reader.top_row = next.min(max_top);
+    }
+
+    /// Whether this action needs the hidden page in the current view.
+    fn action_touches_the_page(&self, action: &Action) -> bool {
+        match action {
+            Action::Scroll(_) | Action::Hints if self.focused().reader.active => false,
+            _ => matches!(
+                action,
+                Action::Scroll(_)
+                    | Action::Back
+                    | Action::Forward
+                    | Action::Reload
+                    | Action::Hints
+                    | Action::Insert
+                    | Action::Send(_)
+            ),
+        }
+    }
+
     /// Forward one key to the page, if it is one we know how to describe.
     ///
     /// An unknown key is dropped rather than approximated: a wrong `code` is
@@ -1038,6 +1119,7 @@ impl Session {
         if self.focused().navigating {
             return;
         }
+        self.clear_hints();
         let id = self.focused_id();
         let tab = self.focused_mut();
         tab.navigating = true;
@@ -1054,10 +1136,39 @@ impl Session {
         let Some(cell) = page_cell(&self.vp, event.column, event.row) else {
             return;
         };
+        if self.focused().reader.active {
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let link = self.focused().reader.layout.as_ref().and_then(|layout| {
+                        layout.link_at(
+                            cell,
+                            self.focused().reader.top_row,
+                            self.vp.origin_row(),
+                            self.vp.grid().rows,
+                        )
+                    });
+                    if let Some(link) = link {
+                        self.activate_reader(link, effects);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_reader(ScrollAmount::Lines(WHEEL_ROWS));
+                }
+                MouseEventKind::ScrollUp => {
+                    self.scroll_reader(ScrollAmount::Lines(-WHEEL_ROWS));
+                }
+                // A release completes no local operation. It is still ours:
+                // sending it to the hidden page would give Chromium half a
+                // click whose press it never saw.
+                MouseEventKind::Up(MouseButton::Left) => {}
+                _ => {}
+            }
+            return;
+        }
         // `to_css` returns the cell's centre, so the click lands
         // unambiguously inside the cell you pointed at.
         let at = self.vp.to_css(cell);
-        let notch = WHEEL_ROWS * f64::from(self.cell.h);
+        let notch = f64::from(WHEEL_ROWS) * f64::from(self.cell.h);
 
         let mouse = match event.kind {
             MouseEventKind::Down(MouseButton::Left) => MouseInput::press(at),
@@ -1174,18 +1285,45 @@ impl Session {
         }
     }
 
-    fn enter_hints(&mut self, targets: Vec<HintTarget>) {
+    fn enter_page_hints(&mut self, targets: Vec<HintTarget>) {
         let cells = targets
             .iter()
             .map(|target| target.label_cell(&self.vp))
             .collect();
+        self.enter_hints(cells, HintSource::Page);
+    }
+
+    fn enter_reader_hints(&mut self) {
+        let Some(layout) = self.focused().reader.layout.as_ref() else {
+            self.focused_mut().state = State::Notice("no hints".to_string());
+            return;
+        };
+        let visible = layout.visible_links(
+            self.focused().reader.top_row,
+            self.vp.origin_row(),
+            self.vp.grid().rows,
+        );
+        let (links, cells): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+        self.enter_hints(cells, HintSource::Reader(links));
+    }
+
+    fn enter_hints(&mut self, cells: Vec<CellPos>, source: HintSource) {
         let session = HintSession::new(cells);
         if session.is_empty() {
             // Entering a mode with nothing in it would only need escaping.
             self.focused_mut().state = State::Notice("no hints".to_string());
+            self.hint_source = None;
             return;
         }
         self.mode = Mode::Hint(session);
+        self.hint_source = Some(source);
+    }
+
+    fn clear_hints(&mut self) {
+        if matches!(self.mode, Mode::Hint(_)) {
+            self.mode = Mode::Normal;
+        }
+        self.hint_source = None;
     }
 
     /// Apply what filtering decided about the character just typed.
@@ -1193,20 +1331,55 @@ impl Session {
         match filtered {
             Filtered::Waiting(_) => {}
             Filtered::Activate(index) => {
-                let target = self
-                    .focused()
-                    .hints
-                    .as_ref()
-                    .and_then(|targets| targets.get(index))
-                    .cloned();
+                let source = self.hint_source.take();
                 self.mode = Mode::Normal;
-                if let Some(target) = target {
-                    self.activate(target, effects);
+                match source {
+                    Some(HintSource::Page) => {
+                        let target = self
+                            .focused()
+                            .hints
+                            .as_ref()
+                            .and_then(|targets| targets.get(index))
+                            .cloned();
+                        if let Some(target) = target {
+                            self.activate(target, effects);
+                        }
+                    }
+                    Some(HintSource::Reader(links)) => {
+                        if let Some(link) = links.get(index).copied() {
+                            self.activate_reader(link, effects);
+                        }
+                    }
+                    None => {}
                 }
             }
             // Nothing matches, so there is nothing left to type. Leaving is
             // friendlier than sitting there waiting for an Esc.
-            Filtered::None => self.mode = Mode::Normal,
+            Filtered::None => {
+                self.mode = Mode::Normal;
+                self.hint_source = None;
+            }
+        }
+    }
+
+    fn activate_reader(&mut self, id: LinkId, effects: &mut Vec<Effect>) {
+        let link = self
+            .focused()
+            .reader
+            .document
+            .as_ref()
+            .and_then(|document| document.links.get(id.0))
+            .cloned();
+        let Some(link) = link else { return };
+        if self.browser_lost {
+            self.ask_for_a_browser(effects);
+            return;
+        }
+        if link.new_tab {
+            self.open_tab(link.url, effects);
+        } else {
+            self.set_reader(false, effects);
+            self.navigate(Navigation::Open(link.url), effects);
         }
     }
 
@@ -1452,8 +1625,11 @@ impl Session {
                         // from under you mid-word, and landing it on another
                         // tab would paint one page's labels over another's
                         // text.
-                        if self.mode == Mode::Normal && self.focused_id() == id {
-                            self.enter_hints(targets);
+                        if self.mode == Mode::Normal
+                            && self.focused_id() == id
+                            && !self.focused().reader.active
+                        {
+                            self.enter_page_hints(targets);
                         }
                     }
                     Err(failure) => {
@@ -1548,34 +1724,13 @@ impl Session {
     }
 }
 
-/// Whether an action would have reached a page.
-///
-/// Quitting, the `:` line and mode changes all still work with no browser:
-/// they are ours, and taking them away would make a browser that lost its
-/// Chromium unusable rather than merely empty.
-fn action_touches_the_page(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::Scroll(_)
-            | Action::ScrollTop
-            | Action::ScrollEnd
-            | Action::Back
-            | Action::Forward
-            | Action::Reload
-            | Action::Hints
-            | Action::Insert
-            | Action::Send(_)
-    )
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
     use wwt_page::{Extraction, ReaderExtraction};
-    use wwt_reader::{Block, BlockKind, Document, Layout, Span};
+    use wwt_reader::{Block, BlockKind, Document, Layout, Link, LinkId, Span};
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
     const CELL: CellSize = CellSize { w: 9, h: 20 };
@@ -1639,6 +1794,42 @@ mod tests {
         session.focused_mut().reader.layout = Some(Layout::new(&document, GRID.cols));
         session.focused_mut().reader.document = Some(document);
         session.focused_mut().reader.dirty = false;
+    }
+
+    fn enter_long_reader(session: &mut Session) -> usize {
+        cache_reader(session, &"reader words ".repeat(1_000));
+        assert_eq!(session.on(key('r')), vec![]);
+        let max_top = session
+            .focused()
+            .reader
+            .layout
+            .as_ref()
+            .expect("cached layout")
+            .rows()
+            .saturating_sub(usize::from(session.vp.grid().rows));
+        assert!(max_top > usize::from(session.vp.grid().rows));
+        max_top
+    }
+
+    fn enter_link_reader(session: &mut Session, links: Vec<Link>, spans: Vec<Span>) {
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                spans,
+            }],
+            links,
+        };
+        session.focused_mut().reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.focused_mut().reader.document = Some(document);
+        session.focused_mut().reader.dirty = false;
+        assert_eq!(session.on(key('r')), vec![]);
+    }
+
+    fn reader_link(url: &str, new_tab: bool) -> Link {
+        Link {
+            url: url.to_string(),
+            new_tab,
+        }
     }
 
     fn key(c: char) -> Event {
@@ -1932,6 +2123,234 @@ mod tests {
     }
 
     #[test]
+    fn reader_keys_scroll_rows_locally_and_clamp_at_both_ends() {
+        let mut session = ready();
+        let max_top = enter_long_reader(&mut session);
+
+        let cases = [
+            (key('j'), 1),
+            (key('k'), 0),
+            (key('d'), 11),
+            (key('u'), 0),
+            (key(' '), 20),
+            (key('b'), 0),
+            (key('G'), max_top),
+            (key('j'), max_top),
+            (key('g'), 0),
+            (key('k'), 0),
+        ];
+
+        for (event, top_row) in cases {
+            assert_eq!(session.on(event), vec![]);
+            assert_eq!(session.focused().reader.top_row, top_row);
+        }
+    }
+
+    #[test]
+    fn reader_scrolling_changes_reader_progress_without_saving_the_page() {
+        let mut session = ready();
+        let max_top = enter_long_reader(&mut session);
+        let before = session.compose().row_text(GRID.rows - 1);
+
+        let effects = session.on(key('d'));
+        let after = session.compose().row_text(GRID.rows - 1);
+
+        assert_eq!(effects, vec![]);
+        assert_ne!(before, after);
+        let percent = (11.0 / max_top as f64 * 100.0).round() as i64;
+        assert!(after.ends_with(&format!(" {percent:>3}%")));
+    }
+
+    #[test]
+    fn reader_scrolling_stays_local_while_the_browser_is_gone() {
+        let mut session = ready();
+        enter_long_reader(&mut session);
+        session.on(Event::BrowserLost);
+
+        assert_eq!(session.on(key('j')), vec![]);
+        assert_eq!(session.focused().reader.top_row, 1);
+    }
+
+    #[test]
+    fn reader_hints_label_visible_distinct_links_without_querying_the_page() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://one.example", false), reader_link("https://two.example", false)],
+            vec![
+                Span { text: "one".to_string(), link: Some(LinkId(0)) },
+                Span { text: " and ".to_string(), link: None },
+                Span { text: "one again".to_string(), link: Some(LinkId(0)) },
+                Span { text: " then two".to_string(), link: Some(LinkId(1)) },
+            ],
+        );
+
+        assert_eq!(session.on(key('f')), vec![]);
+        assert!(matches!(session.mode(), Mode::Hint(_)));
+
+        let frame = session.compose();
+        assert_eq!(frame.cell(CellPos { col: 0, row: 1 }).expect("first link cell").ch, 's');
+        assert_eq!(frame.cell(CellPos { col: 17, row: 1 }).expect("second link cell").ch, 'a');
+    }
+
+    #[test]
+    fn reader_with_no_visible_links_reports_no_hints_locally() {
+        let mut session = ready();
+        cache_reader(&mut session, "plain reader text");
+        session.on(key('r'));
+
+        assert_eq!(session.on(key('f')), vec![]);
+        assert_eq!(session.mode(), &Mode::Normal);
+        assert_eq!(session.state(), &State::Notice("no hints".to_string()));
+    }
+
+    #[test]
+    fn selecting_a_same_tab_reader_hint_leaves_reader_and_navigates() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://next.example", false)],
+            vec![Span { text: "next".to_string(), link: Some(LinkId(0)) }],
+        );
+        session.on(key('f'));
+
+        assert_eq!(
+            session.on(key('s')),
+            vec![Effect::Navigate(
+                tab0(),
+                Navigation::Open("https://next.example".to_string())
+            )]
+        );
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert_eq!(session.mode(), &Mode::Normal);
+    }
+
+    #[test]
+    fn selecting_a_new_tab_reader_hint_keeps_the_source_reader_intact() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://new.example", true)],
+            vec![Span { text: "new".to_string(), link: Some(LinkId(0)) }],
+        );
+        session.on(key('f'));
+
+        let effects = session.on(key('s'));
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::OpenTab { url, .. } if url == "https://new.example"
+        )));
+        assert!(session.tabs[0].reader.active);
+        assert!(session.tabs[0].reader.wanted);
+        assert_eq!(session.focus, 1);
+        assert_eq!(session.mode(), &Mode::Normal);
+    }
+
+    #[test]
+    fn reader_wheel_scrolls_three_rows_locally_and_clamps() {
+        let mut session = ready();
+        let max_top = enter_long_reader(&mut session);
+
+        assert_eq!(session.on(mouse(MouseEventKind::ScrollDown, 0, 1)), vec![]);
+        assert_eq!(session.focused().reader.top_row, 3);
+        assert_eq!(session.on(mouse(MouseEventKind::ScrollUp, 0, 1)), vec![]);
+        assert_eq!(session.focused().reader.top_row, 0);
+
+        session.focused_mut().reader.top_row = max_top - 1;
+        assert_eq!(session.on(mouse(MouseEventKind::ScrollDown, 0, 1)), vec![]);
+        assert_eq!(session.focused().reader.top_row, max_top);
+    }
+
+    #[test]
+    fn reader_mouse_press_follows_a_link_without_sending_page_input() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://mouse.example", false)],
+            vec![Span { text: "mouse link".to_string(), link: Some(LinkId(0)) }],
+        );
+
+        assert_eq!(
+            session.on(mouse(MouseEventKind::Down(MouseButton::Left), 0, 1)),
+            vec![Effect::Navigate(
+                tab0(),
+                Navigation::Open("https://mouse.example".to_string())
+            )]
+        );
+        assert!(!session.focused().reader.active);
+    }
+
+    #[test]
+    fn reader_mouse_ignores_empty_cells_and_consumes_releases() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://mouse.example", false)],
+            vec![Span { text: "mouse link".to_string(), link: Some(LinkId(0)) }],
+        );
+
+        assert_eq!(session.on(mouse(MouseEventKind::Down(MouseButton::Left), 40, 1)), vec![]);
+        assert_eq!(session.on(mouse(MouseEventKind::Up(MouseButton::Left), 0, 1)), vec![]);
+        assert!(session.focused().reader.active);
+    }
+
+    #[test]
+    fn following_a_reader_link_relaunches_a_missing_browser() {
+        let mut session = ready();
+        enter_link_reader(
+            &mut session,
+            vec![reader_link("https://gone.example", false)],
+            vec![Span { text: "gone".to_string(), link: Some(LinkId(0)) }],
+        );
+        session.browser_lost = true;
+        session.relaunching = false;
+
+        assert_eq!(session.on(key('f')), vec![]);
+        assert!(matches!(session.mode(), Mode::Hint(_)));
+        assert_eq!(session.on(key('s')), vec![Effect::Relaunch]);
+        assert!(session.focused().reader.active);
+    }
+
+    #[test]
+    fn reader_actions_that_need_the_page_relaunch_a_missing_browser() {
+        for event in [key('i'), key('H')] {
+            let mut session = ready();
+            cache_reader(&mut session, "reader text");
+            session.on(key('r'));
+            session.browser_lost = true;
+            session.relaunching = false;
+
+            assert_eq!(session.on(event), vec![Effect::Relaunch]);
+            assert!(session.focused().reader.active);
+            assert_eq!(session.mode(), &Mode::Normal);
+        }
+    }
+
+    #[test]
+    fn opening_a_reader_link_does_not_stop_an_already_stopped_screencast() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                spans: vec![Span { text: "new".to_string(), link: Some(LinkId(0)) }],
+            }],
+            links: vec![reader_link("https://new.example", true)],
+        };
+        session.focused_mut().reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.focused_mut().reader.document = Some(document);
+        session.focused_mut().reader.dirty = false;
+        assert_eq!(session.on(key('r')), vec![Effect::StopScreencast(tab0())]);
+        session.on(key('f'));
+
+        let effects = session.on(key('s'));
+
+        assert!(!effects.contains(&Effect::StopScreencast(tab0())));
+    }
+
+    #[test]
     fn a_failed_extraction_lets_the_next_one_start() {
         let mut session = session();
         session.begin();
@@ -2091,12 +2510,28 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_asks_the_page_to_move_and_waits_to_be_told_it_did() {
+    fn every_scroll_key_keeps_its_live_page_distance() {
         let mut session = ready();
-        // One row of 20 CSS pixels.
-        assert_eq!(session.on(key('j')), vec![Effect::Scroll(tab0(), Scroll::By(20.0))]);
-        assert_eq!(session.on(key('g')), vec![Effect::Scroll(tab0(), Scroll::Top)]);
-        assert_eq!(session.on(key('G')), vec![Effect::Scroll(tab0(), Scroll::End)]);
+        let cases = [
+            (key('j'), Scroll::By(20.0)),
+            (code(KeyCode::Down), Scroll::By(20.0)),
+            (key('k'), Scroll::By(-20.0)),
+            (code(KeyCode::Up), Scroll::By(-20.0)),
+            (key('d'), Scroll::By(220.0)),
+            (key('u'), Scroll::By(-220.0)),
+            (key(' '), Scroll::By(400.0)),
+            (code(KeyCode::PageDown), Scroll::By(400.0)),
+            (key('b'), Scroll::By(-400.0)),
+            (code(KeyCode::PageUp), Scroll::By(-400.0)),
+            (key('g'), Scroll::Top),
+            (code(KeyCode::Home), Scroll::Top),
+            (key('G'), Scroll::End),
+            (code(KeyCode::End), Scroll::End),
+        ];
+
+        for (event, scroll) in cases {
+            assert_eq!(session.on(event), vec![Effect::Scroll(tab0(), scroll)]);
+        }
     }
 
     // Hints: cached until the page moves, and a text field lands in insert.
