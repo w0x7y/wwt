@@ -147,6 +147,15 @@ impl Tab {
         self.hints = None;
     }
 
+    /// A navigation is replacing the document behind this tab.
+    ///
+    /// The old runs remain as the frame that stands while loading. Reader
+    /// content cannot: its destinations belong to the document being left.
+    pub fn replace_document(&mut self) {
+        self.reader = ReaderState::default();
+        self.hints = None;
+    }
+
     /// Let go of this tab's target, and keep the tab.
     ///
     /// The one place that says what a tab is without a browser behind it.
@@ -315,6 +324,33 @@ mod tests {
         assert!(tab.reader.dirty);
         assert!(tab.dirty);
         assert!(!tab.reading);
+    }
+
+    #[test]
+    fn replacing_a_document_forgets_every_reader_fact() {
+        let mut tab = Tab::new(TabId(0), "https://example.com".to_string());
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                spans: vec![Span { text: "old".to_string(), link: None }],
+            }],
+            links: Vec::new(),
+        };
+        tab.reader.document = Some(document.clone());
+        tab.reader.layout = Some(Layout::new(&document, 40));
+        tab.reader.top_row = 8;
+        tab.reader.active = true;
+        tab.reader.wanted = true;
+        tab.reader.dirty = false;
+
+        tab.replace_document();
+
+        assert!(tab.reader.document.is_none());
+        assert!(tab.reader.layout.is_none());
+        assert_eq!(tab.reader.top_row, 0);
+        assert!(!tab.reader.active);
+        assert!(!tab.reader.wanted);
+        assert!(tab.reader.dirty);
     }
 
     #[test]

@@ -580,40 +580,48 @@ impl Session {
         self.clear_hints();
         let id = self.focused_id();
         let was_active = self.focused().reader.active;
-        if on {
-            let clean_cache = {
-                let reader = &self.focused().reader;
-                !reader.dirty && reader.document.is_some() && reader.layout.is_some()
-            };
-            let tab = self.focused_mut();
-            tab.reader.wanted = true;
-            if clean_cache {
-                tab.reader.active = true;
-            } else {
-                tab.state = State::Notice("reading".to_string());
+        if !on {
+            let pending = !was_active
+                && matches!(
+                    self.focused().state,
+                    State::Notice(ref message) if message == "reading"
+                );
+            self.leave_reader(effects);
+            if pending {
+                self.focused_mut().state = State::Ready;
             }
-        } else {
-            let tab = self.focused_mut();
-            tab.reader.wanted = false;
-            tab.reader.active = false;
-            if !was_active && matches!(tab.state, State::Notice(ref message) if message == "reading")
-            {
-                tab.state = State::Ready;
-            }
+            self.start_extract(id, effects);
+            return;
         }
 
-        let active = self.focused().reader.active;
-        if self.pixel && was_active != active {
-            if active {
-                effects.push(Effect::StopScreencast(id));
-            } else {
-                effects.push(Effect::StartScreencast(id, self.frame_size()));
-            }
-        }
-        if on {
-            self.start_reader(id, effects);
+        let clean_cache = {
+            let reader = &self.focused().reader;
+            !reader.dirty && reader.document.is_some() && reader.layout.is_some()
+        };
+        let tab = self.focused_mut();
+        tab.reader.wanted = true;
+        if clean_cache {
+            tab.reader.active = true;
         } else {
-            self.start_extract(id, effects);
+            tab.state = State::Notice("reading".to_string());
+        }
+        let active = self.focused().reader.active;
+        if self.pixel && !was_active && active {
+            effects.push(Effect::StopScreencast(id));
+        }
+        self.start_reader(id, effects);
+    }
+
+    /// Leave the semantic view without discarding its reusable cache.
+    fn leave_reader(&mut self, effects: &mut Vec<Effect>) {
+        self.clear_hints();
+        let id = self.focused_id();
+        let was_active = self.focused().reader.active;
+        let tab = self.focused_mut();
+        tab.reader.wanted = false;
+        tab.reader.active = false;
+        if self.pixel && was_active {
+            effects.push(Effect::StartScreencast(id, self.frame_size()));
         }
     }
 
@@ -779,8 +787,7 @@ impl Session {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.mark_dirty();
                 }
-                self.start_reader(id, &mut effects);
-                self.start_extract(id, &mut effects);
+                self.start_current_read(id, &mut effects);
             }
             Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
@@ -898,13 +905,20 @@ impl Session {
                 }
                 effects.push(Effect::Quit);
             }
+            Action::TogglePixel if self.focused().reader.active => {
+                self.leave_reader(effects);
+                self.set_pixel(true, effects);
+            }
             Action::TogglePixel => self.set_pixel(!self.pixel, effects),
             Action::ToggleReader => {
                 let on = !(self.focused().reader.wanted || self.focused().reader.active);
                 self.set_reader(on, effects);
             }
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
-            Action::Insert => self.mode = Mode::Insert,
+            Action::Insert => {
+                self.leave_reader(effects);
+                self.mode = Mode::Insert;
+            }
             Action::Hints if self.focused().reader.active => self.enter_reader_hints(),
             Action::Hints => match self.focused().hints.clone() {
                 Some(targets) => self.enter_page_hints(targets),
@@ -1119,9 +1133,10 @@ impl Session {
         if self.focused().navigating {
             return;
         }
-        self.clear_hints();
+        self.leave_reader(effects);
         let id = self.focused_id();
         let tab = self.focused_mut();
+        tab.replace_document();
         tab.navigating = true;
         // A new document reinstalls bootstrap.js, so the next page has done
         // nothing to deserve the slow path. Cleared on asking rather than
@@ -1240,6 +1255,20 @@ impl Session {
         tab.reading = true;
         tab.reader.dirty = false;
         effects.push(Effect::ReadReader(id));
+    }
+
+    /// Refresh the representation this tab currently wants in front.
+    fn start_current_read(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let reader = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .is_some_and(|tab| tab.reader.wanted || tab.reader.active);
+        if reader {
+            self.start_reader(id, effects);
+        } else {
+            self.start_extract(id, effects);
+        }
     }
 
     /// Everything the chrome learns from a page, applied the same way
@@ -1378,7 +1407,6 @@ impl Session {
         if link.new_tab {
             self.open_tab(link.url, effects);
         } else {
-            self.set_reader(false, effects);
             self.navigate(Navigation::Open(link.url), effects);
         }
     }
@@ -1504,8 +1532,7 @@ impl Session {
                             // changes, which is section 8 of the parent.
                             (Source::Snapshot, _) => tab.state = State::Error(failure.message()),
                         }
-                        self.start_reader(id, effects);
-                        self.start_extract(id, effects);
+                        self.start_current_read(id, effects);
                         return;
                     }
                 };
@@ -1519,8 +1546,7 @@ impl Session {
                 // carries, and is applied by the one place that knows how.
                 self.apply_status(id, extraction.status, effects);
                 // The page may have changed again while we were extracting.
-                self.start_reader(id, effects);
-                self.start_extract(id, effects);
+                self.start_current_read(id, effects);
             }
             Job::Reader(_, result) => {
                 self.tab_mut(id).expect("resolved above").reading = false;
@@ -1535,11 +1561,7 @@ impl Session {
                         if !tab.reader.active {
                             tab.reader.wanted = false;
                         }
-                        if tab.reader.wanted || tab.reader.active {
-                            self.start_reader(id, effects);
-                        } else {
-                            self.start_extract(id, effects);
-                        }
+                        self.start_current_read(id, effects);
                         return;
                     }
                 };
@@ -1549,6 +1571,15 @@ impl Session {
                     .expect("resolved above")
                     .reader
                     .active;
+                if extraction.document.blocks.is_empty() {
+                    let tab = self.tab_mut(id).expect("resolved above");
+                    tab.state = State::Notice("nothing to read".to_string());
+                    if !was_active {
+                        tab.reader.wanted = false;
+                    }
+                    self.start_current_read(id, effects);
+                    return;
+                }
                 let document = extraction.document;
                 let layout = Layout::new(&document, self.grid.cols);
                 let max_top = layout
@@ -1564,16 +1595,7 @@ impl Session {
                 if became_active && self.pixel && self.focused_id() == id {
                     effects.push(Effect::StopScreencast(id));
                 }
-                if self
-                    .tab_mut(id)
-                    .expect("resolved above")
-                    .reader
-                    .wanted
-                {
-                    self.start_reader(id, effects);
-                } else {
-                    self.start_extract(id, effects);
-                }
+                self.start_current_read(id, effects);
             }
             Job::Status(_, result) => {
                 let tab = self.tab_mut(id).expect("resolved above");
@@ -1595,8 +1617,7 @@ impl Session {
                     Err(_) => {
                         tab.degraded = true;
                         tab.dirty = true;
-                        self.start_reader(id, effects);
-                        self.start_extract(id, effects);
+                        self.start_current_read(id, effects);
                         return;
                     }
                 };
@@ -1604,8 +1625,7 @@ impl Session {
                 // `read` is what says the first switch to this tab can be a
                 // repaint. Leaving pixel mode is what fills them in.
                 self.apply_status(id, status, effects);
-                self.start_reader(id, effects);
-                self.start_extract(id, effects);
+                self.start_current_read(id, effects);
             }
             Job::Hints(_, result) => {
                 // However it went, that tab's query is over and `f` must
@@ -1650,11 +1670,11 @@ impl Session {
                 tab.navigating = false;
                 tab.state = State::Ready;
                 tab.mark_dirty();
-                self.start_extract(id, effects);
+                self.start_current_read(id, effects);
             }
             Job::Resized(_) => {
                 self.tab_mut(id).expect("resolved above").mark_dirty();
-                self.start_extract(id, effects);
+                self.start_current_read(id, effects);
             }
             Job::Opened(_, Ok(())) => {
                 let tab = self.tab_mut(id).expect("resolved above");
@@ -1672,7 +1692,7 @@ impl Session {
                 }
                 // The page is already at the offset it was restored to;
                 // `Effect::OpenTab` carried it, so this reads what is there.
-                self.start_extract(id, effects);
+                self.start_current_read(id, effects);
             }
             Job::Opened(_, Err(message)) => {
                 // A tab with no page behind it is not a tab. Drop it and say
@@ -2016,6 +2036,50 @@ mod tests {
     }
 
     #[test]
+    fn a_first_empty_reader_answer_keeps_the_live_page() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("live page")];
+        session.on(key('r'));
+        let mut extraction = reader_extraction("");
+        extraction.document.blocks.clear();
+
+        assert_eq!(
+            session.on(Event::Done(Job::Reader(tab0(), Ok(Box::new(extraction))))),
+            vec![]
+        );
+
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert!(session.focused().reader.document.is_none());
+        assert!(session.focused().reader.layout.is_none());
+        assert!(session.compose().row_text(1).contains("live page"));
+    }
+
+    #[test]
+    fn a_refused_reader_refresh_keeps_layout_and_waits_for_another_signal() {
+        let mut session = ready();
+        cache_reader(&mut session, "old reader layout");
+        session.on(key('r'));
+        let old = session.focused().reader.layout.clone();
+        session.on(Event::Dirty(tab0()));
+
+        assert_eq!(
+            session.on(Event::Done(Job::Reader(
+                tab0(),
+                Err(Failure::Failed("reader refused".to_string()))
+            ))),
+            vec![]
+        );
+        assert_eq!(session.focused().reader.layout, old);
+        assert!(session.focused().reader.active);
+        assert!(session.focused().reader.wanted);
+        assert_eq!(session.state(), &State::Error("reader refused".to_string()));
+        assert!(!session.focused().degraded);
+
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::ReadReader(tab0())]);
+    }
+
+    #[test]
     fn a_dirty_signal_during_a_reader_query_produces_one_follow_up() {
         let mut session = ready();
         assert_eq!(request_reader(&mut session), vec![Effect::ReadReader(tab0())]);
@@ -2029,6 +2093,40 @@ mod tests {
             Ok(Box::new(reader_extraction("first answer"))),
         )));
         assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
+    }
+
+    #[test]
+    fn dirty_active_reader_refreshes_only_the_document_in_front() {
+        let mut session = ready();
+        enter_long_reader(&mut session);
+        session.focused_mut().reader.top_row = 20;
+        let before = session.compose();
+
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::ReadReader(tab0())]);
+        assert!(session.focused().dirty, "ordinary runs became stale too");
+        assert_eq!(session.focused().reader.top_row, 20);
+        assert_eq!(session.compose(), before, "the old layout stands while its refresh is away");
+
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![], "one shared read is enough");
+        assert!(session.focused().reader.dirty, "the second signal is remembered");
+
+        let effects = session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("short replacement"))),
+        )));
+        assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
+        assert_eq!(session.focused().reader.top_row, 0, "replacement clamps the numeric row");
+    }
+
+    #[test]
+    fn dirty_inactive_reader_refreshes_only_the_live_page() {
+        let mut session = ready();
+        cache_reader(&mut session, "cached reader");
+
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![Effect::Extract(tab0(), Source::Script)]);
+        assert!(session.focused().reader.dirty);
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
     }
 
     #[test]
@@ -2223,6 +2321,9 @@ mod tests {
         );
         assert!(!session.focused().reader.active);
         assert!(!session.focused().reader.wanted);
+        assert!(session.focused().reader.document.is_none());
+        assert!(session.focused().reader.layout.is_none());
+        assert_eq!(session.focused().reader.top_row, 0);
         assert_eq!(session.mode(), &Mode::Normal);
     }
 
@@ -2326,6 +2427,86 @@ mod tests {
             assert!(session.focused().reader.active);
             assert_eq!(session.mode(), &Mode::Normal);
         }
+    }
+
+    #[test]
+    fn every_navigation_entry_leaves_reader_and_forgets_its_old_document() {
+        let key_cases = [
+            (key('H'), Navigation::Back),
+            (key('L'), Navigation::Forward),
+            (ctrl('r'), Navigation::Reload),
+        ];
+        for (event, navigation) in key_cases {
+            let mut session = ready();
+            enter_long_reader(&mut session);
+            session.focused_mut().reader.top_row = 7;
+
+            assert_eq!(session.on(event), vec![Effect::Navigate(tab0(), navigation)]);
+            assert_reader_was_replaced(&session);
+        }
+
+        let command_cases = [
+            (":back", Navigation::Back),
+            (":forward", Navigation::Forward),
+            (":reload", Navigation::Reload),
+            (
+                ":open https://next.example",
+                Navigation::Open("https://next.example".to_string()),
+            ),
+        ];
+        for (command, navigation) in command_cases {
+            let mut session = ready();
+            enter_long_reader(&mut session);
+            session.focused_mut().reader.top_row = 7;
+            typed(&mut session, command);
+
+            assert_eq!(session.on(code(KeyCode::Enter)), vec![Effect::Navigate(tab0(), navigation)]);
+            assert_reader_was_replaced(&session);
+        }
+    }
+
+    fn assert_reader_was_replaced(session: &Session) {
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert!(session.focused().reader.document.is_none());
+        assert!(session.focused().reader.layout.is_none());
+        assert_eq!(session.focused().reader.top_row, 0);
+    }
+
+    #[test]
+    fn insert_leaves_reader_but_keeps_its_reusable_cache() {
+        let mut session = ready();
+        cache_reader(&mut session, "reader cache");
+        session.on(key('r'));
+        let document = session.focused().reader.document.clone();
+        let layout = session.focused().reader.layout.clone();
+
+        assert_eq!(session.on(key('i')), vec![]);
+        assert_eq!(session.mode(), &Mode::Insert);
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert_eq!(session.focused().reader.document, document);
+        assert_eq!(session.focused().reader.layout, layout);
+        assert!(!session.focused().reader.dirty);
+    }
+
+    #[test]
+    fn pixel_key_leaves_reader_for_pixels_without_discarding_the_cache() {
+        let mut session = ready_with_graphics();
+        cache_reader(&mut session, "reader cache");
+        session.on(key('r'));
+        let document = session.focused().reader.document.clone();
+        let layout = session.focused().reader.layout.clone();
+
+        assert_eq!(
+            session.on(key('p')),
+            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+        );
+        assert!(session.pixel);
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert_eq!(session.focused().reader.document, document);
+        assert_eq!(session.focused().reader.layout, layout);
     }
 
     #[test]
@@ -4017,14 +4198,21 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_hidden_pixel_preference_starts_no_screencast_in_reader() {
+    fn p_from_reader_starts_pixels_and_quit_stops_them() {
         let mut session = ready_with_graphics();
         cache_reader(&mut session, "reader page");
         session.on(key('r'));
 
-        assert_eq!(session.on(key('p')), vec![]);
+        assert_eq!(
+            session.on(key('p')),
+            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+        );
         assert!(session.pixel);
-        assert_eq!(session.on(key('q')), vec![Effect::Quit]);
+        assert!(!session.focused().reader.active);
+        assert_eq!(
+            session.on(key('q')),
+            vec![Effect::StopScreencast(tab0()), Effect::Quit]
+        );
     }
 
     #[test]
