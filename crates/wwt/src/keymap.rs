@@ -9,12 +9,19 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use wwt_frame::Viewport;
 use wwt_ui::Mode;
 
+/// A scroll request before the current view gives it units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollAmount {
+    Lines(i32),
+    HalfPages(i32),
+    Pages(i32),
+    Top,
+    End,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Scroll by a distance in CSS pixels, positive being downward.
-    Scroll(f64),
-    ScrollTop,
-    ScrollEnd,
+    Scroll(ScrollAmount),
     Back,
     Forward,
     Reload,
@@ -57,33 +64,17 @@ pub enum Action {
     Send(KeyEvent),
 }
 
-/// The distance one `space` moves: a screenful, less two rows kept for
-/// context so you do not lose your place across the jump.
-fn page(vp: Viewport) -> f64 {
-    let rows = vp.grid().rows.saturating_sub(2).max(1);
-    f64::from(rows) * f64::from(vp.cell().h)
-}
-
-fn half_page(vp: Viewport) -> f64 {
-    let rows = (vp.grid().rows / 2).max(1);
-    f64::from(rows) * f64::from(vp.cell().h)
-}
-
-fn line(vp: Viewport) -> f64 {
-    f64::from(vp.cell().h)
-}
-
 /// What a key means in a mode, or `None` when it means nothing there.
-pub fn action_for(mode: &Mode, key: KeyEvent, vp: Viewport) -> Option<Action> {
+pub fn action_for(mode: &Mode, key: KeyEvent, _vp: Viewport) -> Option<Action> {
     match mode {
-        Mode::Normal => normal(key, vp),
+        Mode::Normal => normal(key),
         Mode::Command(_) => command(key),
         Mode::Hint(_) => hint(key),
         Mode::Insert => insert(key),
     }
 }
 
-fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
+fn normal(key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('r') => Some(Action::Reload),
@@ -118,14 +109,14 @@ fn normal(key: KeyEvent, vp: Viewport) -> Option<Action> {
     }
 
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::Scroll(line(vp))),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::Scroll(-line(vp))),
-        KeyCode::Char('d') => Some(Action::Scroll(half_page(vp))),
-        KeyCode::Char('u') => Some(Action::Scroll(-half_page(vp))),
-        KeyCode::Char(' ') | KeyCode::PageDown => Some(Action::Scroll(page(vp))),
-        KeyCode::Char('b') | KeyCode::PageUp => Some(Action::Scroll(-page(vp))),
-        KeyCode::Char('g') | KeyCode::Home => Some(Action::ScrollTop),
-        KeyCode::Char('G') | KeyCode::End => Some(Action::ScrollEnd),
+        KeyCode::Char('j') | KeyCode::Down => Some(Action::Scroll(ScrollAmount::Lines(1))),
+        KeyCode::Char('k') | KeyCode::Up => Some(Action::Scroll(ScrollAmount::Lines(-1))),
+        KeyCode::Char('d') => Some(Action::Scroll(ScrollAmount::HalfPages(1))),
+        KeyCode::Char('u') => Some(Action::Scroll(ScrollAmount::HalfPages(-1))),
+        KeyCode::Char(' ') | KeyCode::PageDown => Some(Action::Scroll(ScrollAmount::Pages(1))),
+        KeyCode::Char('b') | KeyCode::PageUp => Some(Action::Scroll(ScrollAmount::Pages(-1))),
+        KeyCode::Char('g') | KeyCode::Home => Some(Action::Scroll(ScrollAmount::Top)),
+        KeyCode::Char('G') | KeyCode::End => Some(Action::Scroll(ScrollAmount::End)),
         KeyCode::Char('H') => Some(Action::Back),
         KeyCode::Char('L') => Some(Action::Forward),
         KeyCode::Char('f') => Some(Action::Hints),
@@ -219,26 +210,50 @@ mod tests {
 
     #[test]
     fn j_and_k_scroll_one_cell() {
-        assert_eq!(action_for(&normal_mode(), key('j'), vp()), Some(Action::Scroll(20.0)));
-        assert_eq!(action_for(&normal_mode(), key('k'), vp()), Some(Action::Scroll(-20.0)));
+        assert_eq!(
+            action_for(&normal_mode(), key('j'), vp()),
+            Some(Action::Scroll(ScrollAmount::Lines(1)))
+        );
+        assert_eq!(
+            action_for(&normal_mode(), key('k'), vp()),
+            Some(Action::Scroll(ScrollAmount::Lines(-1)))
+        );
     }
 
     #[test]
     fn d_and_u_scroll_half_a_page() {
-        assert_eq!(action_for(&normal_mode(), key('d'), vp()), Some(Action::Scroll(240.0)));
-        assert_eq!(action_for(&normal_mode(), key('u'), vp()), Some(Action::Scroll(-240.0)));
+        assert_eq!(
+            action_for(&normal_mode(), key('d'), vp()),
+            Some(Action::Scroll(ScrollAmount::HalfPages(1)))
+        );
+        assert_eq!(
+            action_for(&normal_mode(), key('u'), vp()),
+            Some(Action::Scroll(ScrollAmount::HalfPages(-1)))
+        );
     }
 
     #[test]
     fn space_and_b_scroll_a_page_less_two_rows_of_overlap() {
-        assert_eq!(action_for(&normal_mode(), key(' '), vp()), Some(Action::Scroll(440.0)));
-        assert_eq!(action_for(&normal_mode(), key('b'), vp()), Some(Action::Scroll(-440.0)));
+        assert_eq!(
+            action_for(&normal_mode(), key(' '), vp()),
+            Some(Action::Scroll(ScrollAmount::Pages(1)))
+        );
+        assert_eq!(
+            action_for(&normal_mode(), key('b'), vp()),
+            Some(Action::Scroll(ScrollAmount::Pages(-1)))
+        );
     }
 
     #[test]
     fn g_and_shift_g_jump_to_the_ends() {
-        assert_eq!(action_for(&normal_mode(), key('g'), vp()), Some(Action::ScrollTop));
-        assert_eq!(action_for(&normal_mode(), key('G'), vp()), Some(Action::ScrollEnd));
+        assert_eq!(
+            action_for(&normal_mode(), key('g'), vp()),
+            Some(Action::Scroll(ScrollAmount::Top))
+        );
+        assert_eq!(
+            action_for(&normal_mode(), key('G'), vp()),
+            Some(Action::Scroll(ScrollAmount::End))
+        );
     }
 
     #[test]
@@ -290,10 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn a_one_row_viewport_never_scrolls_backwards() {
+    fn scroll_actions_do_not_depend_on_viewport_geometry() {
         let tiny = Viewport::new(GridSize { cols: 20, rows: 1 }, CellSize { w: 9, h: 20 });
-        // rows - 2 would underflow; a page scroll must still move forward.
-        assert_eq!(action_for(&normal_mode(), key(' '), tiny), Some(Action::Scroll(20.0)));
+        assert_eq!(
+            action_for(&normal_mode(), key(' '), tiny),
+            Some(Action::Scroll(ScrollAmount::Pages(1)))
+        );
     }
 
     #[test]
