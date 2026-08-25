@@ -209,22 +209,22 @@ Remove the assumption that every hint began as CSS geometry. This is behaviour-p
 **Interfaces:**
 - Produces `HintSession::new(Vec<CellPos>)`, `HintSession::paint(&mut Frame)`, and `Filtered::Activate(usize)`.
 
-- [ ] **Step 1: Rewrite hint tests first**
+- [x] **Step 1: Rewrite hint tests first**
 
 Use distinct `CellPos` values instead of `HintTarget`. Assert paint uses given cells without a viewport and filtering returns the original index.
 
 Run: `cargo test -p wwt-ui hint::`
 Expected: FAIL at old signatures.
 
-- [ ] **Step 2: Narrow `HintSession`**
+- [x] **Step 2: Narrow `HintSession`**
 
 Store cells and parallel labels. Return the selected index. No link, target kind or activation enters `wwt-ui`.
 
-- [ ] **Step 3: Preserve page activation in `Session`**
+- [x] **Step 3: Preserve page activation in `Session`**
 
 `enter_hints` converts `HintTarget::label_cell(&Viewport)` before creating the UI session and retains page targets on the tab. On activation, look up the selected target and call the existing centre-click path. A stale index leaves hint mode and does nothing rather than panic.
 
-- [ ] **Step 4: Verify no behaviour moved**
+- [x] **Step 4: Verify no behaviour moved**
 
 ```bash
 cargo test -p wwt-ui
