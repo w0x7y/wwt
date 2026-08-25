@@ -18,6 +18,8 @@ test -f "$stage$prefix/share/applications/wwt.desktop"
 desktop-file-validate "$stage$prefix/share/applications/wwt.desktop"
 grep -Fqx 'Exec=wwt --launch %u' "$stage$prefix/share/applications/wwt.desktop"
 grep -Fqx 'Terminal=false' "$stage$prefix/share/applications/wwt.desktop"
+grep -Fqx 'Exec=wwt --launch --new' "$stage$prefix/share/applications/wwt.desktop"
+test ! -e "$stage$prefix/share/icons/hicolor/scalable/apps/wwt.svg"
 test "$("$stage$prefix/bin/wwt" --version)" = "$("$build_dir/release/wwt" --version)"
 
 icon_source="$stage/user-created-wwt.svg"

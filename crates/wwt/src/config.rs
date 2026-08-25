@@ -133,6 +133,11 @@ mod tests {
     }
 
     #[test]
+    fn kitty_is_the_default_launcher_terminal() {
+        assert_eq!(Config::default().terminal, ["kitty", "-e"]);
+    }
+
+    #[test]
     fn every_key_is_read() {
         let (config, complaints) = parse(
             r#"

@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let (new_session, argument) = parse_args_from(arguments)?;
 
     // Before the argument is interpreted: a word that is not a URL is a
-    // search, and where a search goes is one of the three things this file
+    // search, and where a search goes is one of the things this file
     // decides.
     let (config, complaints) = wwt::config::load(wwt::store::config_path().as_deref());
 
