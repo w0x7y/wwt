@@ -73,18 +73,18 @@ Build data with no layout, page or session so later tasks depend on names alread
 - Consumes: `wwt-frame` as the crate's only dependency; task 1 does not use it yet.
 - Produces: `LinkId`, `Document`, `Block`, `BlockKind`, `Span`, `Link`, and a builder that normalizes adjacent spans.
 
-- [ ] **Step 1: Add the member and crate**
+- [x] **Step 1: Add the member and crate**
 
 Add `crates/wwt-reader` to workspace members. Its manifest depends only on `wwt-frame = { path = "../wwt-frame" }`. No serde.
 
-- [ ] **Step 2: Write failing tests**
+- [x] **Step 2: Write failing tests**
 
 Assert adjacent text with the same link becomes one span, different links retain a boundary, empty spans disappear, and finish refuses a span naming a missing link.
 
 Run: `cargo test -p wwt-reader`
 Expected: FAIL, missing types.
 
-- [ ] **Step 3: Implement the types**
+- [x] **Step 3: Implement the types**
 
 Use the design's shapes:
 
@@ -98,11 +98,11 @@ pub struct Link { pub url: String, pub new_tab: bool }
 
 `BlockKind` has heading level, paragraph, ordered/unordered list item with depth and ordinal, quote depth, and preformatted text. Derive `Debug, Clone, PartialEq, Eq`. The builder owns joining and link validation; it does not collapse whitespace because preformatted text must survive.
 
-- [ ] **Step 4: Export only public vocabulary**
+- [x] **Step 4: Export only public vocabulary**
 
 Declare `document` and re-export its public types. Keep builder helpers private where callers do not need them.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 cargo test -p wwt-reader

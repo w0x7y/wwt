@@ -843,6 +843,13 @@ name = "wwt-png"
 version = "0.1.0"
 
 [[package]]
+name = "wwt-reader"
+version = "0.1.0"
+dependencies = [
+ "wwt-frame",
+]
+
+[[package]]
 name = "wwt-term"
 version = "0.1.0"
 dependencies = [
