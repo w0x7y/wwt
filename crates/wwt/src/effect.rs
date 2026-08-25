@@ -45,6 +45,8 @@ pub enum Source {
 pub enum Effect {
     /// Read the page.
     Extract(TabId, Source),
+    /// Read the page's semantic reader document.
+    ReadReader(TabId),
     /// Read only what the chrome needs: the title, the URL and the scroll
     /// geometry, without the walk that produces runs.
     ///

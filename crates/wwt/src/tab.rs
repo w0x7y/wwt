@@ -6,6 +6,7 @@
 //! repaint rather than a round trip.
 
 use wwt_frame::{Caret, HintTarget, TextRun};
+use wwt_reader::{Document, Layout};
 use wwt_ui::chrome::State;
 
 /// A tab's identity, for as long as the tab exists.
@@ -38,6 +39,30 @@ pub enum Presence {
     Detached,
 }
 
+/// The semantic view cached beside the live page representation.
+#[derive(Debug, Clone)]
+pub struct ReaderState {
+    pub document: Option<Document>,
+    pub layout: Option<Layout>,
+    pub top_row: usize,
+    pub active: bool,
+    pub wanted: bool,
+    pub dirty: bool,
+}
+
+impl Default for ReaderState {
+    fn default() -> Self {
+        Self {
+            document: None,
+            layout: None,
+            top_row: 0,
+            active: false,
+            wanted: false,
+            dirty: true,
+        }
+    }
+}
+
 /// One page: what it is showing, and what we have asked it for.
 #[derive(Debug, Clone)]
 pub struct Tab {
@@ -53,6 +78,8 @@ pub struct Tab {
     pub progress: f64,
     /// Where the document is scrolled to, for the session file.
     pub scroll_y: f64,
+    /// The reader document and its terminal-width layout.
+    pub reader: ReaderState,
 
     /// The page says it changed and we have not caught up yet. A background
     /// tab sets this and spends it when focus arrives.
@@ -98,6 +125,7 @@ impl Tab {
             caret: None,
             progress: 0.0,
             scroll_y: 0.0,
+            reader: ReaderState::default(),
             dirty: true,
             reading: false,
             degraded: false,
@@ -115,6 +143,7 @@ impl Tab {
     /// Hint targets are geometry, so a page that moved has invalidated them.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.reader.dirty = true;
         self.hints = None;
     }
 
@@ -141,6 +170,7 @@ impl Tab {
         // The runs stay, and are what a switch back paints first. They are
         // also no longer authoritative, which is what the flag says.
         self.dirty = true;
+        self.reader.dirty = true;
     }
 
     /// Whether an effect naming this tab would reach a page.
@@ -153,6 +183,7 @@ impl Tab {
 mod tests {
     use super::*;
     use wwt_frame::{CssRect, Style};
+    use wwt_reader::{Block, BlockKind, Document, Layout, Span};
 
     #[test]
     fn a_new_tab_has_not_been_read_yet() {
@@ -163,6 +194,18 @@ mod tests {
         );
         assert!(!tab.reading);
         assert_eq!(tab.url, "https://example.com");
+    }
+
+    #[test]
+    fn a_new_tab_has_no_reader_view_and_needs_its_first_reader_document() {
+        let tab = Tab::new(TabId(0), "https://example.com".to_string());
+
+        assert_eq!(tab.reader.document, None);
+        assert_eq!(tab.reader.layout, None);
+        assert_eq!(tab.reader.top_row, 0);
+        assert!(!tab.reader.active);
+        assert!(!tab.reader.wanted);
+        assert!(tab.reader.dirty);
     }
 
     #[test]
@@ -238,6 +281,40 @@ mod tests {
         // clears it.
         assert!(!tab.degraded);
         assert!(tab.dirty, "nothing about the old document is authoritative");
+    }
+
+    #[test]
+    fn detaching_keeps_the_reader_view_but_marks_its_document_dirty() {
+        let mut tab = Tab::new(TabId(0), "https://example.com".to_string());
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                spans: vec![Span {
+                    text: "reader text".to_string(),
+                    link: None,
+                }],
+            }],
+            links: Vec::new(),
+        };
+        tab.reader.document = Some(document.clone());
+        tab.reader.layout = Some(Layout::new(&document, 40));
+        tab.reader.top_row = 3;
+        tab.reader.active = true;
+        tab.reader.wanted = true;
+        tab.reader.dirty = false;
+        tab.dirty = false;
+        tab.reading = true;
+
+        tab.detach();
+
+        assert_eq!(tab.reader.document, Some(document));
+        assert!(tab.reader.layout.is_some());
+        assert_eq!(tab.reader.top_row, 3);
+        assert!(tab.reader.active);
+        assert!(tab.reader.wanted);
+        assert!(tab.reader.dirty);
+        assert!(tab.dirty);
+        assert!(!tab.reading);
     }
 
     #[test]

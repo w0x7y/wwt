@@ -803,6 +803,7 @@ dependencies = [
  "wwt-frame",
  "wwt-page",
  "wwt-png",
+ "wwt-reader",
  "wwt-term",
  "wwt-ui",
 ]

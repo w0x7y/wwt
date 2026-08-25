@@ -431,6 +431,16 @@ impl Core {
                     })
                 }
 
+                Effect::ReadReader(id) => self.spawn(id, move |page| async move {
+                    Some(Job::Reader(
+                        id,
+                        page.reader()
+                            .await
+                            .map(Box::new)
+                            .map_err(|error| Failure::from_error(&error)),
+                    ))
+                }),
+
                 // The cheap half of a read, and the one effect with no
                 // `Source`: it is our script or it is nothing. Reported as
                 // its own job because it is the only other thing that

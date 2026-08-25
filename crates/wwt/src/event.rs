@@ -7,7 +7,7 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 use wwt_cdp::Attached;
 use wwt_frame::{CellSize, GridSize, HintTarget};
-use wwt_page::{Extraction, ScreencastFrame, Status};
+use wwt_page::{Extraction, ReaderExtraction, ScreencastFrame, Status};
 
 use crate::effect::Source;
 use crate::tab::TabId;
@@ -98,6 +98,8 @@ pub enum Job {
     /// different things and `Job::Failed` cannot tell them apart from a
     /// failed scroll.
     Extracted(TabId, Source, Result<Box<Extraction>, Failure>),
+    /// The semantic reader document came back, or could not be read.
+    Reader(TabId, Result<Box<ReaderExtraction>, Failure>),
     /// The chrome's half of a read came back, or could not. One variant
     /// carrying a `Result` for the reason `Extracted` is one: it and
     /// `Extracted` are the only two things that clear `reading`, and each
