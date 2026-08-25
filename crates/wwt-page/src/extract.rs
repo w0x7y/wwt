@@ -25,6 +25,16 @@ pub const DIRTY_BINDING: &str = "__wwt_dirty";
 struct RawExtraction {
     runs: Vec<RawRun>,
     caret: Option<RawCaret>,
+    #[serde(flatten)]
+    status: RawStatus,
+}
+
+/// The status tail shared by every page read.
+///
+/// Keeping the conversion here gives extraction, status-only reads, and
+/// reader mode one boundary from browser names to the public Rust type.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawStatus {
     title: String,
     url: String,
     #[serde(rename = "scrollY")]
@@ -35,20 +45,16 @@ struct RawExtraction {
     inner_height: f64,
 }
 
-/// The shape `bootstrap.js` returns from `window.__wwt.status()`, which is
-/// the tail of `RawExtraction` and deliberately a separate struct: the two
-/// are the same fields today by coincidence, and a run field arriving in
-/// one must not silently become required of the other.
-#[derive(Debug, Deserialize)]
-struct RawStatus {
-    title: String,
-    url: String,
-    #[serde(rename = "scrollY")]
-    scroll_y: f64,
-    #[serde(rename = "scrollHeight")]
-    scroll_height: f64,
-    #[serde(rename = "innerHeight")]
-    inner_height: f64,
+impl RawStatus {
+    pub(crate) fn into_status(self) -> Status {
+        Status {
+            title: self.title,
+            url: self.url,
+            scroll_y: self.scroll_y,
+            scroll_height: self.scroll_height,
+            viewport_height: self.inner_height,
+        }
+    }
 }
 
 /// The insertion point, as the injected script measured it.
@@ -518,13 +524,7 @@ impl Page {
             caret: raw
                 .caret
                 .map(|c| Caret { x: c.x, baseline: c.baseline, offset: c.offset }),
-            status: Status {
-                title: raw.title,
-                url: raw.url,
-                scroll_y: raw.scroll_y,
-                scroll_height: raw.scroll_height,
-                viewport_height: raw.inner_height,
-            },
+            status: raw.status.into_status(),
         })
     }
 
@@ -541,13 +541,7 @@ impl Page {
         let raw: RawStatus = serde_json::from_value(value)
             .context("the status script returned an unexpected shape")?;
 
-        Ok(Status {
-            title: raw.title,
-            url: raw.url,
-            scroll_y: raw.scroll_y,
-            scroll_height: raw.scroll_height,
-            viewport_height: raw.inner_height,
-        })
+        Ok(raw.into_status())
     }
 
     /// Run JavaScript in the page, for a test.
@@ -575,7 +569,7 @@ impl Page {
     /// It is also the one place that inspects `exceptionDetails`, so
     /// evaluating around it is how a command comes to report success for an
     /// expression that threw.
-    async fn js(&self, expression: &str) -> Result<serde_json::Value> {
+    pub(crate) async fn js(&self, expression: &str) -> Result<serde_json::Value> {
         let mut result = self
             .client
             .call_on(

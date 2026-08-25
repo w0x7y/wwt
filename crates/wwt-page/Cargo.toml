@@ -12,6 +12,7 @@ test-support = []
 [dependencies]
 wwt-cdp = { path = "../wwt-cdp" }
 wwt-frame = { path = "../wwt-frame" }
+wwt-reader = { path = "../wwt-reader" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

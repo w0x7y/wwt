@@ -250,11 +250,11 @@ Build the only browser-dependent half. The on-demand query returns semantic data
 - Consumes: task 1's semantic types, existing `Page::js` and `Status`.
 - Produces `ReaderExtraction { document, status }` and `Page::reader()`.
 
-- [ ] **Step 1: Add the dependency and module boundary**
+- [x] **Step 1: Add the dependency and module boundary**
 
 Add `wwt-reader` to `wwt-page`. Keep raw serde structs private to `reader.rs`. Make `Page::js` `pub(crate)` only if the sibling module needs it; the public general evaluator remains test-support only.
 
-- [ ] **Step 2: Write browser tests against public data**
+- [x] **Step 2: Write browser tests against public data**
 
 Using the shared harness, assert:
 
@@ -270,25 +270,25 @@ Using the shared harness, assert:
 Run: `cargo test -p wwt-page --test reader`
 Expected: FAIL, no method or fixtures.
 
-- [ ] **Step 3: Implement candidate selection in `reader.js`**
+- [x] **Step 3: Implement candidate selection in `reader.js`**
 
 Use exactly spec section 3: `article`, `main`, `[role=main]`; score text owned outside nested candidates; non-link characters plus one quarter link characters; document-order tie; body fallback. Skip the named semantic furniture and hidden subtrees. Cache computed style per visited element during the query.
 
 `reader.js` is an expression evaluated only by `Page::reader`. It is not installed on every page and adds no ordinary-path work.
 
-- [ ] **Step 4: Serialize once in document order**
+- [x] **Step 4: Serialize once in document order**
 
 Flush at block boundaries so no ancestor duplicates descendant text. Implement every mapping from spec section 4. Collapse ordinary inline whitespace across nodes, preserve pre and `br`, strip control characters, join table cells with ` | `, resolve `anchor.href`, and retain link identity through nested inline nodes.
 
 Return status fields directly rather than call `window.__wwt.status()`, so reader does not depend on the normal extraction function being healthy.
 
-- [ ] **Step 5: Deserialize and validate**
+- [x] **Step 5: Deserialize and validate**
 
 Raw types derive serde in `wwt-page` and convert through the document builder. Invalid block names, heading levels or link indices return contextual errors. Refactor the existing raw-status conversion once; do not duplicate it.
 
 No readable blocks returns an error whose visible message is `no readable content`.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 cargo test -p wwt-page --test reader

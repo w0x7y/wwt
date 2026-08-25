@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Reader fixture</title>
+</head>
+<body>
+  <header>Site masthead must disappear</header>
+  <nav>Site navigation must disappear</nav>
+  <main>
+    <p>Main introduction must not win.</p>
+    <article>
+      <header>
+        <h1>Article title</h1>
+        <p>Article byline stays.</p>
+      </header>
+      <p>Alpha <a href="destination.html">linked <em>words</em></a> omega.<br>Next line.</p>
+      <h2>Details</h2>
+      <ul>
+        <li>First item
+          <ul><li>Nested item</li></ul>
+        </li>
+      </ul>
+      <ol start="3"><li>Third item</li></ol>
+      <blockquote><p>Quoted words.</p></blockquote>
+      <pre>  let x = 1;
+    next();</pre>
+      <table>
+        <tr><th>Name</th><th>Value</th></tr>
+        <tr><td>Alpha</td><td>One</td></tr>
+      </table>
+      <p><img src="missing.png" alt="diagram"> follows the image.</p>
+      <p><a href="">Empty destination</a> and <a href="javascript:void(0)">script destination</a>.</p>
+      <p><a href="new-tab.html" target="_blank">Open separately</a>.</p>
+      <div hidden>Hidden attribute must disappear</div>
+      <div aria-hidden="true">Aria hidden must disappear</div>
+      <div style="display: none">Display none must disappear</div>
+      <div style="visibility: hidden">Visibility hidden must disappear</div>
+      <div style="opacity: 0">Transparent text must disappear</div>
+      <footer><p>Article footnote stays.</p></footer>
+    </article>
+    <p>Main conclusion must not win.</p>
+  </main>
+  <aside>Sidebar must disappear</aside>
+  <footer>Site footer must disappear</footer>
+</body>
+</html>
