@@ -167,27 +167,27 @@ Finish the pure crate before introducing Chromium.
 **Interfaces:**
 - Produces `LinkRange`, `Layout::source_at`, `Layout::top_for`, `Layout::visible_links`, and `Layout::link_at`.
 
-- [ ] **Step 1: Write structural golden tests**
+- [x] **Step 1: Write structural golden tests**
 
 One document covers every block kind. Assert heading bold/rules and spacing, list markers and continuation alignment, capped indentation, repeated quote prefixes, preformatted wrapping, and bold links with default foreground/background.
 
-- [ ] **Step 2: Write source-anchor tests**
+- [x] **Step 2: Write source-anchor tests**
 
 Build one document at two widths. Assert `source_at(old_top)` maps through `top_for` to the same source or the nearest row immediately before it, and positions past a shortened document clamp.
 
-- [ ] **Step 3: Write link-geometry tests**
+- [x] **Step 3: Write link-geometry tests**
 
 Assert a link wrapping across three rows has three ranges and one visible hint, scrolling selects its first visible range, and hit-testing accepts only `start <= col < end` inside page rows.
 
-- [ ] **Step 4: Implement presentation and generated prefixes**
+- [x] **Step 4: Implement presentation and generated prefixes**
 
 Generated list/quote prefixes consume width but do not consume source offsets. Heading rules inherit the heading's offset-zero source; blank separator rows inherit the following block's source, or the preceding one at the document end. Every row can therefore answer `source_at` without an `Option`. Keep row fragments private. Do not widen `Style`.
 
-- [ ] **Step 5: Build ranges while wrapping**
+- [x] **Step 5: Build ranges while wrapping**
 
 Do not search rendered strings afterward. Preserve document order, deduplicate hints by `LinkId`, and translate terminal rows with `origin_row` only at the public boundary.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 cargo test -p wwt-reader
