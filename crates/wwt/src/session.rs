@@ -271,6 +271,14 @@ impl Session {
         self.tabs.iter_mut().find(|tab| tab.id == id)
     }
 
+    fn tab(&self, id: TabId) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.id == id)
+    }
+
+    fn shows_pixel(&self, tab: &Tab) -> bool {
+        self.pixel && !tab.reader.active
+    }
+
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
@@ -413,7 +421,7 @@ impl Session {
         // goes with it.
         self.follow_focus(None, effects);
         effects.push(Effect::Activate(id));
-        self.start_extract(id, effects);
+        self.start_current_read(id, effects);
     }
 
     /// Look at another tab.
@@ -440,7 +448,7 @@ impl Session {
             effects.push(Effect::Activate(id));
             // Spends the dirty flag this tab has been accumulating in the
             // background, and does nothing if it has none.
-            self.start_extract(id, effects);
+            self.start_current_read(id, effects);
         }
         self.save(effects);
         self.evict(effects);
@@ -636,10 +644,14 @@ impl Session {
         if !self.pixel {
             return;
         }
-        if let Some(leaving) = leaving {
+        if let Some(leaving) = leaving
+            && self.tab(leaving).is_some_and(|tab| tab.attached() && self.shows_pixel(tab))
+        {
             effects.push(Effect::StopScreencast(leaving));
         }
-        effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
+        if self.focused().attached() && self.shows_pixel(self.focused()) {
+            effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
+        }
     }
 
     /// Stop the picture on the way to a tab that does not exist yet.
@@ -655,7 +667,7 @@ impl Session {
     /// `on_frame` acks and discards for naming a tab that is no longer in
     /// front, and the picture on screen stays the last one it sent.
     fn leave_for_a_new_tab(&mut self, effects: &mut Vec<Effect>) {
-        if !self.pixel || self.focused().reader.active {
+        if !self.shows_pixel(self.focused()) {
             return;
         }
         effects.push(Effect::StopScreencast(self.focused_id()));
@@ -849,7 +861,7 @@ impl Session {
 
         // A frame for a tab you have switched away from, or one that was in
         // flight when pixel mode was left, is answered and discarded.
-        if !self.pixel || self.focused().reader.active || self.focused_id() != id {
+        if !self.shows_pixel(self.focused()) || self.focused_id() != id {
             return;
         }
         if self.graphics {
@@ -900,7 +912,7 @@ impl Session {
             Action::Quit => {
                 // Stop before quitting, so the browser is not left painting
                 // for a terminal that has gone.
-                if self.pixel && !self.focused().reader.active {
+                if self.shows_pixel(self.focused()) {
                     effects.push(Effect::StopScreencast(self.focused_id()));
                 }
                 effects.push(Effect::Quit);
@@ -1244,6 +1256,9 @@ impl Session {
     }
 
     fn start_reader(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        if self.focused_id() != id {
+            return;
+        }
         let Some(tab) = self.tab_mut(id) else { return };
         if !tab.attached()
             || tab.reading
@@ -1429,9 +1444,26 @@ impl Session {
         if grid == self.grid && cell == self.cell {
             return;
         }
+        self.clear_hints();
         self.grid = grid;
         self.cell = cell;
         self.vp = page_viewport(grid, cell);
+
+        let page_rows = usize::from(self.vp.grid().rows);
+        for tab in &mut self.tabs {
+            let source = tab
+                .reader
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.source_at(tab.reader.top_row));
+            let Some(document) = tab.reader.document.as_ref() else {
+                continue;
+            };
+            let layout = Layout::new(document, grid.cols);
+            let top = source.map_or(0, |source| layout.top_for(source));
+            tab.reader.top_row = top.min(layout.rows().saturating_sub(page_rows));
+            tab.reader.layout = Some(layout);
+        }
         // Every tab, not just the one in front: a background tab laid out
         // for the terminal you used to have would be wrong the moment you
         // reached it, and reaching it is the one moment there is no time to
@@ -4216,6 +4248,21 @@ mod tests {
     }
 
     #[test]
+    fn p_selects_pixels_even_when_reader_was_entered_from_pixel_mode() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        cache_reader(&mut session, "reader page");
+        assert_eq!(session.on(key('r')), vec![Effect::StopScreencast(tab0())]);
+
+        assert_eq!(
+            session.on(key('p')),
+            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+        );
+        assert!(session.pixel);
+        assert!(!session.focused().reader.active);
+    }
+
+    #[test]
     fn a_frame_becomes_the_image_on_the_next_compose() {
         let mut session = ready_with_graphics();
         session.on(key('p'));
@@ -4659,6 +4706,171 @@ mod tests {
             vec![Effect::Activate(TabId(2)), Effect::Save(session.snapshot())],
             "nothing to re-read, though which tab you are on is worth keeping"
         );
+    }
+
+    #[test]
+    fn reader_state_repaints_with_its_tab_and_refreshes_only_when_focused() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        let document = Document {
+            blocks: vec![Block {
+                kind: BlockKind::Paragraph,
+                spans: vec![Span {
+                    text: "reader row ".repeat(1_000),
+                    link: Some(LinkId(0)),
+                }],
+            }],
+            links: vec![reader_link("https://reader.example", false)],
+        };
+        session.tabs[0].reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.tabs[0].reader.document = Some(document);
+        session.tabs[0].reader.top_row = 9;
+        session.tabs[0].reader.active = true;
+        session.tabs[0].reader.wanted = true;
+        session.tabs[0].reader.dirty = false;
+
+        session.on(alt('1'));
+        assert!(session.compose().row_text(1).contains("reader row"));
+        assert_eq!(session.focused().reader.top_row, 9);
+        session.on(key('f'));
+        assert!(matches!(session.mode(), Mode::Hint(_)));
+
+        let mut effects = Vec::new();
+        session.focus_tab(2, &mut effects);
+        assert_eq!(session.mode(), &Mode::Normal);
+        assert!(!session.compose().row_text(1).contains("reader row"));
+        assert_eq!(session.on(Event::Dirty(tab0())), vec![], "background reader stays idle");
+
+        let effects = session.on(alt('1'));
+        assert!(effects.contains(&Effect::ReadReader(tab0())));
+        assert_eq!(session.focused().reader.top_row, 9);
+        assert!(session.compose().row_text(1).contains("reader row"));
+    }
+
+    #[test]
+    fn pixel_screencast_follows_only_tabs_that_show_pixels() {
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+        let document = reader_extraction("reader tab").document;
+        session.tabs[0].reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.tabs[0].reader.document = Some(document);
+        session.tabs[0].reader.active = true;
+        session.tabs[0].reader.wanted = true;
+        session.tabs[0].reader.dirty = false;
+
+        let into_reader = session.on(alt('1'));
+        assert!(into_reader.contains(&Effect::StopScreencast(TabId(2))));
+        assert!(!into_reader.iter().any(|effect| matches!(effect, Effect::StartScreencast(..))));
+        assert!(session.compose().image().is_none());
+
+        let into_pixels = session.on(alt('3'));
+        assert!(!into_pixels.iter().any(|effect| matches!(effect, Effect::StopScreencast(_))));
+        assert!(into_pixels.iter().any(|effect| matches!(effect, Effect::StartScreencast(TabId(2), _))));
+    }
+
+    #[test]
+    fn detached_reader_starts_no_picture_and_refreshes_when_opened() {
+        let mut session = ready_with_graphics();
+        open_two_more(&mut session);
+        session.on(key('p'));
+        let document = reader_extraction("detached reader").document;
+        session.tabs[0].reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.tabs[0].reader.document = Some(document);
+        session.tabs[0].reader.active = true;
+        session.tabs[0].reader.wanted = true;
+        session.tabs[0].reader.dirty = false;
+        session.tabs[0].detach();
+
+        let switching = session.on(alt('1'));
+        assert!(switching.iter().any(|effect| matches!(effect, Effect::OpenTab { id, .. } if *id == tab0())));
+        assert!(!switching.iter().any(|effect| matches!(effect, Effect::StartScreencast(..))));
+        assert!(session.compose().row_text(1).contains("detached reader"));
+
+        let opened = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
+        assert!(opened.contains(&Effect::ReadReader(tab0())));
+        assert!(!opened.iter().any(|effect| matches!(effect, Effect::StartScreencast(..))));
+    }
+
+    #[test]
+    fn resize_reflows_reader_caches_by_source_for_foreground_and_background_tabs() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        let document = reader_extraction(&"source anchored words ".repeat(1_000)).document;
+        for (index, top) in [(0, 12), (2, 24)] {
+            session.tabs[index].reader.layout = Some(Layout::new(&document, GRID.cols));
+            session.tabs[index].reader.document = Some(document.clone());
+            session.tabs[index].reader.top_row = top;
+            session.tabs[index].reader.dirty = false;
+        }
+        let sources: Vec<_> = [0, 2]
+            .into_iter()
+            .map(|index| {
+                session.tabs[index]
+                    .reader
+                    .layout
+                    .as_ref()
+                    .expect("layout")
+                    .source_at(session.tabs[index].reader.top_row)
+                    .expect("source row")
+            })
+            .collect();
+        let grid = GridSize { cols: 40, rows: 24 };
+
+        session.on(Event::Resized(grid, CELL));
+
+        for (source, index) in sources.into_iter().zip([0, 2]) {
+            let layout = session.tabs[index].reader.layout.as_ref().expect("reflowed layout");
+            let expected = Layout::new(&document, grid.cols);
+            let max_top = expected.rows().saturating_sub(usize::from(page_viewport(grid, CELL).grid().rows));
+            assert_eq!(layout, &expected);
+            assert_eq!(session.tabs[index].reader.top_row, expected.top_for(source).min(max_top));
+        }
+    }
+
+    #[test]
+    fn browser_replacement_keeps_reader_frame_and_refreshes_reader_on_open() {
+        let mut session = ready();
+        enter_long_reader(&mut session);
+        session.focused_mut().reader.top_row = 6;
+        let before: Vec<_> = (1..GRID.rows - 1)
+            .map(|row| session.compose().row_text(row))
+            .collect();
+
+        session.on(Event::BrowserLost);
+        let after: Vec<_> = (1..GRID.rows - 1)
+            .map(|row| session.compose().row_text(row))
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(session.focused().reader.top_row, 6);
+        session.relaunching = false;
+        session.on(Event::BrowserBack);
+        let effects = session.on(Event::Done(Job::Opened(tab0(), Ok(()))));
+
+        assert!(effects.contains(&Effect::ReadReader(tab0())));
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::Extract(..) | Effect::ReadStatus(..))));
+        assert!(session.compose().row_text(1).contains("reader words"));
+    }
+
+    #[test]
+    fn a_background_reader_answer_changes_only_its_own_tab() {
+        let mut session = ready();
+        open_two_more(&mut session);
+        session.on(alt('1'));
+        assert_eq!(session.on(key('r')), vec![Effect::ReadReader(tab0())]);
+        session.on(alt('3'));
+
+        let effects = session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("background reader"))),
+        )));
+
+        assert_eq!(session.focused_id(), TabId(2));
+        assert_eq!(session.mode(), &Mode::Normal);
+        assert!(!session.compose().row_text(1).contains("background reader"));
+        assert!(session.tabs[0].reader.document.is_some());
+        assert!(session.tabs[0].reader.active);
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::StopScreencast(..))));
     }
 
     /// What a tab switch costs. Run with:

@@ -525,11 +525,11 @@ Close the lifecycle windows where one tab's picture, layout or late answer could
 - Modify: `crates/wwt/src/tab.rs`, `crates/wwt/src/session.rs`
 - Test: the same files
 
-- [ ] **Step 1: Write tab-switch tests**
+- [x] **Step 1: Write tab-switch tests**
 
 Build one reader tab and one normal tab. Assert switching each direction is a repaint; each reader row is retained; page extraction remains background-idle; reader hints are closed on switch; and no tab paints another's reader layout.
 
-- [ ] **Step 2: Make screencast following view-aware**
+- [x] **Step 2: Make screencast following view-aware**
 
 The current `follow_focus` assumes global pixel implies every focused tab wants a screencast. Replace that assumption with `shows_pixel(tab)`:
 
@@ -541,11 +541,11 @@ The current `follow_focus` assumes global pixel implies every focused tab wants 
 
 Keep the previous-picture rule for pixel-to-pixel switches. Reader compose must never retain the previous picture behind its cells.
 
-- [ ] **Step 3: Specify `p` completely**
+- [x] **Step 3: Specify `p` completely**
 
 In reader view, `p` leaves reader and sets global pixel on, regardless of its old value. In real-page view it keeps M5's toggle. Test entering reader from pixel, exiting with `r` back to pixel, and selecting pixel with `p` from reader entered out of text.
 
-- [ ] **Step 4: Reflow every cache on resize**
+- [x] **Step 4: Reflow every cache on resize**
 
 For each tab with document/layout:
 
@@ -555,17 +555,17 @@ For each tab with document/layout:
 
 Do this for background tabs so their next switch is a repaint. Preserve all existing `SetViewport` effects for attached real pages and all image resizing rules. Reader adds no page effect of its own.
 
-- [ ] **Step 5: Test detachment and reattachment**
+- [x] **Step 5: Test detachment and reattachment**
 
 Eviction and browser loss keep active layout, row and document; clear shared reading; mark both representations dirty. A reader tab remains locally scrollable with `browser_lost`. `BrowserBack`/`Job::Opened` refreshes reader rather than normal runs when reader is wanted/active. The frame stands throughout.
 
 Eviction still skips any tab using the shared read slot. Otherwise a background reader tab is eligible like any other tab because `max_tabs` counts targets, not cached Rust data.
 
-- [ ] **Step 6: Test late jobs across tabs and views**
+- [x] **Step 6: Test late jobs across tabs and views**
 
 Reader success for a background tab caches only there and never changes the visible view or mode. A job for a closed tab drops. A page extraction that began before `r` may fill cached runs but must hand the slot to the still-wanted reader query afterward.
 
-- [ ] **Step 7: Run the complete unit suite and commit**
+- [x] **Step 7: Run the complete unit suite and commit**
 
 ```bash
 cargo test -p wwt --lib
