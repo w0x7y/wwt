@@ -467,7 +467,7 @@ Make reader mode event-driven and define every way the document becomes stale or
 - Modify: `crates/wwt/src/tab.rs`, `crates/wwt/src/session.rs`
 - Test: `crates/wwt/src/session.rs`
 
-- [ ] **Step 1: Write dirty-refresh tests**
+- [x] **Step 1: Write dirty-refresh tests**
 
 Assert a dirty signal in active reader mode:
 
@@ -479,13 +479,13 @@ Assert a dirty signal in active reader mode:
 
 Also assert dirty signals on an inactive cached reader ask only for the ordinary representation and leave reader dirty until the next `r`.
 
-- [ ] **Step 2: Introduce one current-read dispatcher**
+- [x] **Step 2: Introduce one current-read dispatcher**
 
 Keep `start_extract` and `start_reader` as narrow helpers, but route dirty signals and completed reads through `start_current_read(id, effects)`. It chooses reader only when wanted/active; otherwise it preserves pixel/status/degraded logic exactly.
 
 Every `Job::Extracted`, `Status`, `Reader`, `Settled`, `Resized` and successful `Opened` path must end by asking the current representation, not by hard-coding normal extraction.
 
-- [ ] **Step 3: Write navigation and insert tests**
+- [x] **Step 3: Write navigation and insert tests**
 
 Assert:
 
@@ -496,17 +496,17 @@ Assert:
 - `p` leaves reader and selects pixel mode without clearing the cache;
 - a `_blank` reader link leaves the source tab's reader cache/view untouched while the new normal tab is focused.
 
-- [ ] **Step 4: Centralize invalidation**
+- [x] **Step 4: Centralize invalidation**
 
 Add a tab method for document replacement/navigation that clears reader cache, flags and top row in one place. Do not reuse `detach`: detach deliberately keeps the visible reader document.
 
 When leaving reader for insert or pixel without navigation, clear only active/wanted and keep the clean cache for instant re-entry.
 
-- [ ] **Step 5: Handle no-content and refresh failures**
+- [x] **Step 5: Handle no-content and refresh failures**
 
 First no-content/failure clears wanted and keeps real page. Refresh failure keeps active layout. Timeout sets `Stalled`; refusal sets an error message; neither sets degraded. A later dirty signal may try again, and no timer does.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 cargo test -p wwt --lib
