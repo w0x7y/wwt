@@ -37,10 +37,11 @@ Currently at **M7** (hardening). Milestones M1–M8 are defined in
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
 `chromium-browser`, `google-chrome-stable` on `PATH`). Nothing is ever downloaded.
 
-`$XDG_CONFIG_HOME/wwt/config.toml` is the user's, and has three keys:
+`$XDG_CONFIG_HOME/wwt/config.toml` is the user's, and has four keys:
 `max_tabs` (live targets, the focused one included, default 8), `search` (a URL
-with `{}` where the query goes) and `chromium` (a path, which `WWT_CHROMIUM`
-still beats, because a variable is set for one run and a file for all of them).
+with `{}` where the query goes), `chromium` (a path, which `WWT_CHROMIUM`
+still beats, because a variable is set for one run and a file for all of them),
+and `terminal` (the desktop launch command, default `["kitty", "-e"]`).
 A missing file is the normal case and says nothing; anything wrong with one is a
 statusline notice and the default, because a browser that will not start because
 of a typo is worse than one that starts and tells you.

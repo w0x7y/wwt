@@ -16,6 +16,8 @@ make -C "$project" install DESTDIR="$stage" PREFIX="$prefix" CARGO=false
 test -x "$stage$prefix/bin/wwt"
 test -f "$stage$prefix/share/applications/wwt.desktop"
 desktop-file-validate "$stage$prefix/share/applications/wwt.desktop"
+grep -Fqx 'Exec=wwt --launch %u' "$stage$prefix/share/applications/wwt.desktop"
+grep -Fqx 'Terminal=false' "$stage$prefix/share/applications/wwt.desktop"
 test "$("$stage$prefix/bin/wwt" --version)" = "$("$build_dir/release/wwt" --version)"
 
 icon_source="$stage/user-created-wwt.svg"

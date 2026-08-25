@@ -35,8 +35,8 @@ Install WWT as a system application:
 
 This installs `wwt` in `/usr/bin` and adds World Wide Terminal to the app
 launcher. The desktop entry also advertises WWT as a handler for HTTP, HTTPS,
-and HTML files. Because WWT owns the terminal screen, the launcher opens it in
-your configured terminal emulator.
+and HTML files. The launcher opens WWT in Kitty unless `config.toml` selects a
+different terminal.
 
 To install only for your account, use:
 
@@ -170,11 +170,15 @@ notice in the statusline and the defaults, never a refusal to start.
     max_tabs = 8                            # live pages, the one in front included
     search = "https://duckduckgo.com/?q={}" # where anything that is not a URL goes
     chromium = "/usr/bin/chromium"          # which browser to launch
+    terminal = ["kitty", "-e"]              # terminal used by the app launcher
 
 `max_tabs` counts pages and not tabs: the bar goes on showing all of
 them however many are loaded. `search` wants `{}` where the query goes.
 `chromium` is a path, and `WWT_CHROMIUM` still beats it, because a
-variable is set for one run and a file is written for all of them.
+variable is set for one run and a file is written for all of them. `terminal`
+is a command and its arguments. For example, use `["alacritty", "-e"]` to
+open launcher requests in Alacritty. This setting does not affect `wwt`
+commands that you run in an existing terminal.
 
 ## Layout
 

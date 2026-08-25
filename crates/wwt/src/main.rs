@@ -1,4 +1,5 @@
 use std::io::{BufWriter, Write, stdout};
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -25,6 +26,12 @@ Options:\n  \
 #[tokio::main]
 async fn main() -> Result<()> {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--launch")
+    {
+        return launch_in_terminal(&arguments[1..]);
+    }
     if arguments
         .iter()
         .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
@@ -165,6 +172,25 @@ async fn main() -> Result<()> {
     execute!(stdout(), cursor::Show, DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     result
+}
+
+/// Start the interactive process inside the terminal selected for desktop
+/// launches. Direct command-line invocations never pass through here.
+fn launch_in_terminal(arguments: &[String]) -> Result<()> {
+    let (config, _) = wwt::config::load(wwt::store::config_path().as_deref());
+    let (terminal, terminal_arguments) = config
+        .terminal
+        .split_first()
+        .context("terminal command is empty")?;
+    let executable = std::env::current_exe().context("find the wwt executable")?;
+
+    Command::new(terminal)
+        .args(terminal_arguments)
+        .arg(executable)
+        .args(arguments)
+        .spawn()
+        .with_context(|| format!("launch terminal {terminal}"))?;
+    Ok(())
 }
 
 /// `wwt`, `wwt <url-or-search>`, `wwt --new [url-or-search]`.
