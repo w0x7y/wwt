@@ -16,9 +16,31 @@ use wwt::core::{Core, Startup};
 /// Overrunning it is only an extra syscall, never a wrong frame.
 const FRAME_BUFFER: usize = 256 * 1024;
 
+const HELP: &str = "Usage: wwt [OPTIONS] [URL OR SEARCH]\n\n\
+Options:\n  \
+  --new          Start without restoring the saved session\n  \
+-h, --help     Print help\n  \
+-V, --version  Print version\n";
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (new_session, argument) = parse_args()?;
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        print!("{HELP}");
+        return Ok(());
+    }
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-V" | "--version"))
+    {
+        println!("wwt {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    let (new_session, argument) = parse_args_from(arguments)?;
 
     // Before the argument is interpreted: a word that is not a URL is a
     // search, and where a search goes is one of the three things this file
@@ -145,18 +167,33 @@ async fn main() -> Result<()> {
     result
 }
 
-/// `wwt`, `wwt <url>`, `wwt --new [url]`. Hand-rolled, because the whole
-/// surface is one flag.
-fn parse_args() -> Result<(bool, Option<String>)> {
+/// `wwt`, `wwt <url-or-search>`, `wwt --new [url-or-search]`.
+fn parse_args_from(arguments: impl IntoIterator<Item = String>) -> Result<(bool, Option<String>)> {
     let mut new_session = false;
-    let mut url = None;
-    for argument in std::env::args().skip(1) {
+    let mut target = Vec::new();
+    for argument in arguments {
         match argument.as_str() {
             "--new" => new_session = true,
             "-h" | "--help" => bail!("usage: wwt [--new] [url]"),
             other if other.starts_with('-') => bail!("unknown option: {other}"),
-            other => url = Some(other.to_string()),
+            other => target.push(other.to_string()),
         }
     }
-    Ok((new_session, url))
+    let target = (!target.is_empty()).then(|| target.join(" "));
+    Ok((new_session, target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args_from;
+
+    #[test]
+    fn unquoted_words_are_one_search_phrase() {
+        let arguments = ["rust", "terminal", "browser"].map(String::from);
+
+        assert_eq!(
+            parse_args_from(arguments).expect("parse arguments"),
+            (false, Some("rust terminal browser".to_string()))
+        );
+    }
 }
