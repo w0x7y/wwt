@@ -8,6 +8,7 @@ wwt-cdp = { path = "../wwt-cdp" }
 wwt-frame = { path = "../wwt-frame" }
 wwt-png = { path = "../wwt-png" }
 wwt-page = { path = "../wwt-page" }
+wwt-reader = { path = "../wwt-reader" }
 wwt-term = { path = "../wwt-term" }
 wwt-ui = { path = "../wwt-ui" }
 anyhow.workspace = true

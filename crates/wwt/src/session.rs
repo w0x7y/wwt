@@ -21,6 +21,7 @@ use wwt_frame::{
     Viewport,
 };
 use wwt_page::{Input, MouseInput, ScreencastFrame, Status};
+use wwt_reader::Layout;
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
@@ -691,6 +692,7 @@ impl Session {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.mark_dirty();
                 }
+                self.start_reader(id, &mut effects);
                 self.start_extract(id, &mut effects);
             }
             Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
@@ -1036,6 +1038,20 @@ impl Session {
         effects.push(Effect::Extract(id, source));
     }
 
+    fn start_reader(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        if !tab.attached()
+            || tab.reading
+            || !tab.reader.dirty
+            || !(tab.reader.wanted || tab.reader.active)
+        {
+            return;
+        }
+        tab.reading = true;
+        tab.reader.dirty = false;
+        effects.push(Effect::ReadReader(id));
+    }
+
     /// Everything the chrome learns from a page, applied the same way
     /// whichever read produced it.
     ///
@@ -1167,6 +1183,7 @@ impl Session {
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
         let id = match &job {
             Job::Extracted(id, _, _)
+            | Job::Reader(id, _)
             | Job::Status(id, _)
             | Job::Failed(id, _)
             | Job::Settled(id)
@@ -1219,20 +1236,24 @@ impl Session {
                             // page wedged in a loop cannot run its own
                             // MutationObserver, so it sends no dirty signal,
                             // and one that recovers sends one and is read.
-                            (_, Failure::TimedOut) => tab.state = State::Stalled,
+                            (_, Failure::TimedOut) => {
+                                tab.state = State::Stalled;
+                                return;
+                            }
                             // The script broke. Read it the other way, once,
                             // and go on reading it that way until it
                             // navigates.
                             (Source::Script, _) => {
                                 tab.degraded = true;
                                 tab.dirty = true;
-                                self.start_extract(id, effects);
                             }
                             // There is no third source. The frame you are
                             // looking at stands and only the statusline
                             // changes, which is section 8 of the parent.
                             (Source::Snapshot, _) => tab.state = State::Error(failure.message()),
                         }
+                        self.start_reader(id, effects);
+                        self.start_extract(id, effects);
                         return;
                     }
                 };
@@ -1246,7 +1267,52 @@ impl Session {
                 // carries, and is applied by the one place that knows how.
                 self.apply_status(id, extraction.status, effects);
                 // The page may have changed again while we were extracting.
+                self.start_reader(id, effects);
                 self.start_extract(id, effects);
+            }
+            Job::Reader(_, result) => {
+                self.tab_mut(id).expect("resolved above").reading = false;
+                let extraction = match result {
+                    Ok(extraction) => *extraction,
+                    Err(failure) => {
+                        let tab = self.tab_mut(id).expect("resolved above");
+                        tab.state = match failure {
+                            Failure::TimedOut => State::Stalled,
+                            Failure::Failed(message) => State::Error(message),
+                        };
+                        if !tab.reader.active {
+                            tab.reader.wanted = false;
+                        }
+                        if tab.reader.wanted || tab.reader.active {
+                            self.start_reader(id, effects);
+                        } else {
+                            self.start_extract(id, effects);
+                        }
+                        return;
+                    }
+                };
+
+                let document = extraction.document;
+                let layout = Layout::new(&document, self.grid.cols);
+                let max_top = layout
+                    .rows()
+                    .saturating_sub(usize::from(self.vp.grid().rows));
+                let tab = self.tab_mut(id).expect("resolved above");
+                tab.reader.top_row = tab.reader.top_row.min(max_top);
+                tab.reader.document = Some(document);
+                tab.reader.layout = Some(layout);
+                tab.reader.active = tab.reader.wanted;
+                self.apply_status(id, extraction.status, effects);
+                if self
+                    .tab_mut(id)
+                    .expect("resolved above")
+                    .reader
+                    .wanted
+                {
+                    self.start_reader(id, effects);
+                } else {
+                    self.start_extract(id, effects);
+                }
             }
             Job::Status(_, result) => {
                 let tab = self.tab_mut(id).expect("resolved above");
@@ -1268,6 +1334,7 @@ impl Session {
                     Err(_) => {
                         tab.degraded = true;
                         tab.dirty = true;
+                        self.start_reader(id, effects);
                         self.start_extract(id, effects);
                         return;
                     }
@@ -1276,6 +1343,7 @@ impl Session {
                 // `read` is what says the first switch to this tab can be a
                 // repaint. Leaving pixel mode is what fills them in.
                 self.apply_status(id, status, effects);
+                self.start_reader(id, effects);
                 self.start_extract(id, effects);
             }
             Job::Hints(_, result) => {
@@ -1418,7 +1486,8 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
-    use wwt_page::Extraction;
+    use wwt_page::{Extraction, ReaderExtraction};
+    use wwt_reader::{Block, BlockKind, Document, Layout, Span};
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
     const CELL: CellSize = CellSize { w: 9, h: 20 };
@@ -1452,6 +1521,29 @@ mod tests {
             scroll_height: 1000.0,
             viewport_height: 460.0,
         }
+    }
+
+    fn reader_extraction(text: &str) -> ReaderExtraction {
+        ReaderExtraction {
+            document: Document {
+                blocks: vec![Block {
+                    kind: BlockKind::Paragraph,
+                    spans: vec![Span {
+                        text: text.to_string(),
+                        link: None,
+                    }],
+                }],
+                links: Vec::new(),
+            },
+            status: status("https://example.com"),
+        }
+    }
+
+    fn request_reader(session: &mut Session) -> Vec<Effect> {
+        session.focused_mut().reader.wanted = true;
+        let mut effects = Vec::new();
+        session.start_reader(tab0(), &mut effects);
+        effects
     }
 
     fn key(c: char) -> Event {
@@ -1528,6 +1620,129 @@ mod tests {
             vec![],
             "an idle page must cost nothing"
         );
+    }
+
+    // Reader extraction shares the ordinary read slot and caches its answer.
+
+    #[test]
+    fn one_reader_request_uses_the_shared_read_slot() {
+        let mut session = ready();
+
+        assert_eq!(request_reader(&mut session), vec![Effect::ReadReader(tab0())]);
+        assert!(session.focused().reading);
+        assert!(!session.focused().reader.dirty);
+
+        let mut effects = Vec::new();
+        session.start_reader(tab0(), &mut effects);
+        session.focused_mut().dirty = true;
+        session.start_extract(tab0(), &mut effects);
+        assert_eq!(effects, Vec::<Effect>::new(), "a second page read would race the first");
+    }
+
+    #[test]
+    fn an_ordinary_answer_hands_the_shared_slot_to_a_pending_reader() {
+        let mut session = session();
+        assert_eq!(session.begin(), vec![Effect::Extract(tab0(), Source::Script)]);
+
+        assert_eq!(request_reader(&mut session), vec![]);
+
+        let effects = session.on(Event::Done(Job::Extracted(
+            tab0(),
+            Source::Script,
+            Ok(Box::new(extraction("https://example.com"))),
+        )));
+        assert!(effects.contains(&Effect::ReadReader(tab0())));
+        assert!(session.focused().reading);
+    }
+
+    #[test]
+    fn a_reader_answer_is_cached_and_laid_out_at_the_current_width() {
+        let mut session = ready();
+        request_reader(&mut session);
+        session.focused_mut().reader.top_row = usize::MAX;
+        let extraction = reader_extraction("reader text");
+        let expected_document = extraction.document.clone();
+        let expected_layout = Layout::new(&expected_document, GRID.cols);
+
+        let effects = session.on(Event::Done(Job::Reader(tab0(), Ok(Box::new(extraction)))));
+
+        assert_eq!(effects, Vec::<Effect>::new());
+        assert_eq!(session.focused().reader.document, Some(expected_document));
+        assert_eq!(session.focused().reader.layout, Some(expected_layout));
+        assert_eq!(session.focused().reader.top_row, 0);
+        assert!(session.focused().reader.active);
+        assert!(!session.focused().reading);
+    }
+
+    #[test]
+    fn cancelling_reader_entry_before_the_answer_only_warms_the_cache() {
+        let mut session = ready();
+        request_reader(&mut session);
+        session.focused_mut().reader.wanted = false;
+
+        session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("cached text"))),
+        )));
+
+        assert!(session.focused().reader.document.is_some());
+        assert!(session.focused().reader.layout.is_some());
+        assert!(!session.focused().reader.active);
+    }
+
+    #[test]
+    fn a_reader_refresh_timeout_keeps_the_old_active_layout() {
+        let mut session = ready();
+        let old_document = reader_extraction("old text").document;
+        let old_layout = Layout::new(&old_document, GRID.cols);
+        session.focused_mut().reader.document = Some(old_document);
+        session.focused_mut().reader.layout = Some(old_layout.clone());
+        session.focused_mut().reader.active = true;
+        session.focused_mut().reader.wanted = true;
+        request_reader(&mut session);
+
+        session.on(Event::Done(Job::Reader(tab0(), Err(Failure::TimedOut))));
+
+        assert_eq!(*session.state(), State::Stalled);
+        assert_eq!(session.focused().reader.layout, Some(old_layout));
+        assert!(session.focused().reader.active);
+        assert!(session.focused().reader.wanted);
+        assert!(!session.focused().degraded);
+        assert!(!session.focused().reading);
+    }
+
+    #[test]
+    fn a_first_reader_failure_keeps_page_view_and_does_not_degrade_the_tab() {
+        let mut session = ready();
+        request_reader(&mut session);
+
+        session.on(Event::Done(Job::Reader(
+            tab0(),
+            Err(Failure::Failed("reader failed".to_string())),
+        )));
+
+        assert_eq!(*session.state(), State::Error("reader failed".to_string()));
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert!(session.focused().reader.layout.is_none());
+        assert!(!session.focused().degraded);
+        assert!(!session.focused().reading);
+    }
+
+    #[test]
+    fn a_dirty_signal_during_a_reader_query_produces_one_follow_up() {
+        let mut session = ready();
+        assert_eq!(request_reader(&mut session), vec![Effect::ReadReader(tab0())]);
+
+        for _ in 0..3 {
+            assert_eq!(session.on(Event::Dirty(tab0())), vec![]);
+        }
+
+        let effects = session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("first answer"))),
+        )));
+        assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
     }
 
     #[test]

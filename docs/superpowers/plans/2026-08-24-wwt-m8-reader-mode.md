@@ -312,33 +312,33 @@ Add one read and one cache before adding a key. Session tests drive it directly.
 **Interfaces:**
 - Produces `Effect::ReadReader(TabId)`, `Job::Reader(TabId, Result<Box<ReaderExtraction>, Failure>)`, `ReaderState`, and `Session::start_reader`.
 
-- [ ] **Step 1: Write tab-state tests**
+- [x] **Step 1: Write tab-state tests**
 
 A new tab has no document/layout, row zero, inactive/unwanted, and dirty reader data. Detach keeps cache, row and view flags; clears shared `reading`; marks both representations dirty.
 
-- [ ] **Step 2: Implement one `ReaderState` field**
+- [x] **Step 2: Implement one `ReaderState` field**
 
 Use one struct on `Tab` with optional document/layout, `top_row`, `active`, `wanted`, `dirty`. `Default` starts empty and dirty. `mark_dirty` marks page and reader data. `detach` preserves reader content and invalidates it for reattach.
 
-- [ ] **Step 3: Widen effect and job vocabularies**
+- [x] **Step 3: Widen effect and job vocabularies**
 
 Reader has no `Source`: it is a chosen semantic view, not normal extraction's fallback. Add it to job-id resolution and every exhaustive match.
 
-- [ ] **Step 4: Let `Core` answer without deciding**
+- [x] **Step 4: Let `Core` answer without deciding**
 
 `ReadReader` spawns `page.reader()`, boxes success, maps failure through `Failure::from_error`, and always returns `Job::Reader`. The existing five-second deadline applies.
 
-- [ ] **Step 5: Write session read tests**
+- [x] **Step 5: Write session read tests**
 
 Assert one request uses the shared read slot; success caches and lays out at current width; timeout stalls without dropping an old layout; first failure keeps page view; failure never sets `degraded`; a dirty signal during the read produces one follow-up.
 
-- [ ] **Step 6: Implement start and answer rules**
+- [x] **Step 6: Implement start and answer rules**
 
 Emit only for an attached tab that is wanted/active, reader-dirty and not reading. Set `reading = true` and reader dirty false before emitting.
 
 Every answer clears reading. Success builds current-width layout, replaces cache, clamps row, applies status, and activates only if `wanted` remains true. Failure labels the tab, keeps old active layout, clears first-entry `wanted`, and leaves `degraded` untouched. Re-run once if dirty became true in flight.
 
-- [ ] **Step 7: Verify and commit**
+- [x] **Step 7: Verify and commit**
 
 ```bash
 cargo test -p wwt --lib
