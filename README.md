@@ -26,11 +26,44 @@ many tabs you left open.
 - A terminal that reports its pixel dimensions; Kitty is the development
   target
 
+## Install
+
+Install WWT as a system application:
+
+    make
+    sudo make install
+
+This installs `wwt` in `/usr/bin` and adds World Wide Terminal to the app
+launcher. The desktop entry also advertises WWT as a handler for HTTP, HTTPS,
+and HTML files. Because WWT owns the terminal screen, the launcher opens it in
+your configured terminal emulator.
+
+To install only for your account, use:
+
+    make
+    make install PREFIX="$HOME/.local"
+
+To remove a system installation, run:
+
+    sudo make uninstall
+
+To remove a per-user installation, run:
+
+    make uninstall PREFIX="$HOME/.local"
+
+The icon is yours to create. Save a scalable SVG as `assets/wwt.svg`, then run
+the install command again. The installer places it in the hicolor icon theme
+under the name `wwt`.
+
 ## Usage
 
-    cargo run -p wwt                 # the tabs you had open last time
-    cargo run -p wwt -- example.com  # those, and this one beside them
-    cargo run -p wwt -- --new        # one blank tab, keeping the old session on disk
+    wwt                       # the tabs you had open last time
+    wwt example.com           # those, and this one beside them
+    wwt rust terminal browser # search for an unquoted phrase
+    wwt --new                 # one blank tab, keeping the old session on disk
+
+To run the source tree without installing it, replace `wwt` with
+`cargo run -p wwt --` in these commands.
 
 | Key | |
 |---|---|
