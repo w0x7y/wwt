@@ -59,18 +59,19 @@ pub struct Chrome<'a> {
     pub focus: usize,
     /// Whether the page is being shown as a picture rather than as its runs.
     pub pixel: bool,
+    /// Whether the semantic reader document owns the page area.
+    pub reader: bool,
     /// Whether this tab is being read by snapshot because its script threw.
     pub degraded: bool,
 }
 
 /// Build the statusline, padded or truncated to exactly `cols` characters.
 ///
-/// Takes the whole `Chrome` rather than the six fields it reads. Two of
-/// those are adjacent bools, and a signature with two adjacent bools is one
-/// transposition away from a statusline that says the wrong thing about the
-/// wrong condition.
+/// Takes the whole `Chrome` rather than listing each field. Its view and
+/// condition flags sit beside each other, so positional bools would be one
+/// transposition away from describing the wrong condition.
 fn statusline(chrome: &Chrome, cols: u16) -> String {
-    let &Chrome { mode, state, url, title, progress, pixel, degraded, .. } = chrome;
+    let &Chrome { mode, state, url, title, progress, pixel, reader, degraded, .. } = chrome;
     let tag = match state {
         State::Ready => String::new(),
         State::Loading => "[loading] ".to_string(),
@@ -81,16 +82,22 @@ fn statusline(chrome: &Chrome, cols: u16) -> String {
 
     // Named only when it is on. Text is what wwt is, and a statusline that
     // spells out the normal case spends a row saying nothing.
-    let pixel = if pixel { "[pixel] " } else { "" };
-    // Beside [pixel] and for the same reason: a flag rather than a State,
+    let view = if reader {
+        "[reader] "
+    } else if pixel {
+        "[pixel] "
+    } else {
+        ""
+    };
+    // Beside the view tag and for the same reason: a flag rather than a State,
     // because State::Notice is cleared by the next successful extraction
     // and this condition has to outlive one.
     let degraded = if degraded { "[degraded] " } else { "" };
 
     let left = if title.is_empty() {
-        format!("{}{pixel}{degraded}{tag}{url}", mode_tag(mode))
+        format!("{}{view}{degraded}{tag}{url}", mode_tag(mode))
     } else {
-        format!("{}{pixel}{degraded}{tag}{url} — {title}", mode_tag(mode))
+        format!("{}{view}{degraded}{tag}{url} — {title}", mode_tag(mode))
     };
 
     let percent = format!("{:>3}%", (progress * 100.0).round() as i64);
@@ -98,7 +105,7 @@ fn statusline(chrome: &Chrome, cols: u16) -> String {
 
     // On a very narrow terminal the percentage is what gets dropped, not the
     // URL: knowing where you are matters more than how far down you are.
-    if cols <= percent.chars().count() + 1 {
+    if cols <= percent.chars().count() + 1 + "[reader]".chars().count() {
         return fit(&left, cols);
     }
 
@@ -285,6 +292,7 @@ mod tests {
             titles: &[],
             focus: 0,
             pixel: false,
+            reader: false,
             degraded: false,
         }
     }
@@ -299,6 +307,41 @@ mod tests {
             60,
         );
         assert!(line.contains("[degraded]"), "line was {line:?}");
+    }
+
+    #[test]
+    fn reader_is_the_leading_view_tag_and_suppresses_pixel() {
+        let line = statusline(
+            &Chrome {
+                reader: true,
+                pixel: true,
+                degraded: true,
+                ..showing(
+                    &Mode::Normal,
+                    &State::Error("refresh failed".to_string()),
+                    "https://example.com",
+                    "Example",
+                )
+            },
+            80,
+        );
+
+        assert!(line.starts_with("[reader] [degraded] [error]"), "line was {line:?}");
+        assert!(!line.contains("[pixel]"), "reader owns the visible page: {line:?}");
+    }
+
+    #[test]
+    fn a_narrow_reader_status_keeps_the_view_tag_inside_the_row() {
+        let line = statusline(
+            &Chrome {
+                reader: true,
+                ..showing(&Mode::Normal, &State::Ready, "https://example.com", "Example")
+            },
+            10,
+        );
+
+        assert_eq!(line.chars().count(), 10);
+        assert!(line.starts_with("[reader]"), "line was {line:?}");
     }
 
     #[test]
@@ -388,6 +431,7 @@ mod tests {
             titles,
             focus: 0,
             pixel: false,
+            reader: false,
             degraded: false,
         }
     }

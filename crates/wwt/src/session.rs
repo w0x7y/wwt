@@ -536,13 +536,18 @@ impl Session {
         }
         self.pixel = on;
         let id = self.focused_id();
+        let reader_active = self.focused().reader.active;
         if on {
-            effects.push(Effect::StartScreencast(id, self.frame_size()));
+            if !reader_active {
+                effects.push(Effect::StartScreencast(id, self.frame_size()));
+            }
         } else {
             // The picture goes with the mode, so the next compose carries
             // none and the renderer deletes it from the terminal.
             self.picture = None;
-            effects.push(Effect::StopScreencast(id));
+            if !reader_active {
+                effects.push(Effect::StopScreencast(id));
+            }
             // Nobody's runs were being maintained while the picture was up,
             // so every tab's are suspect, not just the one in front. A
             // background tab only takes the flag and spends it when focus
@@ -554,6 +559,48 @@ impl Session {
             for tab in &mut self.tabs {
                 tab.dirty = true;
             }
+            if !reader_active {
+                self.start_extract(id, effects);
+            }
+        }
+    }
+
+    fn set_reader(&mut self, on: bool, effects: &mut Vec<Effect>) {
+        let id = self.focused_id();
+        let was_active = self.focused().reader.active;
+        if on {
+            let clean_cache = {
+                let reader = &self.focused().reader;
+                !reader.dirty && reader.document.is_some() && reader.layout.is_some()
+            };
+            let tab = self.focused_mut();
+            tab.reader.wanted = true;
+            if clean_cache {
+                tab.reader.active = true;
+            } else {
+                tab.state = State::Notice("reading".to_string());
+            }
+        } else {
+            let tab = self.focused_mut();
+            tab.reader.wanted = false;
+            tab.reader.active = false;
+            if !was_active && matches!(tab.state, State::Notice(ref message) if message == "reading")
+            {
+                tab.state = State::Ready;
+            }
+        }
+
+        let active = self.focused().reader.active;
+        if self.pixel && was_active != active {
+            if active {
+                effects.push(Effect::StopScreencast(id));
+            } else {
+                effects.push(Effect::StartScreencast(id, self.frame_size()));
+            }
+        }
+        if on {
+            self.start_reader(id, effects);
+        } else {
             self.start_extract(id, effects);
         }
     }
@@ -625,10 +672,19 @@ impl Session {
         let mut frame = Frame::new(self.grid);
         let tab = self.focused();
 
-        // The picture is the page. Painting runs underneath would show text
-        // through every cell the image does not cover, and in pixel mode
-        // that is every cell of the page.
-        if self.pixel {
+        // Each representation owns the page area outright. Reader comes
+        // first because it is the per-tab view in front; pixel is the
+        // global preference waiting underneath it.
+        if tab.reader.active {
+            if let Some(layout) = &tab.reader.layout {
+                layout.paint(
+                    &mut frame,
+                    tab.reader.top_row,
+                    self.vp.origin_row(),
+                    self.vp.grid().rows,
+                );
+            }
+        } else if self.pixel {
             match &self.picture {
                 Some(Picture::Graphics(image)) => frame.set_image(Some(image.clone())),
                 Some(Picture::Blocks(samples)) => frame
@@ -647,6 +703,24 @@ impl Session {
         }
 
         let titles: Vec<String> = self.tabs.iter().map(|tab| tab.title.clone()).collect();
+        let progress = if tab.reader.active {
+            let max_top = tab
+                .reader
+                .layout
+                .as_ref()
+                .map_or(0, |layout| {
+                    layout
+                        .rows()
+                        .saturating_sub(usize::from(self.vp.grid().rows))
+                });
+            if max_top == 0 {
+                0.0
+            } else {
+                tab.reader.top_row as f64 / max_top as f64
+            }
+        } else {
+            tab.progress
+        };
         chrome::paint(
             &mut frame,
             &Chrome {
@@ -654,10 +728,11 @@ impl Session {
                 state: &tab.state,
                 url: &tab.url,
                 title: &tab.title,
-                progress: tab.progress,
+                progress,
                 titles: &titles,
                 focus: self.focus,
                 pixel: self.pixel,
+                reader: tab.reader.active,
                 degraded: tab.degraded,
             },
         );
@@ -755,7 +830,7 @@ impl Session {
 
         // A frame for a tab you have switched away from, or one that was in
         // flight when pixel mode was left, is answered and discarded.
-        if !self.pixel || self.focused_id() != id {
+        if !self.pixel || self.focused().reader.active || self.focused_id() != id {
             return;
         }
         if self.graphics {
@@ -806,12 +881,16 @@ impl Session {
             Action::Quit => {
                 // Stop before quitting, so the browser is not left painting
                 // for a terminal that has gone.
-                if self.pixel {
+                if self.pixel && !self.focused().reader.active {
                     effects.push(Effect::StopScreencast(self.focused_id()));
                 }
                 effects.push(Effect::Quit);
             }
             Action::TogglePixel => self.set_pixel(!self.pixel, effects),
+            Action::ToggleReader => {
+                let on = !(self.focused().reader.wanted || self.focused().reader.active);
+                self.set_reader(on, effects);
+            }
             Action::EnterCommand(prefill) => self.mode = Mode::Command(prefill),
             Action::Insert => self.mode = Mode::Insert,
             Action::Hints => match self.focused().hints.clone() {
@@ -1292,6 +1371,11 @@ impl Session {
                     }
                 };
 
+                let was_active = self
+                    .tab_mut(id)
+                    .expect("resolved above")
+                    .reader
+                    .active;
                 let document = extraction.document;
                 let layout = Layout::new(&document, self.grid.cols);
                 let max_top = layout
@@ -1302,7 +1386,11 @@ impl Session {
                 tab.reader.document = Some(document);
                 tab.reader.layout = Some(layout);
                 tab.reader.active = tab.reader.wanted;
+                let became_active = !was_active && tab.reader.active;
                 self.apply_status(id, extraction.status, effects);
+                if became_active && self.pixel && self.focused_id() == id {
+                    effects.push(Effect::StopScreencast(id));
+                }
                 if self
                     .tab_mut(id)
                     .expect("resolved above")
@@ -1546,6 +1634,13 @@ mod tests {
         effects
     }
 
+    fn cache_reader(session: &mut Session, text: &str) {
+        let document = reader_extraction(text).document;
+        session.focused_mut().reader.layout = Some(Layout::new(&document, GRID.cols));
+        session.focused_mut().reader.document = Some(document);
+        session.focused_mut().reader.dirty = false;
+    }
+
     fn key(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
     }
@@ -1743,6 +1838,97 @@ mod tests {
             Ok(Box::new(reader_extraction("first answer"))),
         )));
         assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
+    }
+
+    #[test]
+    fn first_reader_entry_keeps_the_live_page_while_the_query_is_away() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("live page")];
+
+        let effects = session.on(key('r'));
+
+        assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
+        assert!(session.focused().reader.wanted);
+        assert!(!session.focused().reader.active);
+        assert!(session.compose().row_text(1).contains("live page"));
+        assert_eq!(*session.state(), State::Notice("reading".to_string()));
+    }
+
+    #[test]
+    fn a_clean_reader_cache_enters_without_a_page_effect() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("live page")];
+        cache_reader(&mut session, "reader page");
+
+        assert_eq!(session.on(key('r')), vec![]);
+
+        assert!(session.focused().reader.active);
+        assert!(session.focused().reader.wanted);
+        assert!(session.compose().row_text(1).contains("reader page"));
+        assert!(!session.compose().row_text(1).contains("live page"));
+    }
+
+    #[test]
+    fn a_second_r_cancels_pending_entry_and_a_late_answer_only_warms_the_cache() {
+        let mut session = ready();
+        assert_eq!(session.on(key('r')), vec![Effect::ReadReader(tab0())]);
+
+        assert_eq!(session.on(key('r')), vec![]);
+        assert!(!session.focused().reader.wanted);
+        assert!(!session.focused().reader.active);
+
+        session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("late reader"))),
+        )));
+        assert!(session.focused().reader.document.is_some());
+        assert!(session.focused().reader.layout.is_some());
+        assert!(!session.focused().reader.active);
+    }
+
+    #[test]
+    fn leaving_reader_repaints_live_runs_without_moving_the_page() {
+        let mut session = ready();
+        session.focused_mut().runs = vec![run("live page")];
+        session.focused_mut().scroll_y = 360.0;
+        cache_reader(&mut session, "reader page");
+        session.on(key('r'));
+        session.focused_mut().dirty = true;
+
+        let effects = session.on(key('r'));
+
+        assert_eq!(effects, vec![Effect::Extract(tab0(), Source::Script)]);
+        assert!(!session.focused().reader.active);
+        assert!(!session.focused().reader.wanted);
+        assert_eq!(session.focused().scroll_y, 360.0);
+        assert!(session.compose().row_text(1).contains("live page"));
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::Scroll(..) | Effect::Save(_))));
+    }
+
+    #[test]
+    fn the_statusline_uses_reader_progress_only_while_reader_is_active() {
+        let mut session = ready();
+        cache_reader(&mut session, &"reader words ".repeat(500));
+        session.focused_mut().progress = 0.75;
+        session.focused_mut().reader.active = true;
+        session.focused_mut().reader.wanted = true;
+        let max_top = session
+            .focused()
+            .reader
+            .layout
+            .as_ref()
+            .expect("cached layout")
+            .rows()
+            .saturating_sub(usize::from(session.vp.grid().rows));
+        session.focused_mut().reader.top_row = max_top / 2;
+
+        let reader_line = session.compose().row_text(GRID.rows - 1);
+        let reader_percent = ((max_top / 2) as f64 / max_top as f64 * 100.0).round() as i64;
+        assert!(reader_line.ends_with(&format!(" {reader_percent:>3}%")));
+
+        session.focused_mut().reader.active = false;
+        let page_line = session.compose().row_text(GRID.rows - 1);
+        assert!(page_line.ends_with(" 75%"));
     }
 
     #[test]
@@ -3354,6 +3540,56 @@ mod tests {
             effects.contains(&Effect::Extract(tab0(), Source::Script)),
             "and the runs come back, because nobody was keeping them: {effects:?}"
         );
+    }
+
+    #[test]
+    fn asking_for_reader_keeps_the_picture_until_the_document_arrives() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+
+        let effects = session.on(key('r'));
+
+        assert_eq!(effects, vec![Effect::ReadReader(tab0())]);
+        assert!(session.compose().image().is_some());
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::StopScreencast(_))));
+
+        let effects = session.on(Event::Done(Job::Reader(
+            tab0(),
+            Ok(Box::new(reader_extraction("reader page"))),
+        )));
+        assert!(effects.contains(&Effect::StopScreencast(tab0())));
+        assert!(session.focused().reader.active);
+        assert!(session.compose().image().is_none());
+        assert!(session.compose().row_text(1).contains("reader page"));
+    }
+
+    #[test]
+    fn cached_reader_entry_stops_pixels_and_exit_starts_them_again() {
+        let mut session = ready_with_graphics();
+        session.on(key('p'));
+        session.on(frame_data("AAAA"));
+        cache_reader(&mut session, "reader page");
+
+        let entering = session.on(key('r'));
+        assert_eq!(entering, vec![Effect::StopScreencast(tab0())]);
+        assert!(session.compose().image().is_none());
+        assert!(session.compose().row_text(1).contains("reader page"));
+
+        let leaving = session.on(key('r'));
+        assert!(matches!(leaving.as_slice(), [Effect::StartScreencast(..)]));
+        assert!(!session.focused().reader.active);
+    }
+
+    #[test]
+    fn changing_the_hidden_pixel_preference_starts_no_screencast_in_reader() {
+        let mut session = ready_with_graphics();
+        cache_reader(&mut session, "reader page");
+        session.on(key('r'));
+
+        assert_eq!(session.on(key('p')), vec![]);
+        assert!(session.pixel);
+        assert_eq!(session.on(key('q')), vec![Effect::Quit]);
     }
 
     #[test]
