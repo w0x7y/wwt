@@ -1605,6 +1605,7 @@ impl Session {
                         };
                         if !tab.reader.active {
                             tab.reader.wanted = false;
+                            tab.reader.dirty = true;
                         }
                         self.start_current_read(id, effects);
                         return;
@@ -2099,6 +2100,27 @@ mod tests {
         assert!(session.focused().reader.layout.is_none());
         assert!(!session.focused().degraded);
         assert!(!session.focused().reading);
+    }
+
+    #[test]
+    fn a_failed_first_reader_request_can_be_retried_with_r() {
+        let mut session = ready();
+        assert_eq!(request_reader(&mut session), vec![Effect::ReadReader(tab0())]);
+        session.on(Event::Done(Job::Reader(
+            tab0(),
+            Err(Failure::Failed("reader failed".to_string())),
+        )));
+
+        assert_eq!(session.on(key('r')), vec![Effect::ReadReader(tab0())]);
+    }
+
+    #[test]
+    fn a_timed_out_first_reader_request_can_be_retried_with_r() {
+        let mut session = ready();
+        assert_eq!(request_reader(&mut session), vec![Effect::ReadReader(tab0())]);
+        session.on(Event::Done(Job::Reader(tab0(), Err(Failure::TimedOut))));
+
+        assert_eq!(session.on(key('r')), vec![Effect::ReadReader(tab0())]);
     }
 
     #[test]
