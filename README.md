@@ -4,17 +4,19 @@ World Wide Terminal: a web browser in Rust. It drives a real headless
 Chromium over the Chrome DevTools Protocol and renders pages into the
 terminal grid: crisp text by default, true pixels on demand.
 
-**Status: M7, hardening.** It renders a page, scrolls it, follows
+**Status: M8, reader mode.** It renders a page, scrolls it, follows
 history, opens other URLs, reaches every link from the keyboard, types
 into forms, and clicks with the mouse. It keeps many pages open at once
 under one Chromium, follows the links that want a new tab, and comes
 back to the same tabs, still logged in, tomorrow. And on a keypress it
 shows you the page as it really looks, pixels and all, with the
-keyboard still yours. When a piece of it does not work — a page that
+keyboard still yours. Reader mode selects the page's main readable content,
+reflows it to the terminal width, and leaves the live page standing exactly
+where it was. When a piece of it does not work — a page that
 breaks wwt's own script, a page wedged in a loop, a terminal that cannot
 show a picture, a Chromium that died — it keeps going with a worse
 version rather than stopping, and starting it costs one page however
-many tabs you left open. Reader mode is M8.
+many tabs you left open.
 
 ## Requirements
 
@@ -46,6 +48,7 @@ many tabs you left open. Reader mode is M8.
 | `i` | hand the keyboard to the page |
 | `f` | label every link and button; type a label to click it |
 | `p` | show the page as it really looks |
+| `r` | reflow the main readable content; press again to return |
 | `Esc` | take the keyboard back |
 | `Ctrl-]` | send the page a literal Escape |
 | `q` | quit |
@@ -57,6 +60,13 @@ Kitty graphics protocol, which wwt asks about once at startup, it is a
 picture; on one that does not it is half-block colour, which is the same
 page at half the vertical resolution rather than a refusal. `:set pixel
 on` and `:set pixel off` do the same from the command line.
+
+`r` selects the dominant `article` or `main` content, removes site
+furniture, and reflows headings, paragraphs, lists, quotes and code to the
+terminal width. Reader scrolling is separate from the page underneath, so
+a second `r` returns to the original page position. Press `f` to follow a
+visible reader link. Press `i` when you need the live page and its controls;
+it leaves reader mode and hands the keyboard to that page.
 
 A page that breaks wwt's injected script is not lost: that tab says
 `[degraded]` and is read through Chromium's own DOM snapshot instead.
@@ -138,6 +148,7 @@ variable is set for one run and a file is written for all of them.
 | Crate | Responsibility |
 |---|---|
 | `wwt-frame` | Coordinate model and the cell grid. No I/O. |
+| `wwt-reader` | Semantic documents and pure terminal-width reflow. |
 | `wwt-png` | Base64 and PNG, decoded here so nothing is depended on. |
 | `wwt-cdp` | Chromium launcher and CDP client. |
 | `wwt-page` | Text-run extraction from a live page. |
@@ -148,6 +159,8 @@ variable is set for one run and a file is written for all of them.
 ## Documentation
 
 - Design: `docs/superpowers/specs/2026-08-19-wwt-design.md`
+- M8 design: `docs/superpowers/specs/2026-08-24-wwt-m8-design.md`
+- M8 plan: `docs/superpowers/plans/2026-08-24-wwt-m8-reader-mode.md`
 - M7 design: `docs/superpowers/specs/2026-08-23-wwt-m7-design.md`
 - M7 plan: `docs/superpowers/plans/2026-08-23-wwt-m7-hardening.md`
 - M6 design: `docs/superpowers/specs/2026-08-23-wwt-m6-design.md`

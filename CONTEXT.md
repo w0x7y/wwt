@@ -18,6 +18,13 @@ text goes, and a run is one answer. `wwt_frame::TextRun`.
 the caret, plus a **status**. Deliberately one round trip, because it happens
 on every scroll frame. `wwt_page::Extraction`.
 
+**Reader document** — the page's selected readable meaning: semantic blocks,
+spans and link destinations, with no CSS geometry. `wwt_reader::Document`.
+
+**Reader layout** — one reader document reflowed for a terminal width: styled
+rows, source anchors and link ranges. Source anchors keep the same sentence
+near the top across a resize. `wwt_reader::Layout`.
+
 **Status** — the half of a read that the chrome needs and the renderer does
 not: the title, the URL and the scroll geometry, and `scroll_progress` with
 them because that was always a fact about the geometry. `Page::status()`
@@ -62,8 +69,8 @@ as an **origin row** rather than as a `+1` wherever a cell is painted, so
 
 **Frame** — a full grid of cells, plus where the terminal's cursor belongs
 and, in pixel mode, the **image** behind them. The single output type every
-rendering mode produces, so text mode and pixel mode, and later reader mode,
-cannot diverge in how they reach the screen. `wwt_frame::Frame`.
+view produces, so text, pixel and reader cannot diverge in how they reach
+the screen. `wwt_frame::Frame`.
 
 **Image** — a picture of the page on its way to the terminal: base64 PNG,
 which is how CDP sends it and how the graphics protocol wants it, so nothing
@@ -90,12 +97,19 @@ blank the frame.
 ## What the browser is doing
 
 **Mode** — what keys mean right now: normal, insert, hint, or the `:` line.
+Changes only in response to a keystroke; a page cannot move you between
+modes, which is what makes handing it the keyboard safe. `wwt_ui::Mode`.
 
 **Pixel mode** — the page shown as a picture of itself rather than
 reconstructed from its runs, entered with `p`. Global rather than per-tab,
 and only the focused tab screencasts. The viewport, the scroll offset and
 the focus are the same in both modes, which is what makes the toggle
 instant.
+
+**Reader view** — one tab showing its reader layout rather than the live page.
+Its scroll position is local, its document is cached in memory, and the page
+underneath never moves. It follows the tab through switches and browser
+replacement but is not written to the snapshot.
 
 **Screencast frame** — one picture of a page as CDP sends it. Not to be
 confused with a `Frame`, which is the grid of cells; this one is a
@@ -104,8 +118,6 @@ it must be answered with: CDP calls it `sessionId` and it is not a CDP
 session id, it counts screencasts on one target. Chromium sends the next
 picture only once the last is acked, which is what makes the ack the place
 to set the frame rate.
-Changes only in response to a keystroke; a page cannot move you between
-modes, which is what makes handing it the keyboard safe. `wwt_ui::Mode`.
 
 **Tab** — one page, and everything true of it rather than of the browser: its
 URL, title, runs, caret, scroll offset, and what we have asked it for.

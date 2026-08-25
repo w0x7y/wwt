@@ -1,7 +1,7 @@
 # wwt — Design
 
 **Date:** 2026-08-19
-**Status:** Approved, pre-implementation
+**Status:** Implemented through M8
 
 ## 1. What this is
 
@@ -135,8 +135,9 @@ A Cargo workspace, split so the difficult logic is pure and testable.
 | Crate | Purpose | Depends on |
 |---|---|---|
 | `wwt-frame` | The `Frame` type and all coordinate math: cell grid, styled cells, interactive-box list, compositing, elision, hit-testing. **Zero I/O.** | none |
+| `wwt-reader` | Semantic reader documents and pure terminal-width reflow: rows, source anchors, link ranges, and painting. **Zero I/O.** | `wwt-frame` |
 | `wwt-cdp` | CDP transport: websocket, request/response correlation, typed commands, event subscription, target lifecycle | tokio, tungstenite |
-| `wwt-page` | One tab: owns the injected script, extracts into a `Frame`, dispatches input to the page | `wwt-cdp`, `wwt-frame` |
+| `wwt-page` | One tab: owns the injected scripts, extracts page geometry or a semantic reader document, dispatches input to the page | `wwt-cdp`, `wwt-frame`, `wwt-reader` |
 | `wwt-term` | Terminal I/O: cell-size probe, grid diffing and flush, Kitty graphics protocol, key/mouse decoding | crossterm |
 | `wwt-ui` | Chrome: tab bar, statusline, command palette, hint overlay, modal state machine | `wwt-frame`, `wwt-term` |
 | `wwt` | Binary: session and tab management, config, keymap, wiring | all |
@@ -273,10 +274,18 @@ its text to terminal width as a linear document. It is for pages whose real layo
 hostile to a cell grid — dense multi-column marketing pages, or body text set below
 the legibility threshold in section 3.
 
-Reader mode deliberately breaks the shared coordinate space: its geometry is our own,
-so hints within it address reflowed positions, and switching back to text mode restores
-the page's true layout at the scroll position we entered from. It is a distinct view,
-not a third mode of the same view, and the statusline says so.
+Reader mode deliberately breaks the shared coordinate space: its geometry is our own.
+Its hints are direct terminal cell positions handed to the existing hint UI, and its
+links are URL destinations rather than synthetic clicks into page geometry. Scroll
+keys and the wheel move a local reader row without moving Chromium underneath. A
+second `r` therefore returns to the real page at the exact scroll offset it held
+throughout.
+
+Reader is a per-tab view, not a fifth input `Mode`. Normal, insert, hint and command
+still answer what the keyboard means. Reader answers which document normal mode is
+looking at. If the global pixel preference is on, leaving reader shows that unchanged
+real page as pixels. The statusline says `[reader]` only while the semantic document
+owns the page area.
 
 Mode changes only in response to a keystroke. A page that autofocuses its search box
 does not take the keyboard, and a mouse click does not either: `i` hands it over and
@@ -317,6 +326,11 @@ something slightly narrower, since a lazily restored tab has not opened yet.
 Session state, meaning open URLs, titles and scroll positions, is serialized to disk on
 change so a crash restores. The instance holding the profile owns that file; a second
 instance, which cannot have the profile, runs on a temporary one and writes nothing.
+
+Reader documents, layouts, local positions and the selected per-tab view live only in
+memory. They survive tab switches, target eviction and a Chromium relaunch within one
+run. They are deliberately absent from `session.json`: a cold start restores the URL
+and real page offset, then begins in the real-page view.
 
 ## 8. Failure modes
 
@@ -452,11 +466,10 @@ session recovery after a crash, and the background-tab eviction and lazy restore
 deferred from M4. Operational robustness, sharing nothing with M6 but the fact that
 both are about a browser that does not fall over.
 
-**M8 — Reader mode.** The reflow renderer and reader mode on top of it. Last because
-it is the one remaining piece that is a nicety rather than a foundation: section 8's
-answer took its second consumer away, and nothing else blocks it. Robustness comes
-first, since daily use begins at M4 and every milestone since has added something a
-crash now loses.
+**M8 — Reader mode.** Delivered by the semantic extraction, pure reflow renderer,
+reader link handling and per-tab view described in the M8 design. It remains last
+because it is a nicety rather than a foundation: section 8's answer took its second
+consumer away, and robustness had to come first.
 
 Daily use realistically begins at M4. M1 through M3 are the foundation and should not
 be rushed to reach it.
