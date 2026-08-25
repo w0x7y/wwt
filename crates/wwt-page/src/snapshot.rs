@@ -424,7 +424,7 @@ fn field_runs(snapshot: &Snapshot, document: &Document, viewport_height: f64) ->
                 .attributes
                 .get(node_index)
                 .into_iter()
-                .flat_map(|pairs| pairs.chunks_exact(2))
+                .flat_map(|pairs| pairs.as_chunks::<2>().0)
                 .find(|pair| snapshot.string(pair[0]) == wanted)
                 .map(|pair| snapshot.string(pair[1]).to_string())
         };
