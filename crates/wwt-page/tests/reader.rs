@@ -243,3 +243,46 @@ fn a_page_without_readable_blocks_reports_a_stable_error() {
         assert_eq!(error.to_string(), "no readable content");
     });
 }
+
+/// Not an assertion about a deadline -- a steady-state measurement of the
+/// browser query, serialization, and Rust conversion together. Run with:
+///
+///     cargo test -p wwt-page --test reader measure_reader_extract --release -- --nocapture
+#[test]
+fn measure_reader_extract() {
+    let h = harness();
+    runtime().block_on(async {
+        let page = open(&h, "heavy.html").await;
+
+        // The first evaluation pays setup costs that subsequent reads do not.
+        page.reader().await.expect("warm the reader query");
+
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let extraction = page.reader().await.expect("read the document");
+            samples.push(start.elapsed());
+
+            assert!(!extraction.document.blocks.is_empty());
+            assert!(
+                extraction
+                    .document
+                    .blocks
+                    .iter()
+                    .flat_map(|block| &block.spans)
+                    .filter_map(|span| span.link)
+                    .all(|link| link.0 < extraction.document.links.len()),
+                "every span link names a destination in the document"
+            );
+        }
+
+        samples.sort_unstable();
+        println!(
+            "heavy.html reader extraction: median {:?}, range {:?}..={:?} across {} steady-state reads",
+            samples[samples.len() / 2],
+            samples[0],
+            samples[samples.len() - 1],
+            samples.len()
+        );
+    });
+}

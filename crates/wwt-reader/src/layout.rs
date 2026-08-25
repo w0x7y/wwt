@@ -719,6 +719,45 @@ mod tests {
         );
     }
 
+    /// Not a wall-clock budget -- a release-build measurement of the pure
+    /// reflow path at widths that exercise different wrapping shapes. Run
+    /// with:
+    ///
+    ///     cargo test -p wwt-reader measure_reader_layout --release -- --nocapture
+    #[test]
+    fn measure_reader_layout() {
+        let paragraph = "The quick brown fox jumps over a lazy dog while nobody watches the terminal reflow this semantic document.";
+        let document = document(
+            (0..3_000)
+                .map(|_| block(BlockKind::Paragraph, paragraph))
+                .collect(),
+        );
+
+        for cols in [40, 120] {
+            let start = std::time::Instant::now();
+            let layout = Layout::new(&document, cols);
+            let elapsed = start.elapsed();
+
+            assert!(
+                layout.rows() >= 3_000,
+                "the fixture must span thousands of rows"
+            );
+            for row in [0, layout.rows() / 2, layout.rows() - 1] {
+                let source = layout
+                    .source_at(row)
+                    .expect("every row has a source anchor");
+                let anchored = layout.top_for(source);
+                assert!(anchored < layout.rows());
+                assert!(layout.source_at(anchored).is_some_and(|at| at <= source));
+            }
+            println!(
+                "reader layout: {} blocks into {} rows at {cols} columns in {elapsed:?}",
+                document.blocks.len(),
+                layout.rows()
+            );
+        }
+    }
+
     #[test]
     fn link_hit_testing_accepts_only_the_visible_half_open_ranges() {
         let document = Document {
