@@ -466,7 +466,7 @@ session recovery after a crash, and the background-tab eviction and lazy restore
 deferred from M4. Operational robustness, sharing nothing with M6 but the fact that
 both are about a browser that does not fall over.
 
-**M8 — Reader mode.** Delivered by the semantic extraction, pure reflow renderer,
+**M8: Reader mode.** Delivered by the semantic extraction, pure reflow renderer,
 reader link handling and per-tab view described in the M8 design. It remains last
 because it is a nicety rather than a foundation: section 8's answer took its second
 consumer away, and robustness had to come first.

@@ -12,7 +12,7 @@ back to the same tabs, still logged in, tomorrow. And on a keypress it
 shows you the page as it really looks, pixels and all, with the
 keyboard still yours. Reader mode selects the page's main readable content,
 reflows it to the terminal width, and leaves the live page standing exactly
-where it was. When a piece of it does not work — a page that
+where it was. When a piece of it does not work, such as a page that
 breaks wwt's own script, a page wedged in a loop, a terminal that cannot
 show a picture, a Chromium that died — it keeps going with a worse
 version rather than stopping, and starting it costs one page however

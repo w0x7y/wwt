@@ -36,6 +36,12 @@ struct SourceChar {
     offset: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OrdinaryLine<'a> {
+    chars: &'a [SourceChar],
+    source_offset: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     rows: Vec<Row>,
@@ -239,14 +245,22 @@ impl Layout {
         let prefix_width = first_prefix.chars().count();
         let content_width = width.saturating_sub(prefix_width).max(1);
         let lines = ordinary_lines(chars, content_width);
-        let lengths = lines.iter().map(|line| line.len()).collect();
+        let lengths = lines.iter().map(|line| line.chars.len()).collect();
         for (index, line) in lines.into_iter().enumerate() {
             let prefix = if index == 0 {
                 first_prefix
             } else {
                 continuation_prefix
             };
-            self.push_content(prefix, line, SourcePos { block, offset: 0 }, bold);
+            self.push_content(
+                prefix,
+                line.chars,
+                SourcePos {
+                    block,
+                    offset: line.source_offset,
+                },
+                bold,
+            );
         }
         lengths
     }
@@ -390,19 +404,33 @@ fn source_chars(block: &Block) -> Vec<SourceChar> {
     chars
 }
 
-fn ordinary_lines(chars: &[SourceChar], width: usize) -> Vec<&[SourceChar]> {
+fn ordinary_lines(chars: &[SourceChar], width: usize) -> Vec<OrdinaryLine<'_>> {
     let mut lines = Vec::new();
     let mut start = 0;
     while start < chars.len() {
-        while start < chars.len() && chars[start].ch.is_whitespace() {
+        while start < chars.len() && chars[start].ch.is_whitespace() && chars[start].ch != '\n' {
             start += 1;
         }
         if start == chars.len() {
             break;
         }
-        let remaining = chars.len() - start;
+
+        if chars[start].ch == '\n' {
+            lines.push(OrdinaryLine {
+                chars: &chars[start..start],
+                source_offset: chars[start].offset,
+            });
+            start += 1;
+            continue;
+        }
+
+        let hard_end = chars[start..]
+            .iter()
+            .position(|ch| ch.ch == '\n')
+            .map_or(chars.len(), |offset| start + offset);
+        let remaining = hard_end - start;
         let end = if remaining <= width {
-            chars.len()
+            hard_end
         } else {
             let limit = start + width;
             (start + 1..=limit)
@@ -410,8 +438,14 @@ fn ordinary_lines(chars: &[SourceChar], width: usize) -> Vec<&[SourceChar]> {
                 .find(|&index| chars[index].ch.is_whitespace())
                 .unwrap_or(limit)
         };
-        lines.push(&chars[start..end]);
+        lines.push(OrdinaryLine {
+            chars: &chars[start..end],
+            source_offset: chars[start].offset,
+        });
         start = end;
+        if start == hard_end && hard_end < chars.len() {
+            start += 1;
+        }
     }
     lines
 }
@@ -454,6 +488,40 @@ mod tests {
         let layout = Layout::new(&document, 10);
 
         assert_eq!(texts(&layout), vec!["alpha beta", "gamma", ""]);
+    }
+
+    #[test]
+    fn a_paragraph_hard_break_starts_a_new_terminal_row() {
+        let document = document(vec![block(BlockKind::Paragraph, "before\n after")]);
+
+        let layout = Layout::new(&document, 20);
+
+        assert_eq!(texts(&layout), vec!["before", "after", ""]);
+        assert_eq!(
+            layout.rows[1].source,
+            SourcePos {
+                block: 0,
+                offset: 8
+            }
+        );
+    }
+
+    #[test]
+    fn ordinary_text_never_paints_a_control_character_into_a_cell() {
+        let document = document(vec![block(BlockKind::Paragraph, "before\n after")]);
+        let layout = Layout::new(&document, 20);
+        let mut frame = Frame::new(GridSize { cols: 20, rows: 3 });
+
+        layout.paint(&mut frame, 0, 0, 3);
+
+        assert_eq!(frame.row_text(0), "before");
+        assert_eq!(frame.row_text(1), "after");
+        for row in 0..3 {
+            for col in 0..20 {
+                let ch = frame.cell(CellPos { col, row }).expect("cell inside frame").ch;
+                assert!(!ch.is_control(), "control character at ({col}, {row}): {ch:?}");
+            }
+        }
     }
 
     #[test]

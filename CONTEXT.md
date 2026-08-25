@@ -18,10 +18,10 @@ text goes, and a run is one answer. `wwt_frame::TextRun`.
 the caret, plus a **status**. Deliberately one round trip, because it happens
 on every scroll frame. `wwt_page::Extraction`.
 
-**Reader document** — the page's selected readable meaning: semantic blocks,
+**Reader document:** the page's selected readable meaning: semantic blocks,
 spans and link destinations, with no CSS geometry. `wwt_reader::Document`.
 
-**Reader layout** — one reader document reflowed for a terminal width: styled
+**Reader layout:** one reader document reflowed for a terminal width: styled
 rows, source anchors and link ranges. Source anchors keep the same sentence
 near the top across a resize. `wwt_reader::Layout`.
 
@@ -106,7 +106,7 @@ and only the focused tab screencasts. The viewport, the scroll offset and
 the focus are the same in both modes, which is what makes the toggle
 instant.
 
-**Reader view** — one tab showing its reader layout rather than the live page.
+**Reader view:** one tab showing its reader layout rather than the live page.
 Its scroll position is local, its document is cached in memory, and the page
 underneath never moves. It follows the tab through switches and browser
 replacement but is not written to the snapshot.
