@@ -222,4 +222,11 @@ mod tests {
             (false, Some("rust terminal browser".to_string()))
         );
     }
+
+    #[test]
+    fn login_is_not_a_command_line_option() {
+        let error = parse_args_from(["--login".to_string()])
+            .expect_err("login belongs to WWT's command line");
+        assert_eq!(error.to_string(), "unknown option: --login");
+    }
 }

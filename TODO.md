@@ -42,6 +42,10 @@
   - `:downloads` to show active and completed downloads.
   - `:view-source` to open the current page source.
 - [ ] Add command history, completion, and suggestions.
+- [ ] Improve `:login`:
+  - Use a minimal Chromium window, possibly with app mode.
+  - Detect login completion automatically where reliable.
+  - Add `:login finish` to close the login browser and return to WWT.
 
 ### Browsing
 

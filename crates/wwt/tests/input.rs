@@ -54,12 +54,13 @@ async fn a_burst_of_keys_arrives_in_the_order_it_was_typed() {
     page.eval("document.querySelector('#name').focus()").await.expect("focus");
 
     let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel::<Job>();
-    let pump = InputPump::spawn(jobs_tx);
+    let pump = InputPump::spawn(jobs_tx, |_, job| job);
 
     let typed = "the quick brown fox";
     for c in typed.chars() {
         // No await between sends: the pump is what keeps these in order.
         pump.send(
+            0,
             TabId(0),
             Arc::clone(&page),
             Input::Key(if c == ' ' { space() } else { letter(c) }),

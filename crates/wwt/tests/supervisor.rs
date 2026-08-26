@@ -1,7 +1,59 @@
 //! The half of the restart path that needs a real browser. The rules it
 //! serves are unit tests in `session.rs`, which need none.
 
-use wwt_cdp::Chromium;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+
+use wwt_cdp::{Chromium, find_chromium};
+
+#[tokio::test]
+async fn login_stops_headless_chromium_before_the_visible_process_takes_the_profile() {
+    let profile = tempfile::tempdir().expect("a profile");
+    let fixture = tempfile::tempdir().expect("a fixture directory");
+    let real = find_chromium(None).expect("find Chromium");
+    let fake = fixture.path().join("visible-chromium");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ntest \"$4\" = 'https://accounts.google.com/' || exit 42\nexec '{}' --headless=new --disable-gpu --dump-dom \"$1\" about:blank >/dev/null 2>&1\n",
+            real.display()
+        ),
+    )
+    .expect("write visible-browser probe");
+    let mut permissions = fs::metadata(&fake).expect("probe metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake, permissions).expect("make probe executable");
+    let headless = Chromium::launch(Some(profile.path()), None)
+        .await
+        .expect("headless Chromium");
+
+    wwt::core::login(headless, profile.path(), Some(&fake))
+        .await
+        .expect("the visible process acquires the released profile");
+}
+
+#[tokio::test]
+async fn a_visible_launch_failure_leaves_the_profile_recoverable() {
+    let profile = tempfile::tempdir().expect("a profile");
+    let fixture = tempfile::tempdir().expect("a fixture directory");
+    let missing = fixture.path().join("missing-chromium");
+    let headless = Chromium::launch(Some(profile.path()), None)
+        .await
+        .expect("headless Chromium");
+
+    let error = wwt::core::login(headless, profile.path(), Some(&missing))
+        .await
+        .expect_err("a missing visible browser must fail");
+    assert!(
+        error.contains("launch visible Chromium"),
+        "the failed phase should be clear: {error}"
+    );
+
+    let replacement = wwt::core::relaunch(Some(profile.path()), None)
+        .await
+        .expect("headless Chromium can recover on the same profile");
+    drop(replacement);
+}
 
 /// A relaunch produces a browser that actually works: connected, attached,
 /// and able to open a page. Asserting it returned `Ok` would pass on a

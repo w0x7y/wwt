@@ -1,5 +1,6 @@
 //! Starting a Chromium and finding its websocket endpoint.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -10,6 +11,19 @@ use tokio::time::{Duration, timeout};
 
 const CANDIDATES: &[&str] = &["chromium", "chromium-browser", "google-chrome-stable"];
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Arguments for a normal visible Chromium window.
+///
+/// Kept separate from the headless launcher so automation flags cannot leak
+/// into the browser used for an interactive login.
+fn visible_arguments(profile: &std::path::Path, url: &str) -> Vec<OsString> {
+    vec![
+        OsString::from(format!("--user-data-dir={}", profile.display())),
+        OsString::from("--no-first-run"),
+        OsString::from("--no-default-browser-check"),
+        OsString::from(url),
+    ]
+}
 
 /// Locate a Chromium binary. `WWT_CHROMIUM` wins, then `configured`, then
 /// the `PATH`.
@@ -133,12 +147,68 @@ impl Chromium {
     pub fn ws_url(&self) -> &str {
         &self.ws_url
     }
+
+    /// Stop Chromium and wait until it has released its profile.
+    pub async fn shutdown(mut self) -> Result<()> {
+        if self
+            .child
+            .try_wait()
+            .context("check whether Chromium has exited")?
+            .is_none()
+        {
+            self.child.start_kill().context("stop Chromium")?;
+        }
+        self.child.wait().await.context("wait for Chromium to stop")?;
+        Ok(())
+    }
 }
 
 impl Drop for Chromium {
     fn drop(&mut self) {
         // kill_on_drop handles the process; start_kill makes it prompt.
         let _ = self.child.start_kill();
+    }
+}
+
+/// An ordinary visible Chromium process with no automation interface.
+pub struct VisibleChromium {
+    child: Child,
+}
+
+impl VisibleChromium {
+    pub fn launch(
+        profile: &std::path::Path,
+        binary: Option<&std::path::Path>,
+        url: &str,
+    ) -> Result<Self> {
+        let binary = find_chromium(binary)?;
+        let child = Command::new(&binary)
+            .args(visible_arguments(profile, url))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("failed to start visible {}", binary.display()))?;
+        Ok(Self { child })
+    }
+
+    /// Wait until the user closes the visible browser window.
+    pub async fn wait(self) -> Result<()> {
+        let output = self
+            .child
+            .wait_with_output()
+            .await
+            .context("wait for visible Chromium")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if stderr.is_empty() {
+                bail!("visible Chromium exited with {}", output.status);
+            }
+            bail!("visible Chromium exited with {}: {stderr}", output.status);
+        }
+        Ok(())
     }
 }
 
@@ -152,4 +222,26 @@ async fn read_ws_url(stderr: tokio::process::ChildStderr) -> Result<String> {
         }
     }
     bail!("chromium exited before announcing a debugging endpoint")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::visible_arguments;
+
+    #[test]
+    fn a_login_window_uses_the_profile_without_automation_flags() {
+        let url = "https://accounts.google.com/";
+        let arguments = visible_arguments(Path::new("/tmp/wwt profile"), url);
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+
+        assert!(arguments.iter().any(|argument| argument == "--user-data-dir=/tmp/wwt profile"));
+        assert!(arguments.iter().any(|argument| argument == url));
+        assert!(!arguments.iter().any(|argument| argument.contains("headless")));
+        assert!(!arguments.iter().any(|argument| argument.contains("remote-debugging")));
+    }
 }

@@ -220,6 +220,17 @@ the lock: Chromium refuses one another Chromium holds, so a second wwt gets a
 temporary profile and writes no session file. The instance holding the
 profile owns that file.
 
+**Login handoff** — replacing headless Chromium temporarily with an ordinary
+visible Chromium window on the same profile. The session snapshot reaches disk
+and the headless process releases the profile before the visible process starts.
+Closing the window returns through relaunch. The visible process has no CDP,
+headless or remote-debugging flags.
+
+**Browser generation** — a counter identifying the Chromium process that
+started a page operation, target open or CDP event. Browser replacement advances
+it, so late answers from the old process cannot change the current page maps or
+session. `wwt::core::BrowserGeneration`.
+
 **Relaunch** — replacing a Chromium that died: drop the old one first,
 because it holds the profile lock, then three attempts with backoff. What
 survives is what a tab was; what does not is form contents and per-tab

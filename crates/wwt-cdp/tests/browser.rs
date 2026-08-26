@@ -2,8 +2,67 @@
 //! connecting is what they are testing. Everything else that needs a
 //! browser shares one; see `wwt-page/tests/common`.
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::json;
-use wwt_cdp::{Chromium, Client};
+use wwt_cdp::{Chromium, Client, VisibleChromium};
+
+fn executable(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    let path = dir.join("fake-chromium");
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake Chromium");
+    let mut permissions = fs::metadata(&path).expect("fake metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("make fake executable");
+    path
+}
+
+#[tokio::test]
+async fn a_visible_browser_uses_the_profile_without_automation_flags() {
+    let fixture = tempfile::tempdir().expect("a fixture directory");
+    let profile = fixture.path().join("profile with spaces");
+    let binary = executable(
+        fixture.path(),
+        r#"printf '%s\n' "$@" > "${0}.args""#,
+    );
+
+    VisibleChromium::launch(&profile, Some(&binary), "https://accounts.google.com/")
+        .expect("launch visible Chromium")
+        .wait()
+        .await
+        .expect("visible Chromium exits cleanly");
+
+    let arguments = fs::read_to_string(format!("{}.args", binary.display()))
+        .expect("captured arguments");
+    assert!(arguments.lines().any(|argument| {
+        argument == format!("--user-data-dir={}", profile.display())
+    }));
+    assert!(arguments.lines().any(|argument| argument == "https://accounts.google.com/"));
+    assert!(!arguments.lines().any(|argument| argument.contains("headless")));
+    assert!(!arguments.lines().any(|argument| argument.contains("remote-debugging")));
+}
+
+#[tokio::test]
+async fn a_visible_browser_with_a_failing_exit_reports_the_status() {
+    let fixture = tempfile::tempdir().expect("a fixture directory");
+    let profile = fixture.path().join("profile");
+    let binary = executable(fixture.path(), "echo 'profile is locked' >&2\nexit 23");
+
+    let error = VisibleChromium::launch(&profile, Some(&binary), "https://accounts.google.com/")
+        .expect("launch visible Chromium")
+        .wait()
+        .await
+        .expect_err("a failing browser exit must be reported");
+
+    assert!(
+        error.to_string().contains("23"),
+        "the process status should be actionable: {error:#}"
+    );
+    assert!(
+        error.to_string().contains("profile is locked"),
+        "Chromium's error should survive: {error:#}"
+    );
+}
 
 #[tokio::test]
 async fn launches_chromium_and_reports_its_version() {
@@ -90,6 +149,21 @@ async fn a_second_browser_cannot_have_a_profile_the_first_one_holds() {
 
     // Released on drop, so the next instance can have it.
     drop(first);
+}
+
+#[tokio::test]
+async fn an_awaited_shutdown_releases_the_profile_before_it_returns() {
+    let profile = tempfile::tempdir().expect("a profile directory");
+    let first = Chromium::launch(Some(profile.path()), None)
+        .await
+        .expect("the first browser takes the profile");
+
+    first.shutdown().await.expect("stop the first browser");
+
+    let second = Chromium::launch(Some(profile.path()), None)
+        .await
+        .expect("the profile is available when shutdown returns");
+    drop(second);
 }
 
 #[tokio::test]

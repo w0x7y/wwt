@@ -140,7 +140,13 @@ so does `wwt banana`. A word with a dot in it, or a host and a port like
 
 Commands: `:open <url-or-search>`, `:tabopen <url-or-search>` (`:t`),
 `:tabclose`, `:tabnext`, `:tabprev`, `:back`, `:forward`, `:reload`,
-`:set mouse on|off`, `:set pixel on|off`, `:quit`.
+`:login`, `:set mouse on|off`, `:set pixel on|off`, `:quit`.
+
+`:login` saves the current tabs, stops WWT's headless Chromium, and opens
+Google Accounts in an ordinary Chromium window on the same profile. Sign in,
+then close the Chromium window. WWT restarts its headless browser and restores
+the tabs. The command is unavailable in a private session because that run
+does not own the persistent profile.
 
 wwt keeps a Chromium profile at `$XDG_DATA_HOME/wwt/profile` and the tabs
 you had open at `$XDG_DATA_HOME/wwt/session.json`. The profile is what

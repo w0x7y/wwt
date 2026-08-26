@@ -132,6 +132,10 @@ pub enum Job {
     /// client before the session can be told anything at all, exactly as
     /// `Finished::Opened` files a page before reporting `Job::Opened`.
     Relaunched(Result<(), String>),
+    /// The ordinary login browser closed, or the handoff failed.
+    Login(Result<(), String>),
+    /// The snapshot required before a login handoff reached disk, or did not.
+    LoginSaved(Result<(), String>),
     /// The session file could not be written. The one thing that fails
     /// without a tab to fail on, because the tabs are what it is made of.
     Unsaved(String),

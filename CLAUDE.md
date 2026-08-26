@@ -18,7 +18,7 @@ Currently at **M8** (reader mode). Milestones M1–M8 are defined in
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 597 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 639 tests; the integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
@@ -280,9 +280,11 @@ stale after a crash.
 
 **Deciding to save is a rule, writing is machinery.** `Session` emits
 `Effect::Save` when the tab set, the focus, or a page's URL, title or scroll
-offset changes; `Core` coalesces on a timer and writes temp-then-rename. An
-extraction of a page that did not move is not a write, and whether it moved is
-decided against what the tab stores rather than against what the extraction
+offset changes; `Core` coalesces on a timer and sends snapshots to one FIFO
+writer, which writes temp-then-rename. Login and quit bypass the debounce and
+wait for their exact snapshot, behind every earlier write, before continuing.
+An extraction of a page that did not move is not a write, and whether it moved
+is decided against what the tab stores rather than against what the extraction
 carried: an error page's URL is deliberately not kept, so comparing with the
 extraction would write on every dirty signal.
 
@@ -582,6 +584,18 @@ taken, because its url still names where it is leaving.
 kill_on_drop and the profile directory is the lock, so relaunching while our own
 dying browser still holds it is the one failure this path would inflict on
 itself, and it would present as an inexplicable fall back to a private session.
+
+**Login is a browser handoff, not page automation.** `:login` waits for its
+session snapshot to reach disk, detaches every tab, shuts down headless Chromium
+and waits for the profile lock to be released. It then starts ordinary visible
+Chromium on the same profile without headless, CDP or remote-debugging flags.
+Closing that window enters the existing relaunch path, which restores the
+focused tab and leaves the others detached for lazy restore.
+
+**Browser generations fence off stale work.** Every browser replacement
+advances `BrowserGeneration`. Page jobs, target opens and CDP events carry the
+generation that produced them, and `Core` drops answers from an old browser
+before they can change the current page maps or session.
 
 **The CDP arm is guarded off once it has answered `None`.** A closed receiver
 answers `None` immediately and forever, so an unguarded arm spins the loop at one

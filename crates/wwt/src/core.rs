@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as TermEvent, EventStream, KeyEventKind,
 };
@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
-use wwt_cdp::{Chromium, Client, TargetId};
+use wwt_cdp::{Chromium, Client, TargetId, VisibleChromium};
 use wwt_frame::{CellSize, GridSize, Viewport};
 use wwt_page::Page;
 use wwt_term::Renderer;
@@ -56,6 +56,18 @@ const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// this is the cheaper half of the trade.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
+const LOGIN_URL: &str = "https://accounts.google.com/";
+
+/// Identifies every browser process whose work may still be in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserGeneration(u64);
+
+impl BrowserGeneration {
+    fn next(self) -> Self {
+        Self(self.0.checked_add(1).expect("browser generation overflow"))
+    }
+}
+
 /// What arrives on the loop's one result channel.
 ///
 /// Most of it is a `Job` on its way to the session unchanged. A target that
@@ -66,8 +78,11 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// No `Debug`, since M7: a `Chromium` and a `Client` have none, and neither
 /// is a thing whose innards would read usefully in a panic message.
 enum Finished {
+    /// A page operation from one particular browser process.
+    BrowserJob(BrowserGeneration, Job),
+    /// Work that belongs to WWT itself rather than to a browser process.
     Job(Job),
-    Opened(TabId, Result<Arc<Page>, String>),
+    Opened(BrowserGeneration, TabId, Result<Arc<Page>, String>),
     /// A replacement browser, or the reason there is not one. It comes
     /// this way rather than as a `Job` for the reason a `Page` does: a
     /// `Chromium` and a `Client` are `Core`'s and must never reach the
@@ -75,10 +90,89 @@ enum Finished {
     Relaunched(Result<(Chromium, Arc<Client>), String>),
 }
 
-impl From<Job> for Finished {
-    fn from(job: Job) -> Self {
-        Finished::Job(job)
+impl Finished {
+    /// Whether handling this result may mutate the current browser's maps.
+    fn is_current(&self, current: BrowserGeneration) -> bool {
+        match self {
+            Finished::BrowserJob(generation, _) | Finished::Opened(generation, _, _) => {
+                *generation == current
+            }
+            Finished::Job(_) | Finished::Relaunched(_) => true,
+        }
     }
+}
+
+enum SaveCompletion {
+    ReportFailure,
+    Login,
+    Final(tokio::sync::oneshot::Sender<Result<(), String>>),
+}
+
+struct SaveRequest {
+    path: PathBuf,
+    snapshot: Snapshot,
+    completion: SaveCompletion,
+}
+
+impl SaveRequest {
+    fn ordinary(path: PathBuf, snapshot: Snapshot) -> Self {
+        Self { path, snapshot, completion: SaveCompletion::ReportFailure }
+    }
+
+    fn login(path: PathBuf, snapshot: Snapshot) -> Self {
+        Self { path, snapshot, completion: SaveCompletion::Login }
+    }
+
+    fn final_save(
+        path: PathBuf,
+        snapshot: Snapshot,
+        done: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> Self {
+        Self { path, snapshot, completion: SaveCompletion::Final(done) }
+    }
+}
+
+/// One ordered writer, so an older debounced save cannot land after the
+/// acknowledged login snapshot and overwrite it.
+fn spawn_save_worker(
+    jobs: mpsc::UnboundedSender<Finished>,
+) -> mpsc::UnboundedSender<SaveRequest> {
+    spawn_save_worker_with(jobs, crate::store::save)
+}
+
+fn spawn_save_worker_with<F>(
+    jobs: mpsc::UnboundedSender<Finished>,
+    save: F,
+) -> mpsc::UnboundedSender<SaveRequest>
+where
+    F: Fn(&std::path::Path, &Snapshot) -> Result<(), String> + Send + Sync + 'static,
+{
+    let (tx, mut rx) = mpsc::unbounded_channel::<SaveRequest>();
+    let save = Arc::new(save);
+    tokio::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let SaveRequest { path, snapshot, completion } = request;
+            let save = Arc::clone(&save);
+            let result = tokio::task::spawn_blocking(move || save(&path, &snapshot))
+                .await
+                .map_err(|error| format!("session save task failed: {error}"))
+                .and_then(|result| result);
+            match completion {
+                SaveCompletion::Login => {
+                    let _ = jobs.send(Finished::Job(Job::LoginSaved(result)));
+                }
+                SaveCompletion::ReportFailure => {
+                    if let Err(error) = result {
+                        let _ = jobs.send(Finished::Job(Job::Unsaved(error)));
+                    }
+                }
+                SaveCompletion::Final(done) => {
+                    let _ = done.send(result);
+                }
+            }
+        }
+    });
+    tx
 }
 
 /// What one turn of the loop picked up. An arm produces one of these and
@@ -87,6 +181,7 @@ impl From<Job> for Finished {
 /// channels into one.
 enum Incoming {
     Event(Event),
+    Browser(BrowserGeneration, Event),
     Finished(Finished),
 }
 
@@ -105,6 +200,8 @@ pub struct Core {
 
     jobs_tx: mpsc::UnboundedSender<Finished>,
     jobs_rx: mpsc::UnboundedReceiver<Finished>,
+    saves: mpsc::UnboundedSender<SaveRequest>,
+    final_save: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 
     /// Ordered delivery of keys and clicks, across every page.
     input: InputPump,
@@ -130,6 +227,9 @@ pub struct Core {
     /// Which binary to relaunch, so a replacement is the browser the config
     /// file named rather than whatever discovery finds second.
     chromium: Option<PathBuf>,
+    /// Results from an older process are discarded before they can touch
+    /// `pages`, `opening`, or `Session`.
+    browser_generation: BrowserGeneration,
 }
 
 /// What the browser starts as.
@@ -166,10 +266,15 @@ impl Core {
     /// rest.
     pub fn new(client: Arc<Client>, startup: Startup) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let input = InputPump::spawn(jobs_tx.clone());
+        let saves = spawn_save_worker(jobs_tx.clone());
+        let input = InputPump::spawn(jobs_tx.clone(), |generation, job| {
+            Finished::BrowserJob(BrowserGeneration(generation), job)
+        });
+        let login_available = startup.profile.is_some() && startup.session_file.is_some();
         let mut session =
             Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
         session.set_graphics(startup.graphics);
+        session.set_login_available(login_available);
         session.configure(&startup.config);
 
         Self {
@@ -180,6 +285,8 @@ impl Core {
             session,
             jobs_tx,
             jobs_rx,
+            saves,
+            final_save: None,
             input,
             session_file: startup.session_file,
             pending: None,
@@ -187,6 +294,7 @@ impl Core {
             browser: Some(startup.browser),
             profile: startup.profile,
             chromium: startup.config.chromium.clone(),
+            browser_generation: BrowserGeneration(0),
         }
     }
 
@@ -199,12 +307,7 @@ impl Core {
         let (Some(path), Some(snapshot)) = (self.session_file.clone(), self.pending.take()) else {
             return;
         };
-        let tx = self.jobs_tx.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) = crate::store::save(&path, &snapshot) {
-                let _ = tx.send(Finished::Job(Job::Unsaved(error)));
-            }
-        });
+        let _ = self.saves.send(SaveRequest::ordinary(path, snapshot));
     }
 
     /// Say something in the statusline before the loop starts.
@@ -215,6 +318,7 @@ impl Core {
     pub async fn run(&mut self, out: &mut impl Write) -> Result<()> {
         let mut terminal = EventStream::new();
         let mut cdp = self.client.subscribe();
+        let mut cdp_generation = self.browser_generation;
         let mut resize_at: Option<Instant> = None;
         let mut save_at: Option<Instant> = None;
         // Whether the websocket has closed. A closed receiver answers `None`
@@ -226,6 +330,7 @@ impl Core {
 
         let effects = self.session.begin();
         if self.apply(effects, &mut save_at, out)? {
+            self.finish_saves().await?;
             return Ok(());
         }
         self.present(out)?;
@@ -263,22 +368,29 @@ impl Core {
                 incoming = cdp.recv(), if !lost => match incoming {
                     // The websocket closed: the browser is gone and so is
                     // every target in it.
-                    None => Some(Incoming::Event(Event::BrowserLost)),
+                    None => Some(Incoming::Browser(cdp_generation, Event::BrowserLost)),
                     Some(event) => match Client::opened_by_a_page(&event) {
-                        Some(attached) => Some(Incoming::Event(Event::TargetOpened(attached))),
+                        Some(attached) => {
+                            Some(Incoming::Browser(cdp_generation, Event::TargetOpened(attached)))
+                        }
                         None if event.method == wwt_page::SCREENCAST_FRAME => self
                             .pages
                             .iter()
                             .find_map(|(id, page)| {
                                 page.screencast_frame(&event).map(|frame| {
-                                    Incoming::Event(Event::Frame(*id, Box::new(frame)))
+                                    Incoming::Browser(
+                                        cdp_generation,
+                                        Event::Frame(*id, Box::new(frame)),
+                                    )
                                 })
                             }),
                         None => self
                             .pages
                             .iter()
                             .find(|(_, page)| page.is_dirty(&event))
-                            .map(|(id, _)| Incoming::Event(Event::Dirty(*id))),
+                            .map(|(id, _)| {
+                                Incoming::Browser(cdp_generation, Event::Dirty(*id))
+                            }),
                     },
                 },
 
@@ -315,12 +427,20 @@ impl Core {
             let event = match incoming {
                 // Before the general arm, which would otherwise take it:
                 // this one is here for the flag and not for the event.
-                Some(Incoming::Event(Event::BrowserLost)) => {
+                Some(Incoming::Browser(generation, Event::BrowserLost)) => {
                     lost = true;
-                    Some(Event::BrowserLost)
+                    (generation == self.browser_generation).then_some(Event::BrowserLost)
                 }
+                Some(Incoming::Browser(generation, event)) =>
+                    (generation == self.browser_generation).then_some(event),
                 Some(Incoming::Event(event)) => Some(event),
-                Some(Incoming::Finished(Finished::Job(job))) => Some(Event::Done(job)),
+                Some(Incoming::Finished(finished))
+                    if !finished.is_current(self.browser_generation) =>
+                {
+                    None
+                }
+                Some(Incoming::Finished(Finished::BrowserJob(_, job)))
+                | Some(Incoming::Finished(Finished::Job(job))) => Some(Event::Done(job)),
                 Some(Incoming::Finished(Finished::Relaunched(Ok((browser, client))))) => {
                     self.browser = Some(browser);
                     self.client = Arc::clone(&client);
@@ -328,18 +448,19 @@ impl Core {
                     // has to be replaced: this is why a relaunch is handled
                     // here rather than in `apply`.
                     cdp = self.client.subscribe();
+                    cdp_generation = self.browser_generation;
                     lost = false;
                     Some(Event::BrowserBack)
                 }
                 Some(Incoming::Finished(Finished::Relaunched(Err(error)))) => {
                     Some(Event::Done(Job::Relaunched(Err(error))))
                 }
-                Some(Incoming::Finished(Finished::Opened(id, Ok(page)))) => {
+                Some(Incoming::Finished(Finished::Opened(_, id, Ok(page)))) => {
                     self.opening.remove(&id);
                     self.pages.insert(id, page);
                     Some(Event::Done(Job::Opened(id, Ok(()))))
                 }
-                Some(Incoming::Finished(Finished::Opened(id, Err(error)))) => {
+                Some(Incoming::Finished(Finished::Opened(_, id, Err(error)))) => {
                     // The session is about to drop the tab. A target the
                     // browser handed us outlives that: left alone it is a
                     // page loading somewhere nobody can see and nothing can
@@ -368,6 +489,7 @@ impl Core {
             if let Some(event) = event {
                 let effects = self.session.on(event);
                 if self.apply(effects, &mut save_at, out)? {
+                    self.finish_saves().await?;
                     return Ok(());
                 }
                 self.present(out)?;
@@ -387,13 +509,41 @@ impl Core {
                 Effect::Quit => {
                     // The last second of browsing is exactly the part you
                     // would notice missing.
-                    self.flush_save();
+                    self.pending = None;
+                    if let Some(path) = self.session_file.clone() {
+                        let (done, finished) = tokio::sync::oneshot::channel();
+                        self.final_save = Some(finished);
+                        let request = SaveRequest::final_save(path, self.session.snapshot(), done);
+                        let _ = self.saves.send(request);
+                    }
                     return Ok(true);
                 }
 
                 Effect::Save(snapshot) => {
                     self.pending = Some(snapshot);
                     *save_at = Some(Instant::now() + SAVE_DEBOUNCE);
+                }
+
+                Effect::SaveForLogin(snapshot) => {
+                    // This write is a lifecycle barrier, not a debounced
+                    // browsing update. The browser handoff is requested only
+                    // after its completion reaches `Session`.
+                    self.pending = None;
+                    *save_at = None;
+                    match self.session_file.clone() {
+                        Some(path) => {
+                            if self.saves.send(SaveRequest::login(path, snapshot)).is_err() {
+                                let _ = self.jobs_tx.send(Finished::Job(Job::LoginSaved(Err(
+                                    "session save worker stopped".to_string(),
+                                ))));
+                            }
+                        }
+                        None => {
+                            let _ = self.jobs_tx.send(Finished::Job(Job::LoginSaved(Err(
+                                "WWT does not own a session file".to_string(),
+                            ))));
+                        }
+                    }
                 }
 
                 Effect::MouseCapture(on) => {
@@ -406,7 +556,12 @@ impl Core {
 
                 Effect::Send(id, input) => {
                     if let Some(page) = self.pages.get(&id) {
-                        self.input.send(id, Arc::clone(page), input);
+                        self.input.send(
+                            self.browser_generation.0,
+                            id,
+                            Arc::clone(page),
+                            input,
+                        );
                     }
                 }
 
@@ -501,6 +656,7 @@ impl Core {
                 Effect::OpenTab { id, url, scroll_y } => {
                     let vp = self.session.viewport();
                     let client = Arc::clone(&self.client);
+                    let generation = self.browser_generation;
                     let tx = self.jobs_tx.clone();
                     tokio::spawn(async move {
                         let opened = match Page::open(client, &url, vp).await {
@@ -516,13 +672,14 @@ impl Core {
                             }
                             Err(error) => Err(error.to_string()),
                         };
-                        let _ = tx.send(Finished::Opened(id, opened));
+                        let _ = tx.send(Finished::Opened(generation, id, opened));
                     });
                 }
 
                 Effect::AdoptTab { id, target } => {
                     let vp = self.session.viewport();
                     let client = Arc::clone(&self.client);
+                    let generation = self.browser_generation;
                     let tx = self.jobs_tx.clone();
                     // Noted before the spawn, so a preparation that fails
                     // leaves something to close the target by. A tab we
@@ -533,7 +690,7 @@ impl Core {
                             .await
                             .map(Arc::new)
                             .map_err(|error| error.to_string());
-                        let _ = tx.send(Finished::Opened(id, opened));
+                        let _ = tx.send(Finished::Opened(generation, id, opened));
                     });
                 }
 
@@ -597,6 +754,7 @@ impl Core {
                     // still has it is the one failure this path would
                     // inflict on itself, and it would present as an
                     // inexplicable fall back to a private session.
+                    self.browser_generation = self.browser_generation.next();
                     drop(self.browser.take());
                     let profile = self.profile.clone();
                     let binary = self.chromium.clone();
@@ -605,6 +763,30 @@ impl Core {
                         let _ = tx.send(Finished::Relaunched(
                             relaunch(profile.as_deref(), binary.as_deref()).await,
                         ));
+                    });
+                }
+
+                Effect::Login => {
+                    // `Session` emits this only after the login snapshot has
+                    // reached disk. Advancing the generation before clearing
+                    // the maps makes every old browser result stale first.
+                    self.browser_generation = self.browser_generation.next();
+                    self.pages.clear();
+                    self.opening.clear();
+
+                    let browser = self.browser.take();
+                    let profile = self.profile.clone();
+                    let binary = self.chromium.clone();
+                    let tx = self.jobs_tx.clone();
+                    tokio::spawn(async move {
+                        let result = match (browser, profile) {
+                            (Some(browser), Some(profile)) => {
+                                login(browser, &profile, binary.as_deref()).await
+                            }
+                            (None, _) => Err("headless Chromium is not running".to_string()),
+                            (_, None) => Err("WWT does not own a persistent profile".to_string()),
+                        };
+                        let _ = tx.send(Finished::Job(Job::Login(result)));
                     });
                 }
 
@@ -628,10 +810,14 @@ impl Core {
         let Some(page) = self.pages.remove(&id) else {
             return;
         };
+        let generation = self.browser_generation;
         let tx = self.jobs_tx.clone();
         tokio::spawn(async move {
             if let Err(error) = page.close().await {
-                let _ = tx.send(Finished::Job(Job::Noted(id, error.to_string())));
+                let _ = tx.send(Finished::BrowserJob(
+                    generation,
+                    Job::Noted(id, error.to_string()),
+                ));
             }
         });
     }
@@ -668,10 +854,11 @@ impl Core {
         let Some(page) = self.pages.get(&id).map(Arc::clone) else {
             return;
         };
+        let generation = self.browser_generation;
         let tx = self.jobs_tx.clone();
         tokio::spawn(async move {
             if let Some(job) = make(page).await {
-                let _ = tx.send(Finished::Job(job));
+                let _ = tx.send(Finished::BrowserJob(generation, job));
             }
         });
     }
@@ -681,6 +868,17 @@ impl Core {
         self.renderer.render(&frame, out).context("write the frame")?;
         out.flush().context("flush the terminal")?;
         Ok(())
+    }
+
+    /// Wait for the final snapshot and every save queued before it.
+    async fn finish_saves(&mut self) -> Result<()> {
+        let Some(finished) = self.final_save.take() else {
+            return Ok(());
+        };
+        finished
+            .await
+            .map_err(|_| anyhow!("session save worker stopped before shutdown"))?
+            .map_err(|error| anyhow!(error))
     }
 }
 
@@ -724,6 +922,25 @@ pub async fn relaunch(
     Err(last)
 }
 
+/// Stop headless Chromium, launch an ordinary browser on the same profile,
+/// and wait for the user to close it.
+pub async fn login(
+    browser: Chromium,
+    profile: &std::path::Path,
+    binary: Option<&std::path::Path>,
+) -> Result<(), String> {
+    browser
+        .shutdown()
+        .await
+        .map_err(|error| format!("stop headless Chromium: {error:#}"))?;
+    let visible = VisibleChromium::launch(profile, binary, LOGIN_URL)
+        .map_err(|error| format!("launch visible Chromium: {error:#}"))?;
+    visible
+        .wait()
+        .await
+        .map_err(|error| format!("wait for visible Chromium: {error:#}"))
+}
+
 /// One attempt: a browser, a connection, and the auto-attach that has to be
 /// on before the first target exists.
 ///
@@ -739,4 +956,101 @@ async fn start(
     let client = Arc::new(Client::connect(browser.ws_url()).await?);
     client.auto_attach().await?;
     Ok((browser, client))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::SavedTab;
+
+    #[test]
+    fn old_browser_work_is_rejected_before_core_can_file_it() {
+        let current = BrowserGeneration(2);
+        let old = BrowserGeneration(1);
+        let id = TabId(7);
+
+        assert!(!Finished::Opened(old, id, Err("old browser".to_string())).is_current(current));
+        assert!(
+            !Finished::BrowserJob(old, Job::Noted(id, "old browser".to_string()))
+                .is_current(current)
+        );
+        assert!(Finished::Job(Job::Login(Ok(()))).is_current(current));
+    }
+
+    #[tokio::test]
+    async fn login_save_acknowledges_after_earlier_saves_and_leaves_its_snapshot_last() {
+        let directory = tempfile::tempdir().expect("session directory");
+        let path = directory.path().join("session.json");
+        let snapshot = |url: &str| Snapshot {
+            version: crate::store::VERSION,
+            focus: 0,
+            tabs: vec![SavedTab {
+                url: url.to_string(),
+                title: String::new(),
+                scroll_y: 0.0,
+            }],
+        };
+        let older = snapshot("https://older.test");
+        let login = snapshot("https://login.test");
+        let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
+        let saves = spawn_save_worker_with(jobs_tx, |path, snapshot| {
+            if snapshot.tabs[0].url == "https://older.test" {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            crate::store::save(path, snapshot)
+        });
+
+        saves
+            .send(SaveRequest::ordinary(path.clone(), older))
+            .expect("queue older save");
+        saves
+            .send(SaveRequest::login(path.clone(), login.clone()))
+            .expect("queue login save");
+
+        loop {
+            if let Finished::Job(Job::LoginSaved(result)) =
+                jobs_rx.recv().await.expect("save result")
+            {
+                result.expect("login save succeeds");
+                break;
+            }
+        }
+
+        assert_eq!(crate::store::load(&path), Ok(Some(login)));
+    }
+
+    #[tokio::test]
+    async fn final_save_barrier_drains_older_work_before_acknowledging_quit() {
+        let directory = tempfile::tempdir().expect("session directory");
+        let path = directory.path().join("session.json");
+        let snapshot = |url: &str| Snapshot {
+            version: crate::store::VERSION,
+            focus: 0,
+            tabs: vec![SavedTab {
+                url: url.to_string(),
+                title: String::new(),
+                scroll_y: 0.0,
+            }],
+        };
+        let older = snapshot("https://older.test");
+        let final_snapshot = snapshot("https://final.test");
+        let (jobs_tx, _) = mpsc::unbounded_channel();
+        let saves = spawn_save_worker_with(jobs_tx, |path, snapshot| {
+            if snapshot.tabs[0].url == "https://older.test" {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            crate::store::save(path, snapshot)
+        });
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+        saves
+            .send(SaveRequest::ordinary(path.clone(), older))
+            .expect("queue older save");
+        saves
+            .send(SaveRequest::final_save(path.clone(), final_snapshot.clone(), done_tx))
+            .expect("queue final save");
+
+        done_rx.await.expect("final acknowledgment").expect("final save succeeds");
+        assert_eq!(crate::store::load(&path), Ok(Some(final_snapshot)));
+    }
 }

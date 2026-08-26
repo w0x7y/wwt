@@ -96,6 +96,9 @@ pub enum Effect {
     /// cheap and asking on every scroll frame is what keeps a crash from
     /// costing you your place.
     Save(Snapshot),
+    /// Durably save this exact snapshot before handing the profile to a
+    /// visible login browser. Unlike `Save`, completion is reported.
+    SaveForLogin(Snapshot),
     /// Start sending pictures of this tab. Only ever the focused one: a
     /// background tab is idle, which is the rule extraction already follows.
     StartScreencast(TabId, FrameSize),
@@ -108,6 +111,8 @@ pub enum Effect {
     /// `Session` decides that we try; `Core` decides how many times and how
     /// far apart, because a count and a delay are machinery.
     Relaunch,
+    /// Hand the persistent profile to an ordinary visible Chromium for login.
+    Login,
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
     Quit,

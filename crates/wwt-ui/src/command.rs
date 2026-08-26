@@ -24,6 +24,7 @@ pub enum Command {
     Back,
     Forward,
     Reload,
+    Login,
     Set(Setting),
     Quit,
 }
@@ -56,6 +57,12 @@ pub fn parse(line: &str, search: &str) -> Result<Command, String> {
         "back" | "b" => Ok(Command::Back),
         "forward" | "f" => Ok(Command::Forward),
         "reload" => Ok(Command::Reload),
+        "login" => {
+            if !rest.is_empty() {
+                return Err("login takes no arguments".to_string());
+            }
+            Ok(Command::Login)
+        }
         "set" => {
             let (setting, value) = match rest.split_once(char::is_whitespace) {
                 Some((setting, value)) => (setting, value.trim()),
@@ -276,6 +283,19 @@ mod tests {
     #[test]
     fn an_unknown_command_names_itself() {
         assert_eq!(parsed("frobnicate"), Err("unknown command: frobnicate".to_string()));
+    }
+
+    #[test]
+    fn login_is_a_command() {
+        assert_eq!(parsed("login"), Ok(Command::Login));
+    }
+
+    #[test]
+    fn login_does_not_accept_a_finish_argument_yet() {
+        assert_eq!(
+            parsed("login finish"),
+            Err("login takes no arguments".to_string())
+        );
     }
 
     #[test]
