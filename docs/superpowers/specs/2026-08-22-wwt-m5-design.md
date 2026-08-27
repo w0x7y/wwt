@@ -129,18 +129,16 @@ shows up later as a picture that never moves rather than as an error.
 paints and not on a clock, so the rule that an idle page costs ~zero CPU survives pixel
 mode, and no tick loop appears anywhere.
 
-**The frame rate is set by holding the ack back.** `--disable-frame-rate-limit` was added
-in M2 because headless otherwise paces frames at the display rate and a scroll was not
-visible to the page until the next one. `CLAUDE.md` records that it is free only while
-nobody is asking the compositor for frames, and M5 is exactly the milestone that starts
-asking: on an animated page the compositor outruns what a terminal can decode, and the
-picture flickers.
+**The screencast frame rate is set by holding the ack back.** Chromium sends the next
+frame only once the last is answered, so `FRAME_INTERVAL` caps pixel output at thirty
+frames per second with the protocol's own flow control. Nothing polls, nothing is
+buffered, and a still page produces no frames and pays nothing.
 
-The flag stays. Instead the ack is held back for `FRAME_INTERVAL`, which sets the rate
-using the flow control the protocol already has, since Chromium sends the next frame only
-once the last is answered. Nothing polls, nothing is buffered, and a still page produces
-no frames and pays nothing. Throttling what we ask for is cheaper than giving up a
-scroll's latency in text mode, which is the mode wwt is in almost always.
+The browser itself retains normal begin-frame pacing. The later YouTube SPA regression
+showed that M2's `--disable-frame-rate-limit` could starve application work even while
+video and screencast frames continued. `--disable-gpu-vsync` now removes only the
+presentation wait needed for low-latency scrolling; the ack remains necessary because
+native sixty-frame pacing is still faster than a terminal needs to decode full-page PNGs.
 
 ## 4. The image on the way out
 
@@ -274,8 +272,9 @@ These change `2026-08-19-wwt-design.md` and land in the same commit as this docu
    rendered as graphics" becomes an optional image for the page viewport. Pixel mode is
    the whole viewport and never a region, and the buffer is base64 on its way through
    rather than pixels.
-4. **Section 3 and the performance notes.** `--disable-frame-rate-limit` is marked as
-   owing a measurement under screencast, per section 3 above.
+4. **Section 3 and the performance notes.** Chromium begin frames remain paced,
+   presentation skips vblank, and screencast delivery is capped by acknowledgements,
+   per section 3 above.
 
 ## 10. Failure modes
 
@@ -335,5 +334,7 @@ terminal is, and what cannot is honest about needing one.
    still unbounded. It is the ack: Chromium sends the next frame only once the last is
    answered, so holding the ack back for `FRAME_INTERVAL` sets the rate using the
    protocol's own flow control, with nothing polling and nothing buffered.
-   `--disable-frame-rate-limit` stays, because M2's scroll latency in text mode rests on
-   it and throttling our own asking is the cheaper half of that trade.
+   This originally kept `--disable-frame-rate-limit`. A later live YouTube SPA
+   reproduction superseded that decision: unbounded begin frames stopped YouTube's app
+   shell while its video kept advancing. The launch policy now uses
+   `--disable-gpu-vsync`, and the ack still caps screencast delivery independently.

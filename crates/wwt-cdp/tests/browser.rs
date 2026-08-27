@@ -65,6 +65,35 @@ async fn a_visible_browser_with_a_failing_exit_reports_the_status() {
 }
 
 #[tokio::test]
+async fn a_headless_browser_preserves_normal_frame_pacing() {
+    let fixture = tempfile::tempdir().expect("a fixture directory");
+    let profile = fixture.path().join("profile");
+    fs::create_dir(&profile).expect("create profile");
+    let binary = executable(
+        fixture.path(),
+        r#"printf '%s\n' "$@" > "${0}.args"
+echo 'DevTools listening on ws://127.0.0.1:9222/devtools/browser/test' >&2
+sleep 30"#,
+    );
+
+    let browser = Chromium::launch(Some(&profile), Some(&binary))
+        .await
+        .expect("launch headless Chromium");
+    let arguments = fs::read_to_string(format!("{}.args", binary.display()))
+        .expect("captured arguments");
+
+    assert!(
+        !arguments.lines().any(|argument| argument == "--disable-frame-rate-limit"),
+        "unpaced animation frames can starve browser application work"
+    );
+    assert!(
+        arguments.lines().any(|argument| argument == "--disable-gpu-vsync"),
+        "presentation should not wait for vblank before reporting a scroll"
+    );
+    drop(browser);
+}
+
+#[tokio::test]
 async fn launches_chromium_and_reports_its_version() {
     let browser = Chromium::launch(None, None).await.expect("launch chromium");
     let client = Client::connect(browser.ws_url()).await.expect("connect");

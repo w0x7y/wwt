@@ -400,10 +400,9 @@ to ~0.45ms.
 **The ack is the frame rate.** Chromium sends the next picture only once the
 last is answered, so holding the ack back for `FRAME_INTERVAL` paces the
 stream with the protocol's own flow control: nothing polls and nothing is
-buffered. It has to be paced at all because `--disable-frame-rate-limit`
-means an animating page paints as fast as the compositor can, and every one
-of those is a full-page PNG for the terminal to decode. A still page produces
-no frames and pays nothing.
+buffered. Native Chromium pacing can still produce sixty full-page PNGs per
+second, faster than a terminal needs to decode them, so the ack caps pixel
+mode at thirty. A still page produces no frames and pays nothing.
 
 **Every frame is acked, including the ones dropped**: one for a background
 tab, one that was in flight when pixel mode was left. Chromium counts acks
@@ -614,13 +613,14 @@ them there:
   rate-limits what follows; `debounce` waits out the burst. A keypress produces
   exactly one scroll event, so trailing it coalesced nothing and cost 16ms. Mutations
   are genuinely bursty and still trail. Do not unify these two.
-- **The frame rate is uncapped.** `--disable-frame-rate-limit`, because headless
-  otherwise paces frames at the display's rate and a scroll is not visible to the
-  page until the frame it lands on. It was two thirds of the scroll latency. An idle
-  page produces no frames, so this costs nothing at idle, and that was measured. M5
-  asks the compositor for frames and found the other half of that trade: an
-  animating page outruns what a terminal can decode. The flag stays and the ack is
-  held back instead, because text is the mode wwt is in almost always.
+- **Page work keeps normal frame pacing; presentation does not wait for vblank.**
+  `--disable-frame-rate-limit` made a YouTube SPA transition stop after its video
+  pipeline had started: rAF stopped, the red navigation bar remained, and the right
+  column never hydrated. `--disable-gpu-vsync` preserves Chromium's begin-frame
+  limit while avoiding the presentation wait that made scrolling slow. On
+  `heavy.html`, the old fully uncapped policy measured a 6.6ms median from wheel
+  dispatch to new runs; the narrower policy measured a 13.5ms median across ten runs,
+  inside one 60Hz frame, while the exact YouTube transition completed normally.
 - **Nothing deep-copies a payload.** An extraction is every run on screen;
   `Client::send` and `Page::js` take their `Value` rather than clone it, or the whole
   of it is copied twice on the way to the caller.
@@ -638,9 +638,11 @@ The frame pipeline is not where the time goes and is not worth tuning: composing
 runs into a 120x40 grid and diffing it against the last one is ~40µs against a ~4ms
 extraction. Spend the effort on the page side.
 
-Neither the frame cap nor the scroll window shows up if you change one and measure:
-each hides the other, and changing only one moves the median not at all. Measure the
-grid, not the diagonal.
+The original M2 measurements showed that the frame cap and trailing scroll window
+hid one another. The leading scroll signal remains load-bearing. When changing
+Chromium pacing, measure both `measure_scroll_latency` and an application that uses
+rAF during SPA navigation; a synthetic scroll fixture alone cannot reveal browser
+application starvation.
 
 Two things that look like easy wins and are not. Disabling images
 (`--blink-settings=imagesEnabled=false`) would save every decode, but pixel mode is

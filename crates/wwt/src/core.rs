@@ -47,13 +47,10 @@ const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// holding the ack back is how the rate is set: the flow control is the
 /// protocol's own and there is no timer polling anything.
 ///
-/// It has to be set at all because `--disable-frame-rate-limit` means a page
-/// that animates paints as fast as the compositor can go, and every one of
-/// those frames is a full-page PNG down the pty for the terminal to decode.
-/// Unthrottled, an animation outruns the terminal and the picture visibly
-/// flickers; a still page produces no frames and pays nothing either way.
-/// The flag stays, because M2's scroll latency in text mode rests on it and
-/// this is the cheaper half of the trade.
+/// Native Chromium pacing can still produce sixty full-page PNGs per second,
+/// faster than a terminal needs to decode them. The ack limits pixel mode to
+/// thirty while leaving a still page free: one that does not paint produces no
+/// screencast frames and pays nothing.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 const LOGIN_URL: &str = "https://accounts.google.com/";

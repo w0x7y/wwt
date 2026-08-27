@@ -184,18 +184,22 @@ Waiting for the truth is not the same as waiting longer than the truth takes, an
 measuring the pipeline hop by hop found most of it was neither Chromium's work nor
 ours. Two things were paying for nothing:
 
-- **Headless paces frame production at the display's rate**, and a scroll is not
-  visible to the page until the frame it lands on. `--disable-frame-rate-limit`
-  removes that cap. An idle page produces no frames, so it costs nothing to idle
-  CPU, which was measured rather than assumed.
+- **Headless originally waited for display pacing**, and a scroll was not visible to
+  the page until the frame it landed on. M2 removed both begin-frame limiting and
+  presentation vsync with `--disable-frame-rate-limit`. The policy was narrowed after
+  a live YouTube SPA proved that unbounded begin frames can starve application work:
+  `--disable-gpu-vsync` removes only the presentation wait and keeps page rAF paced.
 - **The scroll signal trailed.** One keypress produces exactly one scroll event, so
   a trailing window coalesced nothing and delayed everything. It leads now, and the
   window rate-limits only what follows it, which is what a page that scrolls itself
   every frame needs.
 
-Together: 36ms to 5ms from wheel dispatch to new runs in hand, on the heavy fixture.
-Neither change alone gets there, because the frame cap hides the window and the
-window hides the frame cap. `measure_scroll_latency` keeps the number honest.
+The original pair took the heavy fixture from 36ms to 5ms from wheel dispatch to new
+runs in hand. With normal begin-frame pacing and presentation vsync disabled, ten
+measurements had a 13.5ms median, inside one 60Hz frame; the fully uncapped control had
+a 6.6ms median. The leading scroll signal remains load-bearing.
+`measure_scroll_latency` keeps the number honest, and a live SPA check now guards the
+browser-side scheduling tradeoff the fixture cannot model.
 
 The alternative — shifting the frame locally and correcting when the extraction
 lands — was rejected. It creates two sources of truth for the same pixels, blanks the

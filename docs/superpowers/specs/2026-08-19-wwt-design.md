@@ -108,10 +108,11 @@ because where the page sits on our screen is not something the page is told.
 **Pixel mode is the same viewport.** `Page.startScreencast` at that exact size,
 blitted through the Kitty graphics protocol using unicode placeholders so images sit
 within the cell grid and scroll with it. Switching text/pixel changes nothing about
-geometry, scroll offset, or focus. `--disable-frame-rate-limit`, which M2 added because
-headless otherwise paces a scroll at the display rate, owes a measurement here: an
-uncapped compositor is free only while nobody is asking it for frames, and a screencast
-asks.
+geometry, scroll offset, or focus. Chromium keeps normal begin-frame pacing so an
+animation-heavy application cannot starve its own SPA work. Presentation alone skips
+the vblank wait with `--disable-gpu-vsync`, retaining the low-latency scroll behavior
+M2 established without unbounding page rAF. The screencast ack independently caps
+pixel output at thirty frames per second.
 
 **Cell size detection.** `ioctl(TIOCGWINSZ)` against the controlling tty provides
 `ws_xpixel`/`ws_ypixel`; cell size is those divided by the grid dimensions. If the
