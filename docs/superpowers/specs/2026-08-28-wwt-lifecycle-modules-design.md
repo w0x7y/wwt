@@ -78,39 +78,38 @@ mechanism the module hides.
 
 ## 4. The page-view lifecycle owns read coordination
 
-A private `page_view` module owns the state that describes what a tab can show and what
-page answer it awaits. `Tab` retains its identity, target presence, focus recency, and a
-`PageView`. `Session` stops mutating `PageView` fields directly.
+A private `page_view` module owns the rules that describe what a tab can show and what
+page answer it awaits. `Tab` and its public fields keep their current shape. A borrowed
+`PageLifecycle<'_>` applies complete transitions to a `Tab`, and `Session` stops
+coordinating those transitions through individual field writes.
 
-The module represents the single read slot with an enum instead of the current shared
-`reading` Boolean. The variants distinguish an idle slot from the kind of read in
-flight. Live-page freshness and reader freshness remain separate because one page
-change invalidates both representations, while a reader result refreshes only reader
-content.
+The borrowed form preserves the public `Tab` interface. Moving the fields into a private
+state value would break source compatibility for callers that inspect or construct a
+`Tab`. The current `reading` Boolean therefore remains part of `Tab`. The module owns
+the rule that the Boolean represents one shared read slot and keeps live-page freshness
+separate from reader freshness.
 
 The conceptual interface is:
 
 ```rust
+let mut page = PageLifecycle::new(tab);
 page.changed();
 page.begin_read(ReadDemand) -> Option<ReadRequest>;
 page.complete(ReadResult) -> PageOutcome;
 page.begin_navigation();
 page.detach();
-page.render_state() -> RenderState;
-page.snapshot_state() -> SnapshotState;
 ```
 
 `ReadDemand` says which representation the focused tab needs. `ReadRequest` says which
 existing `Effect` the session must emit. `ReadResult` wraps the existing job answer.
-`PageOutcome` reports state changes and any follow-up demand without exposing the read
-slot or freshness flags.
-
-`RenderState` and `SnapshotState` are borrowed projections. They expose the data needed
-for composition and persistence without adding a getter for every field.
+`PageOutcome` reports state changes and any follow-up demand without making the caller
+coordinate the read slot or freshness flags.
 
 `Session` continues to decide when focus, mode, pixel preference, or reader intent makes
 a representation visible. The page-view module decides whether a read may start, how an
-answer changes the cached representation, and whether one follow-up read is due.
+answer changes the cached representation, and whether one follow-up read is due. Direct
+reads of `Tab` fields remain valid for composition, snapshots, and the existing public
+interface. New lifecycle mutations go through `PageLifecycle`.
 
 ## 5. Persistence owns write ordering
 
@@ -289,10 +288,12 @@ and what the statusline says. Moving availability policy into `Core` would split
 decision across both sides of the event/effect seam. The process mechanism stays in
 `Core`; the lifecycle policy stays in `Session`.
 
-### Preserve old field access beside the new modules
+### Preserve direct lifecycle mutation inside `Session`
 
-A compatibility layer would create two ways to change the same state. Each phase moves
-all callers in one change and removes the replaced field access before commit.
+Keeping direct lifecycle writes beside `PageLifecycle` would create two implementations
+of the same transition. The public `Tab` fields remain available for compatibility, but
+each phase moves the session's lifecycle mutations in one change and removes the
+replaced writes before commit.
 
 ## 11. Non-goals
 
