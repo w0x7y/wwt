@@ -67,3 +67,38 @@
 - [ ] Add configurable high-contrast themes and color-blind-safe hint palettes.
 - [ ] Add optional text-to-speech for reader mode.
 - [ ] Add an export command for saving reader content as plain text or Markdown.
+
+## Possible fixes to the YouTube problem
+
+The failure occurs in pixel mode: video frames advance while YouTube's loading bar remains visible and the surrounding page UI stays incomplete or unresponsive. These candidates are ranked from most likely to least likely. Confirm the cause with a reproducible test before implementing a fix.
+
+- [ ] Restore Chromium's normal frame pacing instead of launching every page with `--disable-frame-rate-limit`.
+- [ ] Let Chromium use the GPU instead of launching every page with `--disable-gpu`.
+- [ ] Reduce the pixel-mode screencast frame rate while full-motion video is playing.
+- [ ] Adapt screencast resolution to terminal throughput instead of encoding every video frame at the full terminal pixel size.
+- [ ] Use a cheaper screencast format for moving video while keeping PNG for pages where sharp text matters.
+- [ ] Apply screencast backpressure before Chromium spends time encoding a frame that the terminal cannot display yet.
+- [ ] Keep at most one screencast acknowledgement task in flight for each page.
+- [ ] Stop pixel-mode dirty signals from starting repeated status reads while YouTube mutates its player controls.
+- [ ] Filter player mutations that do not change WWT's title, URL, or scroll status.
+- [ ] Cap the rate of status reads caused by continuous YouTube mutations.
+- [ ] Measure YouTube's renderer main thread and lower WWT's workload when long tasks block page hydration.
+- [ ] Run WWT's bootstrap in an isolated JavaScript world so its observer and globals cannot interfere with YouTube.
+- [ ] Replace the page-global `window.__wwt` object and `__wwt_dirty` binding with names that cannot collide with site code.
+- [ ] Add a comparison mode that loads the page without WWT's bootstrap to identify injection-related failures.
+- [ ] Prioritize CDP command responses over large `Page.screencastFrame` events so status and input calls cannot starve.
+- [ ] Keep synchronous terminal writes from delaying browser events and screencast acknowledgements.
+- [ ] Detect a stalled `Page.startScreencast` pipeline and restart it without reloading the page.
+- [ ] Send user-agent client hints that match the user-agent string WWT reports to YouTube.
+- [ ] Detect YouTube's headless or automation challenge and report it instead of leaving a half-hydrated page.
+- [ ] Check YouTube's console for an uncaught hydration error and reload only the failed application shell.
+- [ ] Detect failed YouTube application API requests separately from the working `googlevideo.com` media stream.
+- [ ] Detect an advertisement request that leaves the watch-page application waiting after video playback begins.
+- [ ] Add a targeted reset for YouTube's service worker, cache, IndexedDB, local storage, and cookies.
+- [ ] Add a clean-profile comparison for YouTube without changing the user's persistent profile.
+- [ ] Add a safe comparison run without extensions, content filters, or profile policies.
+- [ ] Check the Chromium version and report known headless rendering or YouTube compatibility failures.
+- [ ] Prefer a video codec that leaves enough CPU time for YouTube's page UI.
+- [ ] Lower YouTube playback quality when software decoding saturates the CPU.
+- [ ] Preserve YouTube's expected viewport, focus, and visibility state while pixel mode is active.
+- [ ] Detect account experiments, consent flows, regional responses, and temporary YouTube application failures that leave the page shell unfinished.
