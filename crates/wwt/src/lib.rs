@@ -6,6 +6,7 @@
 //! replaced it, and it stayed on as a second way to get from a URL to a frame
 //! that no longer painted the same one. `Core` and `Session` are the way.
 
+mod browser;
 pub mod config;
 pub mod core;
 pub mod effect;

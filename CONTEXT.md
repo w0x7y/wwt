@@ -241,6 +241,12 @@ started a page operation, target open or CDP event. Browser replacement advances
 it, so late answers from the old process cannot change the current page maps or
 session. `wwt::core::BrowserGeneration`.
 
+**Browser lifecycle** — the private five-state policy for running, saving a login
+snapshot, visible login, missing Chromium, and relaunch in flight. It gates page work,
+suppresses duplicate relaunches, and returns status, browser requests, and tab
+directives; `Session` applies those outcomes without inspecting the state.
+`wwt::browser::BrowserLifecycle`.
+
 **Relaunch** — replacing a Chromium that died: drop the old one first,
 because it holds the profile lock, then three attempts with backoff. What
 survives is what a tab was; what does not is form contents and per-tab

@@ -27,6 +27,10 @@ use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
+use crate::browser::{
+    BrowserLifecycle, BrowserOutcome, BrowserRequest, BrowserSignal, BrowserStatus, PageWork,
+    TabDirective, WorkDecision,
+};
 use crate::effect::{Effect, FrameSize, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, ScrollAmount, action_for};
@@ -58,19 +62,6 @@ enum Picture {
 enum HintSource {
     Page,
     Reader(Vec<LinkId>),
-}
-
-/// Which browser lifecycle can accept page work right now.
-///
-/// Login is a deliberate absence, so it must not share the missing-browser
-/// retry path with a crashed Chromium.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserState {
-    Running,
-    SavingLogin,
-    Login,
-    Missing,
-    Relaunching,
 }
 
 pub struct Session {
@@ -112,10 +103,8 @@ pub struct Session {
     /// Counts focus changes, and stamps `Tab::focused_at` with each one.
     /// See `evict`.
     focus_counter: u64,
-    /// Running, deliberately handed to a login window, or missing.
-    browser: BrowserState,
-    /// Whether this run owns a persistent profile that can be handed off.
-    login_available: bool,
+    /// Browser availability and deliberate login-handoff policy.
+    browser: BrowserLifecycle,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -174,8 +163,7 @@ impl Session {
             picture: None,
             generations: 0,
             focus_counter: 0,
-            browser: BrowserState::Running,
-            login_available: true,
+            browser: BrowserLifecycle::new(true),
         }
     }
 
@@ -273,7 +261,51 @@ impl Session {
 
     /// Tell the state machine whether login can keep the current profile.
     pub fn set_login_available(&mut self, available: bool) {
-        self.login_available = available;
+        self.browser.set_login_available(available);
+    }
+
+    /// Ask the browser lifecycle whether page work may cross the seam.
+    fn gate_page_work(&mut self, work: PageWork, effects: &mut Vec<Effect>) -> bool {
+        match self.browser.gate(work) {
+            WorkDecision::Proceed => true,
+            WorkDecision::Relaunch => {
+                effects.push(Effect::Relaunch);
+                false
+            }
+            WorkDecision::Blocked => false,
+        }
+    }
+
+    /// Apply a browser policy decision to tabs, status, and the outer loop.
+    fn apply_browser_outcome(&mut self, outcome: BrowserOutcome, effects: &mut Vec<Effect>) {
+        match outcome.tabs {
+            TabDirective::Keep => {}
+            TabDirective::DetachAll => {
+                // Chromium is already gone or deliberately handed off, so
+                // there is no target for `Effect::Detach` to close.
+                for tab in &mut self.tabs {
+                    tab.detach();
+                }
+            }
+            TabDirective::ReopenFocused => self.reattach(self.focused_id(), effects),
+        }
+
+        if let Some(status) = outcome.status {
+            self.focused_mut().state = match status {
+                BrowserStatus::Notice(message) => State::Notice(message),
+                BrowserStatus::Error(message) => State::Error(message),
+            };
+        }
+
+        match outcome.request {
+            None => {}
+            Some(BrowserRequest::Relaunch) => effects.push(Effect::Relaunch),
+            Some(BrowserRequest::SaveForLogin) => {
+                self.mode = Mode::Normal;
+                effects.push(Effect::SaveForLogin(self.snapshot()));
+            }
+            Some(BrowserRequest::Login) => effects.push(Effect::Login),
+        }
     }
 
     /// The tab a job is about, or `None` if it has since been closed.
@@ -428,7 +460,7 @@ impl Session {
         // The page you were looking at went, and its right-hand neighbour
         // has taken its index, which is where the eye already is.
         self.look_at(index.min(self.tabs.len() - 1));
-        if self.browser != BrowserState::Running {
+        if !self.browser.running() {
             return;
         }
         let id = self.focused_id();
@@ -448,12 +480,12 @@ impl Session {
         if index >= self.tabs.len() || index == self.focus {
             return;
         }
-        if self.browser == BrowserState::SavingLogin {
+        if !self.browser.allows_tab_change() {
             return;
         }
         let leaving = self.focused_id();
         self.look_at(index);
-        if self.browser != BrowserState::Running {
+        if !self.browser.running() {
             self.save(effects);
             return;
         }
@@ -834,48 +866,14 @@ impl Session {
 
     /// The browser died. Keep everything, ask for another.
     fn on_browser_lost(&mut self, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Login | BrowserState::Missing | BrowserState::Relaunching => return,
-            BrowserState::Running | BrowserState::SavingLogin => {
-                self.browser = BrowserState::Missing;
-            }
-        }
-        // `Tab::detach` and not `Session::detach`: there is no target on the
-        // other end to close, so emitting `Effect::Detach` would ask `Core`
-        // to close pages whose websocket is already gone.
-        for tab in &mut self.tabs {
-            tab.detach();
-        }
-        self.focused_mut().state = State::Notice("browser gone, restarting".to_string());
-        self.ask_for_a_browser(effects);
-    }
-
-    /// Ask for a browser, unless we already have.
-    ///
-    /// The fourth in-flight flag in this file, and it exists for the same
-    /// reason as the other three: a held `j` after a failed relaunch would
-    /// otherwise spawn a relaunch per repeat.
-    fn ask_for_a_browser(&mut self, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Missing => {
-                self.browser = BrowserState::Relaunching;
-                effects.push(Effect::Relaunch);
-            }
-            BrowserState::Running
-            | BrowserState::SavingLogin
-            | BrowserState::Login
-            | BrowserState::Relaunching => {}
-        }
+        let outcome = self.browser.transition(BrowserSignal::Lost);
+        self.apply_browser_outcome(outcome, effects);
     }
 
     /// A browser arrived. Nothing has a target yet.
     fn on_browser_back(&mut self, effects: &mut Vec<Effect>) {
-        self.browser = BrowserState::Running;
-        // Only the tab in front, because the restart path is lazy restore
-        // arrived at from the other direction. A background tab pays for
-        // its target when you reach it, which is M4's idling rule.
-        let id = self.focused_id();
-        self.reattach(id, effects);
+        let outcome = self.browser.transition(BrowserSignal::Back);
+        self.apply_browser_outcome(outcome, effects);
     }
 
     /// A picture arrived.
@@ -935,13 +933,11 @@ impl Session {
         // a keystroke is how you ask for one back. Deliberately not a timer:
         // an idle wwt costs ~zero CPU and that rule does not get an
         // exception for the state where there is nothing to be busy about.
-        if self.browser != BrowserState::Running && self.action_touches_the_page(&action) {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if self.action_touches_the_page(&action) && !self.gate_page_work(PageWork::Request, effects)
+        {
             return;
         }
-        if self.browser == BrowserState::SavingLogin
+        if !self.browser.allows_tab_change()
             && matches!(action, Action::TabAt(_) | Action::TabClose)
         {
             return;
@@ -1145,13 +1141,12 @@ impl Session {
     }
 
     fn run_command(&mut self, command: Command, effects: &mut Vec<Effect>) {
-        if self.browser == BrowserState::SavingLogin && command != Command::Login {
+        if !self.browser.allows_command(command == Command::Login) {
             return;
         }
-        if self.browser != BrowserState::Running && Self::command_touches_the_page(&command) {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if Self::command_touches_the_page(&command)
+            && !self.gate_page_work(PageWork::Request, effects)
+        {
             return;
         }
         match command {
@@ -1176,21 +1171,8 @@ impl Session {
             Command::Forward => self.navigate(Navigation::Forward, effects),
             Command::Reload => self.navigate(Navigation::Reload, effects),
             Command::Login => {
-                if !self.login_available {
-                    self.focused_mut().state =
-                        State::Error("login needs WWT's persistent profile".to_string());
-                    return;
-                }
-                if self.browser != BrowserState::Running {
-                    self.focused_mut().state =
-                        State::Notice("a browser handoff is already in progress".to_string());
-                    return;
-                }
-                let snapshot = self.snapshot();
-                self.browser = BrowserState::SavingLogin;
-                self.mode = Mode::Normal;
-                self.focused_mut().state = State::Notice("saving session for login".to_string());
-                effects.push(Effect::SaveForLogin(snapshot));
+                let outcome = self.browser.transition(BrowserSignal::LoginRequested);
+                self.apply_browser_outcome(outcome, effects);
             }
             Command::Set(Setting::Mouse(on)) => {
                 effects.push(Effect::MouseCapture(on));
@@ -1411,10 +1393,7 @@ impl Session {
             .and_then(|document| document.links.get(id.0))
             .cloned();
         let Some(link) = link else { return };
-        if self.browser != BrowserState::Running {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if !self.gate_page_work(PageWork::Request, effects) {
             return;
         }
         if link.new_tab {
@@ -1491,14 +1470,39 @@ impl Session {
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Running => {}
-            BrowserState::SavingLogin => {}
-            BrowserState::Login if matches!(&job, Job::Login(_) | Job::Unsaved(_)) => {}
-            BrowserState::Relaunching if matches!(&job, Job::Relaunched(_) | Job::Unsaved(_)) => {}
-            BrowserState::Missing if matches!(&job, Job::Unsaved(_)) => {}
-            BrowserState::Login | BrowserState::Missing | BrowserState::Relaunching => return,
+        let job = match job {
+            // The session file is made of every tab. Its error belongs on
+            // the only visible statusline regardless of browser state.
+            Job::Unsaved(message) => {
+                self.focused_mut().state = State::Error(message);
+                return;
+            }
+            Job::Relaunched(result) => {
+                let outcome = self
+                    .browser
+                    .transition(BrowserSignal::RelaunchFinished(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            Job::Login(result) => {
+                let outcome = self
+                    .browser
+                    .transition(BrowserSignal::LoginFinished(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            Job::LoginSaved(result) => {
+                let outcome = self.browser.transition(BrowserSignal::LoginSaved(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            job => job,
+        };
+
+        if !self.gate_page_work(PageWork::Result, effects) {
+            return;
         }
+
         let id = match &job {
             Job::Extracted(id, _, _)
             | Job::Reader(id, _)
@@ -1508,61 +1512,10 @@ impl Session {
             | Job::Hints(id, _)
             | Job::Resized(id)
             | Job::Noted(id, _) => *id,
-            // The one job with no tab: the session file is made of all of
-            // them. It goes on the tab in front because that is the only
-            // statusline there is.
-            Job::Unsaved(message) => {
-                self.focused_mut().state = State::Error(message.clone());
-                return;
-            }
-            // The second job with no tab, and for the same reason: a browser
-            // belongs to all of them.
-            Job::Relaunched(result) => {
-                self.browser = BrowserState::Missing;
-                if let Err(message) = result {
-                    // Stale frames and a label, never an exit. The tabs are
-                    // already written down, so quitting is yours to choose.
-                    self.focused_mut().state =
-                        State::Error(format!("no browser: {message}. any key retries"));
-                }
-                return;
-            }
-            Job::Login(result) => {
-                if self.browser != BrowserState::Login {
-                    return;
-                }
-                self.browser = BrowserState::Relaunching;
-                self.focused_mut().state = match result {
-                    Ok(()) => State::Notice("login window closed, restarting".to_string()),
-                    Err(message) => State::Error(format!("login failed: {message}; restarting")),
-                };
-                effects.push(Effect::Relaunch);
-                return;
-            }
-            Job::LoginSaved(result) => {
-                if self.browser != BrowserState::SavingLogin {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        self.browser = BrowserState::Login;
-                        for tab in &mut self.tabs {
-                            tab.detach();
-                        }
-                        self.focused_mut().state = State::Notice(
-                            "finish login in Chromium, then close it".to_string(),
-                        );
-                        effects.push(Effect::Login);
-                    }
-                    Err(message) => {
-                        self.browser = BrowserState::Running;
-                        self.focused_mut().state =
-                            State::Error(format!("login failed: save session: {message}"));
-                    }
-                }
-                return;
-            }
             Job::Opened(id, _) => *id,
+            Job::Unsaved(_) | Job::Relaunched(_) | Job::Login(_) | Job::LoginSaved(_) => {
+                unreachable!("browser lifecycle jobs returned above")
+            }
         };
         if self.tab_mut(id).is_none() {
             // The tab was closed while this was in flight. Its id is never
@@ -2371,7 +2324,8 @@ mod tests {
             vec![reader_link("https://gone.example", false)],
             vec![Span { text: "gone".to_string(), link: Some(LinkId(0)) }],
         );
-        session.browser = BrowserState::Missing;
+        session.on(Event::BrowserLost);
+        session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
 
         assert_eq!(session.on(key('f')), vec![]);
         assert!(matches!(session.mode(), Mode::Hint(_)));
@@ -2385,7 +2339,8 @@ mod tests {
             let mut session = ready();
             cache_reader(&mut session, "reader text");
             session.on(key('r'));
-            session.browser = BrowserState::Missing;
+            session.on(Event::BrowserLost);
+            session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
 
             assert_eq!(session.on(event), vec![Effect::Relaunch]);
             assert!(session.focused().reader.active);
@@ -5101,6 +5056,20 @@ mod tests {
     }
 
     #[test]
+    fn browser_loss_while_the_login_snapshot_is_saving_restarts_and_ignores_the_late_save() {
+        let mut session = four_ready_tabs();
+        typed(&mut session, ":login");
+        assert!(matches!(
+            session.on(code(KeyCode::Enter)).as_slice(),
+            [Effect::SaveForLogin(_)]
+        ));
+
+        assert_eq!(session.on(Event::BrowserLost), vec![Effect::Relaunch]);
+        assert!(session.tabs.iter().all(|tab| tab.presence == Presence::Detached));
+        assert_eq!(session.on(Event::Done(Job::LoginSaved(Ok(())))), vec![]);
+    }
+
+    #[test]
     fn a_failed_pre_login_save_keeps_the_running_browser_and_tabs() {
         let mut session = four_ready_tabs();
         let snapshot = session.snapshot();
@@ -5116,7 +5085,7 @@ mod tests {
         );
 
         assert!(session.tabs.iter().all(Tab::attached));
-        assert_eq!(session.browser, BrowserState::Running);
+        assert!(session.browser.running());
         assert_eq!(
             session.state(),
             &State::Error("login failed: save session: disk full".to_string())
