@@ -204,6 +204,11 @@ back in as an event.
 **Core** — the adapter. Turns tokio into events and effects into spawns, and
 decides nothing. `wwt::core::Core`.
 
+**Persistence** — the private owner of the session-file path, pending snapshot,
+one-second debounce deadline, FIFO writer, and login and shutdown durability barriers.
+`Core` supplies time and save intent; `Persistence` decides which exact snapshot is
+queued and when completion returns as the existing job. `wwt::persistence::Persistence`.
+
 **Input** — one key or one click, as a thing to send. The vocabulary, so it
 lives beside the shapes it wraps in `wwt_page`, not beside the pump.
 `wwt_page::Input`.
