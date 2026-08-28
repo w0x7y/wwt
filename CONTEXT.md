@@ -125,6 +125,11 @@ Identified by a **tab id**, a counter that never reuses a value, because a
 page operation outlives the state that asked for it and an index would let a
 closed tab's answer land on the tab that took its place. `wwt::tab::Tab`.
 
+**Page lifecycle** — the private transition rules for one **tab**: shared reads, live
+and reader freshness, script fallback, navigation, hints, and detachment.
+`PageLifecycle<'_>` borrows a tab for one transition, so `Tab` keeps its public shape
+while `Session` stops coordinating its fields individually. `wwt::page_view`.
+
 **Focus** — which tab you are looking at. The only tab that receives keys,
 clicks and hint queries, and the only one painted. Switching **activates**
 the target as well, because `Input.dispatchMouseEvent` is answered by

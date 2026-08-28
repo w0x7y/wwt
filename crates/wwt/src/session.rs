@@ -20,26 +20,26 @@ use wwt_frame::{
     CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, Samples, TargetKind,
     Viewport,
 };
-use wwt_page::{Input, MouseInput, ScreencastFrame, Status};
+use wwt_page::{Input, MouseInput, ScreencastFrame};
 use wwt_reader::{Layout, LinkId};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
-use crate::effect::{Effect, FrameSize, Navigation, Scroll, Source};
-use crate::event::{Event, Failure, Job};
+use crate::effect::{Effect, FrameSize, Navigation, Scroll};
+use crate::event::{Event, Job};
 use crate::keymap::{Action, ScrollAmount, action_for};
 use crate::keys;
+use crate::page_view::{
+    HintRequest, PageLifecycle, PageOutcome, ReadDemand, ReadRequest, ReadResult,
+};
 use crate::store::{SavedTab, Snapshot};
 use crate::tab::{Presence, Tab, TabId};
 
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
 const WHEEL_ROWS: i32 = 3;
-
-/// What Chromium navigates to when it cannot reach a host.
-const CHROME_ERROR_SCHEME: &str = "chrome-error://";
 
 /// The picture last received for the focused tab, in whichever form the
 /// terminal can show.
@@ -214,7 +214,7 @@ impl Session {
         if let Some(url) = open {
             let id = session.mint();
             let mut tab = Tab::new(id, url);
-            tab.navigating = true;
+            PageLifecycle::new(&mut tab).begin_navigation();
             session.tabs.push(tab);
             session.focus = session.tabs.len() - 1;
         }
@@ -222,7 +222,7 @@ impl Session {
         if session.tabs.is_empty() {
             let id = session.mint();
             let mut tab = Tab::new(id, "about:blank".to_string());
-            tab.navigating = true;
+            PageLifecycle::new(&mut tab).begin_navigation();
             session.tabs.push(tab);
         }
         // The tab you left off on is the one you have most recently looked
@@ -307,7 +307,7 @@ impl Session {
         self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, url.clone());
-        tab.navigating = true;
+        PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
         effects.push(Effect::OpenTab {
@@ -353,7 +353,7 @@ impl Session {
         self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, String::new());
-        tab.navigating = true;
+        PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
         effects.push(Effect::AdoptTab { id, target });
@@ -393,12 +393,9 @@ impl Session {
     /// one.
     fn reattach(&mut self, id: TabId, effects: &mut Vec<Effect>) {
         let Some(tab) = self.tab_mut(id) else { return };
-        if tab.presence != Presence::Detached {
+        if !PageLifecycle::new(&mut *tab).begin_reattach() {
             return;
         }
-        tab.presence = Presence::Opening;
-        tab.navigating = true;
-        tab.state = State::Loading;
         let (url, scroll_y) = (tab.url.clone(), tab.scroll_y);
         effects.push(Effect::OpenTab { id, url, scroll_y });
     }
@@ -439,7 +436,7 @@ impl Session {
         // goes with it.
         self.follow_focus(None, effects);
         effects.push(Effect::Activate(id));
-        self.start_current_read(id, effects);
+        self.request_read(id, effects);
     }
 
     /// Look at another tab.
@@ -473,7 +470,7 @@ impl Session {
             effects.push(Effect::Activate(id));
             // Spends the dirty flag this tab has been accumulating in the
             // background, and does nothing if it has none.
-            self.start_current_read(id, effects);
+            self.request_read(id, effects);
         }
         self.save(effects);
         self.evict(effects);
@@ -545,7 +542,7 @@ impl Session {
                 effects.push(Effect::OpenTab { id, url, scroll_y });
             }
             // `Session::new`, which tests use and nothing else does.
-            Presence::Attached => self.start_extract(id, &mut effects),
+            Presence::Attached => self.request_read(id, &mut effects),
         }
         effects
     }
@@ -601,10 +598,10 @@ impl Session {
             // had visited in pixel mode painting stale runs on the switch
             // back, because a switch spends a dirty flag and never sets one.
             for tab in &mut self.tabs {
-                tab.dirty = true;
+                PageLifecycle::new(tab).live_changed();
             }
             if !reader_active {
-                self.start_extract(id, effects);
+                self.request_read(id, effects);
             }
         }
     }
@@ -623,7 +620,7 @@ impl Session {
             if pending {
                 self.focused_mut().state = State::Ready;
             }
-            self.start_extract(id, effects);
+            self.request_read(id, effects);
             return;
         }
 
@@ -642,7 +639,7 @@ impl Session {
         if self.pixel && !was_active && active {
             effects.push(Effect::StopScreencast(id));
         }
-        self.start_reader(id, effects);
+        self.request_read(id, effects);
     }
 
     /// Leave the semantic view without discarding its reusable cache.
@@ -822,9 +819,9 @@ impl Session {
             Event::Resized(grid, cell) => self.on_resize(grid, cell, &mut effects),
             Event::Dirty(id) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.mark_dirty();
+                    PageLifecycle::new(tab).changed();
                 }
-                self.start_current_read(id, &mut effects);
+                self.request_read(id, &mut effects);
             }
             Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
@@ -983,27 +980,16 @@ impl Session {
                 self.mode = Mode::Insert;
             }
             Action::Hints if self.focused().reader.active => self.enter_reader_hints(),
-            Action::Hints => match self.focused().hints.clone() {
-                Some(targets) => self.enter_page_hints(targets),
-                // `f` pressed twice before the first answer comes back is
-                // one question, not two.
-                //
-                // And a tab with no page behind it is not asked at all.
-                // `Core` drops an effect naming a page it does not hold,
-                // which is every effect between asking for a tab and being
-                // told it opened, and `Job::Hints` is the only thing that
-                // clears the flag below. Setting it for a query nobody can
-                // answer leaves `f` dead on that tab for the rest of the
-                // run. `Tab::opened` is what names that window.
-                None if !self.focused().hinting && self.focused().attached() => {
-                    let id = self.focused_id();
-                    self.focused_mut().hinting = true;
-                    let source =
-                        if self.focused().degraded { Source::Snapshot } else { Source::Script };
-                    effects.push(Effect::Hints(id, source));
+            Action::Hints => {
+                let id = self.focused_id();
+                match PageLifecycle::new(self.focused_mut()).begin_hints() {
+                    Some(HintRequest::Cached(targets)) => self.enter_page_hints(targets),
+                    Some(HintRequest::Query(source)) => {
+                        effects.push(Effect::Hints(id, source));
+                    }
+                    None => {}
                 }
-                None => {}
-            },
+            }
 
             // Scrolling does not settle the way a navigation does; the
             // page's own scroll listener reports when it has moved.
@@ -1239,16 +1225,9 @@ impl Session {
         }
         self.leave_reader(effects);
         let id = self.focused_id();
-        let tab = self.focused_mut();
-        tab.replace_document();
-        tab.navigating = true;
-        // A new document reinstalls bootstrap.js, so the next page has done
-        // nothing to deserve the slow path. Cleared on asking rather than
-        // on arriving, which makes a reload the way back from a tab that
-        // degraded on something transient.
-        tab.degraded = false;
-        tab.state = State::Loading;
-        effects.push(Effect::Navigate(id, navigation));
+        if PageLifecycle::new(self.focused_mut()).begin_navigation() {
+            effects.push(Effect::Navigate(id, navigation));
+        }
     }
 
     fn on_mouse(&mut self, event: MouseEvent, effects: &mut Vec<Effect>) {
@@ -1301,123 +1280,48 @@ impl Session {
         effects.push(Effect::Send(self.focused_id(), Input::Mouse(mouse)));
     }
 
-    fn start_extract(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        let focused = self.focused_id() == id;
-        // Only what is in front is painted as a picture. A background tab is
-        // read for its runs, which is what makes the first switch to it a
-        // repaint rather than a round trip.
-        let pixel = self.pixel && focused;
-        let Some(tab) = self.tab_mut(id) else { return };
-        // A tab with no target has no page to read. The dirty flag is kept
-        // rather than spent, and the reattach is what spends it.
-        if !tab.attached() {
-            return;
-        }
-        if tab.reading || !tab.dirty {
-            return;
-        }
-        // A background tab keeps its flag and spends it when focus arrives.
-        // Reading a page nobody is looking at is a round trip for a frame
-        // nobody will see, and spec section 3 is explicit that an idle
-        // background tab must cost what an idle foreground tab costs.
-        //
-        // The exception is a tab nobody has read yet: reading it once is what
-        // puts a real title in the bar and makes the first switch to it a
-        // repaint rather than a round trip. Idling means after that.
-        if !focused && tab.read {
-            return;
-        }
-        tab.reading = true;
-        tab.dirty = false;
-        // Pixel mode paints the picture and never the runs, so producing
-        // them is a forced layout for an answer `compose` throws away. Only
-        // the focused tab is a picture, and only a tab whose script works
-        // can be asked our cheap question at all: a degraded one asks the
-        // snapshot, which is the whole document either way.
-        //
-        // A tab nobody has read yet is the exception, whatever mode you are
-        // in. Reading it once is what puts a real title in the bar and gives
-        // it the runs that make the first switch to it a repaint, and a
-        // status carries neither of the two.
-        if pixel && tab.read && !tab.degraded {
-            effects.push(Effect::ReadStatus(id));
-            return;
-        }
-        let source = if tab.degraded { Source::Snapshot } else { Source::Script };
-        effects.push(Effect::Extract(id, source));
-    }
-
-    fn start_reader(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        if self.focused_id() != id {
-            return;
-        }
-        let Some(tab) = self.tab_mut(id) else { return };
-        if !tab.attached()
-            || tab.reading
-            || !tab.reader.dirty
-            || !(tab.reader.wanted || tab.reader.active)
-        {
-            return;
-        }
-        tab.reading = true;
-        tab.reader.dirty = false;
-        effects.push(Effect::ReadReader(id));
-    }
-
-    /// Refresh the representation this tab currently wants in front.
-    fn start_current_read(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        let reader = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == id)
-            .is_some_and(|tab| tab.reader.wanted || tab.reader.active);
-        if reader {
-            self.start_reader(id, effects);
-        } else {
-            self.start_extract(id, effects);
+    fn read_demand(&self, id: TabId) -> ReadDemand {
+        ReadDemand {
+            focused: self.focused_id() == id,
+            pixel: self.pixel,
+            columns: self.grid.cols,
+            rows: self.vp.grid().rows,
         }
     }
 
-    /// Everything the chrome learns from a page, applied the same way
-    /// whichever read produced it.
-    ///
-    /// An extraction and a status read differ in whether runs came with it
-    /// and in nothing else, so this is the only place that knows what a
-    /// title, a URL and a scroll offset mean. Splitting it out is what lets
-    /// pixel mode ask the cheap question without a second copy of the error
-    /// detection and the save rule drifting away from this one.
-    fn apply_status(&mut self, id: TabId, status: Status, effects: &mut Vec<Effect>) {
-        let progress = status.scroll_progress();
-        let Some(tab) = self.tab_mut(id) else { return };
-        // What a restart would come back to, before this read touches it.
-        // Compared against what is stored rather than against what arrived:
-        // an error page's URL is deliberately not kept, so a comparison with
-        // the read would differ every time and turn a page that cannot load
-        // into a write per dirty signal.
-        let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
-        tab.progress = progress;
-        tab.scroll_y = status.scroll_y;
-        tab.title = status.title;
-
-        // Chromium answers a DNS or connection failure by navigating to its
-        // own error page rather than failing the command, so a navigation can
-        // "succeed" into one. Its error page is more use than a stale frame,
-        // it says what went wrong, but the statusline must not go on claiming
-        // the page is fine.
-        if status.url.starts_with(CHROME_ERROR_SCHEME) {
-            // The statusline prints the URL itself, so naming it here too
-            // would print it twice.
-            tab.state = State::Error("could not be reached".to_string());
-        } else {
-            tab.url = status.url;
-            if !tab.navigating {
-                tab.state = State::Ready;
-            }
+    /// Refresh whichever representation this tab currently wants.
+    fn request_read(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let demand = self.read_demand(id);
+        let request = self
+            .tab_mut(id)
+            .and_then(|tab| PageLifecycle::new(tab).begin_read(demand));
+        if let Some(request) = request {
+            Self::emit_read_request(id, request, effects);
         }
+    }
 
-        let tab = self.tab_mut(id).expect("resolved above");
-        if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
-            self.save(effects);
+    fn apply_page_outcome(
+        &mut self,
+        id: TabId,
+        outcome: PageOutcome,
+        effects: &mut Vec<Effect>,
+    ) {
+        if outcome.save {
+            effects.push(Effect::Save(self.snapshot()));
+        }
+        if outcome.reader_became_active && self.pixel && self.focused_id() == id {
+            effects.push(Effect::StopScreencast(id));
+        }
+        if let Some(request) = outcome.next {
+            Self::emit_read_request(id, request, effects);
+        }
+    }
+
+    fn emit_read_request(id: TabId, request: ReadRequest, effects: &mut Vec<Effect>) {
+        match request {
+            ReadRequest::Extract(source) => effects.push(Effect::Extract(id, source)),
+            ReadRequest::Reader => effects.push(Effect::ReadReader(id)),
+            ReadRequest::Status => effects.push(Effect::ReadStatus(id)),
         }
     }
 
@@ -1668,190 +1572,47 @@ impl Session {
 
         match job {
             Job::Extracted(_, source, result) => {
-                let extraction = match result {
-                    Ok(extraction) => extraction,
-                    Err(failure) => {
-                        let tab = self.tab_mut(id).expect("resolved above");
-                        tab.reading = false;
-                        match (source, &failure) {
-                            // A deadline is not a broken script. The page is
-                            // not running, and `DOMSnapshot` needs the same
-                            // main thread our script does, so asking it costs
-                            // a second deadline to learn the same thing and
-                            // leaves the tab degraded for good over a wedge
-                            // that may last a second.
-                            //
-                            // Nothing is scheduled to try again either: a
-                            // page wedged in a loop cannot run its own
-                            // MutationObserver, so it sends no dirty signal,
-                            // and one that recovers sends one and is read.
-                            (_, Failure::TimedOut) => {
-                                tab.state = State::Stalled;
-                                return;
-                            }
-                            // The script broke. Read it the other way, once,
-                            // and go on reading it that way until it
-                            // navigates.
-                            (Source::Script, _) => {
-                                tab.degraded = true;
-                                tab.dirty = true;
-                            }
-                            // There is no third source. The frame you are
-                            // looking at stands and only the statusline
-                            // changes, which is section 8 of the parent.
-                            (Source::Snapshot, _) => tab.state = State::Error(failure.message()),
-                        }
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-                let extraction = *extraction;
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                tab.read = true;
-                tab.runs = extraction.runs;
-                tab.caret = extraction.caret;
-                // Everything else an extraction carries is what a status read
-                // carries, and is applied by the one place that knows how.
-                self.apply_status(id, extraction.status, effects);
-                // The page may have changed again while we were extracting.
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Extracted(source, result.map(|value| *value)), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Reader(_, result) => {
-                self.tab_mut(id).expect("resolved above").reading = false;
-                let extraction = match result {
-                    Ok(extraction) => *extraction,
-                    Err(failure) => {
-                        let tab = self.tab_mut(id).expect("resolved above");
-                        tab.state = match failure {
-                            Failure::TimedOut => State::Stalled,
-                            Failure::Failed(message) => State::Error(message),
-                        };
-                        if !tab.reader.active {
-                            tab.reader.wanted = false;
-                            tab.reader.dirty = true;
-                        }
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-
-                let was_active = self
-                    .tab_mut(id)
-                    .expect("resolved above")
-                    .reader
-                    .active;
-                if extraction.document.blocks.is_empty() {
-                    let tab = self.tab_mut(id).expect("resolved above");
-                    tab.state = State::Notice("nothing to read".to_string());
-                    if !was_active {
-                        tab.reader.wanted = false;
-                    }
-                    self.start_current_read(id, effects);
-                    return;
-                }
-                let document = extraction.document;
-                let layout = Layout::new(&document, self.grid.cols);
-                let max_top = layout
-                    .rows()
-                    .saturating_sub(usize::from(self.vp.grid().rows));
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reader.top_row = tab.reader.top_row.min(max_top);
-                tab.reader.document = Some(document);
-                tab.reader.layout = Some(layout);
-                tab.reader.active = tab.reader.wanted;
-                let became_active = !was_active && tab.reader.active;
-                self.apply_status(id, extraction.status, effects);
-                if became_active && self.pixel && self.focused_id() == id {
-                    effects.push(Effect::StopScreencast(id));
-                }
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Reader(result.map(|value| *value)), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Status(_, result) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                let status = match result {
-                    Ok(status) => status,
-                    // `status()` is the same injected script `extract()` is,
-                    // so it breaks the same way and earns the same answer:
-                    // degrade, and read the other way from now on. There is
-                    // no `Source` to branch on because a status is only ever
-                    // asked of a tab whose script works.
-                    // A deadline is the exception, for the reason
-                    // `Extracted` gives: the snapshot needs the main thread
-                    // that did not answer.
-                    Err(Failure::TimedOut) => {
-                        tab.state = State::Stalled;
-                        return;
-                    }
-                    Err(_) => {
-                        tab.degraded = true;
-                        tab.dirty = true;
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-                // Deliberately not `read`: a status carries no runs, and
-                // `read` is what says the first switch to this tab can be a
-                // repaint. Leaving pixel mode is what fills them in.
-                self.apply_status(id, status, effects);
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Status(result), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Hints(_, result) => {
-                // However it went, that tab's query is over and `f` must
-                // work on it again.
-                if let Some(tab) = self.tab_mut(id) {
-                    tab.hinting = false;
-                }
-                match result {
-                    Ok(targets) => {
-                        if let Some(tab) = self.tab_mut(id) {
-                            tab.hints = Some(targets.clone());
-                        }
-                        // A query is a round trip, and the keystroke that
-                        // asked for it was normal mode's, on a tab that was
-                        // in front. Landing the answer in whatever mode you
-                        // have since entered would take the command line out
-                        // from under you mid-word, and landing it on another
-                        // tab would paint one page's labels over another's
-                        // text.
-                        if self.mode == Mode::Normal
-                            && self.focused_id() == id
-                            && !self.focused().reader.active
-                        {
-                            self.enter_page_hints(targets);
-                        }
-                    }
-                    Err(failure) => {
-                        if let Some(tab) = self.tab_mut(id) {
-                            // A hint query that was never answered says the
-                            // page is not running, which is what `[stalled]`
-                            // is for.
-                            tab.state = match failure {
-                                Failure::TimedOut => State::Stalled,
-                                Failure::Failed(message) => State::Error(message),
-                            };
-                        }
-                    }
+                let result = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete_hints(result);
+                if let Ok(targets) = result
+                    && self.mode == Mode::Normal
+                    && self.focused_id() == id
+                    && !self.focused().reader.active
+                {
+                    self.enter_page_hints(targets);
                 }
             }
             Job::Settled(_) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.navigating = false;
-                tab.state = State::Ready;
-                tab.mark_dirty();
-                self.start_current_read(id, effects);
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .navigation_settled();
+                self.request_read(id, effects);
             }
             Job::Resized(_) => {
-                self.tab_mut(id).expect("resolved above").mark_dirty();
-                self.start_current_read(id, effects);
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above")).changed();
+                self.request_read(id, effects);
             }
             Job::Opened(_, Ok(())) => {
                 let tab = self.tab_mut(id).expect("resolved above");
                 tab.presence = Presence::Attached;
-                tab.navigating = false;
-                tab.state = State::Ready;
-                tab.mark_dirty();
+                PageLifecycle::new(tab).navigation_settled();
                 if self.focused_id() == id {
                     effects.push(Effect::Activate(id));
                     // The moment the picture can follow the focus here. It
@@ -1862,7 +1623,7 @@ impl Session {
                 }
                 // The page is already at the offset it was restored to;
                 // `Effect::OpenTab` carried it, so this reads what is there.
-                self.start_current_read(id, effects);
+                self.request_read(id, effects);
             }
             Job::Opened(_, Err(message)) => {
                 // A tab with no page behind it is not a tab. Drop it and say
@@ -1888,19 +1649,8 @@ impl Session {
                 }
             }
             Job::Failed(_, failure) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                tab.navigating = false;
-                // The frame stays exactly as it was; only the statusline
-                // changes. Section 8: never blank the frame you are looking at.
-                //
-                // A scroll or a navigation that was never answered says the
-                // same thing about the page as a read that was not, so it
-                // earns the same label.
-                tab.state = match failure {
-                    Failure::TimedOut => State::Stalled,
-                    Failure::Failed(message) => State::Error(message),
-                };
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .operation_failed(failure);
             }
             // The frame stays exactly as it was; only the statusline changes.
             // Spec section 8. Deliberately not `Job::Failed`: that one clears
@@ -1919,9 +1669,11 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effect::Source;
+    use crate::event::Failure;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
-    use wwt_page::{Extraction, ReaderExtraction};
+    use wwt_page::{Extraction, ReaderExtraction, Status};
     use wwt_reader::{Block, BlockKind, Document, Layout, Link, LinkId, Span};
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
@@ -1977,7 +1729,7 @@ mod tests {
     fn request_reader(session: &mut Session) -> Vec<Effect> {
         session.focused_mut().reader.wanted = true;
         let mut effects = Vec::new();
-        session.start_reader(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         effects
     }
 
@@ -2111,9 +1863,9 @@ mod tests {
         assert!(!session.focused().reader.dirty);
 
         let mut effects = Vec::new();
-        session.start_reader(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         session.focused_mut().dirty = true;
-        session.start_extract(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         assert_eq!(effects, Vec::<Effect>::new(), "a second page read would race the first");
     }
 
