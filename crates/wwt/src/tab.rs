@@ -9,6 +9,8 @@ use wwt_frame::{Caret, HintTarget, TextRun};
 use wwt_reader::{Document, Layout};
 use wwt_ui::chrome::State;
 
+use crate::page_view::PageLifecycle;
+
 /// A tab's identity, for as long as the tab exists.
 ///
 /// A counter and never a position. A page operation outlives the state that
@@ -142,9 +144,7 @@ impl Tab {
     ///
     /// Hint targets are geometry, so a page that moved has invalidated them.
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-        self.reader.dirty = true;
-        self.hints = None;
+        PageLifecycle::new(self).changed();
     }
 
     /// A navigation is replacing the document behind this tab.
@@ -152,8 +152,7 @@ impl Tab {
     /// The old runs remain as the frame that stands while loading. Reader
     /// content cannot: its destinations belong to the document being left.
     pub fn replace_document(&mut self) {
-        self.reader = ReaderState::default();
-        self.hints = None;
+        PageLifecycle::new(self).replace_document();
     }
 
     /// Let go of this tab's target, and keep the tab.
@@ -163,23 +162,7 @@ impl Tab {
     /// a restored tab starts this way, so getting the list wrong here is
     /// three bugs rather than one.
     pub fn detach(&mut self) {
-        self.presence = Presence::Detached;
-        // Every answer in flight is an answer that will not arrive: `Core`
-        // holds no page for this tab any more. A flag left set is a flag
-        // nothing can clear, which is `f` dead for the rest of the run.
-        self.reading = false;
-        self.navigating = false;
-        self.hinting = false;
-        // Geometry, belonging to a document that is about to stop existing.
-        self.hints = None;
-        // A reattached page is a new document with our script freshly in
-        // it, so it has earned the fast path back. The same reason a
-        // navigation clears this.
-        self.degraded = false;
-        // The runs stay, and are what a switch back paints first. They are
-        // also no longer authoritative, which is what the flag says.
-        self.dirty = true;
-        self.reader.dirty = true;
+        PageLifecycle::new(self).detach();
     }
 
     /// Whether an effect naming this tab would reach a page.

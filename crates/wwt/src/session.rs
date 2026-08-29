@@ -17,20 +17,29 @@
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_cdp::Attached;
 use wwt_frame::{
-    CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, Samples, TargetKind,
-    Viewport,
+    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
 };
-use wwt_page::{Input, MouseInput, ScreencastFrame, Status};
+use wwt_page::{Input, MouseInput};
 use wwt_reader::{Layout, LinkId};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
 use wwt_ui::command::{self, Command, Setting};
 use wwt_ui::hint::{Filtered, HintSession};
 
-use crate::effect::{Effect, FrameSize, Navigation, Scroll, Source};
-use crate::event::{Event, Failure, Job};
+use crate::browser::{
+    BrowserLifecycle, BrowserOutcome, BrowserRequest, BrowserSignal, BrowserStatus, PageWork,
+    TabDirective, WorkDecision,
+};
+use crate::effect::{Effect, Navigation, Scroll};
+use crate::event::{Event, Job};
 use crate::keymap::{Action, ScrollAmount, action_for};
 use crate::keys;
+use crate::page_view::{
+    HintRequest, PageLifecycle, PageOutcome, ReadDemand, ReadRequest, ReadResult,
+};
+use crate::pixel::{
+    FocusedPage, PixelOutcome, PixelOutput, PixelPresentation, PresentationRequest,
+};
 use crate::store::{SavedTab, Snapshot};
 use crate::tab::{Presence, Tab, TabId};
 
@@ -38,39 +47,11 @@ use crate::tab::{Presence, Tab, TabId};
 /// browser does, and matching it is what makes the page feel normal.
 const WHEEL_ROWS: i32 = 3;
 
-/// What Chromium navigates to when it cannot reach a host.
-const CHROME_ERROR_SCHEME: &str = "chrome-error://";
-
-/// The picture last received for the focused tab, in whichever form the
-/// terminal can show.
-///
-/// Two shapes rather than one because they leave by different doors: an
-/// `Image` is a payload the renderer hands to a graphics protocol, and
-/// `Samples` are cells the renderer already knows how to write.
-#[derive(Debug, Clone, PartialEq)]
-enum Picture {
-    Graphics(Image),
-    Blocks(Samples),
-}
-
 /// What the indices in the open UI hint session name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HintSource {
     Page,
     Reader(Vec<LinkId>),
-}
-
-/// Which browser lifecycle can accept page work right now.
-///
-/// Login is a deliberate absence, so it must not share the missing-browser
-/// retry path with a crashed Chromium.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserState {
-    Running,
-    SavingLogin,
-    Login,
-    Missing,
-    Relaunching,
 }
 
 pub struct Session {
@@ -87,35 +68,18 @@ pub struct Session {
     /// drop rather than plausible to paint.
     next_id: u32,
 
-    /// Whether the terminal can show a picture at all, asked once at
-    /// startup. A session told no refuses pixel mode rather than emitting
-    /// escapes into a terminal that would print them as text.
-    graphics: bool,
     /// Where anything that is not a URL goes. From the config file, and
     /// held here because `Session` is what interprets a `:` line.
     search: String,
     /// How many live targets to hold. See `evict`.
     max_tabs: usize,
-    /// Global rather than per-tab: only the focused tab screencasts either
-    /// way, so per-tab would buy a preference rather than a cost, and it
-    /// would have to be remembered in the session file, which is a snapshot
-    /// version bump and a rejected file for everyone who upgrades.
-    pixel: bool,
-    /// The picture last received for the focused tab.
-    ///
-    /// Not on `Tab`: a background tab does not screencast, so there is never
-    /// a second one to hold.
-    picture: Option<Picture>,
-    /// Counts pictures. The renderer diffs on this rather than on the
-    /// payload, so two frames that encode identically are still two frames.
-    generations: u64,
+    /// Global pixel preference, screencast request, and retained picture.
+    pixel: PixelPresentation,
     /// Counts focus changes, and stamps `Tab::focused_at` with each one.
     /// See `evict`.
     focus_counter: u64,
-    /// Running, deliberately handed to a login window, or missing.
-    browser: BrowserState,
-    /// Whether this run owns a persistent profile that can be handed off.
-    login_available: bool,
+    /// Browser availability and deliberate login-handoff policy.
+    browser: BrowserLifecycle,
 }
 
 /// The rows the page does not get: the tab bar above it and the statusline
@@ -167,15 +131,11 @@ impl Session {
             tabs: Vec::new(),
             focus: 0,
             next_id: 0,
-            graphics: false,
             search: crate::config::Config::default().search,
             max_tabs: crate::config::Config::default().max_tabs,
-            pixel: false,
-            picture: None,
-            generations: 0,
+            pixel: PixelPresentation::new(),
             focus_counter: 0,
-            browser: BrowserState::Running,
-            login_available: true,
+            browser: BrowserLifecycle::new(true),
         }
     }
 
@@ -214,7 +174,7 @@ impl Session {
         if let Some(url) = open {
             let id = session.mint();
             let mut tab = Tab::new(id, url);
-            tab.navigating = true;
+            PageLifecycle::new(&mut tab).begin_navigation();
             session.tabs.push(tab);
             session.focus = session.tabs.len() - 1;
         }
@@ -222,7 +182,7 @@ impl Session {
         if session.tabs.is_empty() {
             let id = session.mint();
             let mut tab = Tab::new(id, "about:blank".to_string());
-            tab.navigating = true;
+            PageLifecycle::new(&mut tab).begin_navigation();
             session.tabs.push(tab);
         }
         // The tab you left off on is the one you have most recently looked
@@ -273,7 +233,52 @@ impl Session {
 
     /// Tell the state machine whether login can keep the current profile.
     pub fn set_login_available(&mut self, available: bool) {
-        self.login_available = available;
+        self.browser.set_login_available(available);
+    }
+
+    /// Ask the browser lifecycle whether page work may cross the seam.
+    fn gate_page_work(&mut self, work: PageWork, effects: &mut Vec<Effect>) -> bool {
+        match self.browser.gate(work) {
+            WorkDecision::Proceed => true,
+            WorkDecision::Relaunch => {
+                effects.push(Effect::Relaunch);
+                false
+            }
+            WorkDecision::Blocked => false,
+        }
+    }
+
+    /// Apply a browser policy decision to tabs, status, and the outer loop.
+    fn apply_browser_outcome(&mut self, outcome: BrowserOutcome, effects: &mut Vec<Effect>) {
+        match outcome.tabs {
+            TabDirective::Keep => {}
+            TabDirective::DetachAll => {
+                // Chromium is already gone or deliberately handed off, so
+                // there is no target for `Effect::Detach` to close.
+                self.pixel.forget(self.focused_id());
+                for tab in &mut self.tabs {
+                    tab.detach();
+                }
+            }
+            TabDirective::ReopenFocused => self.reattach(self.focused_id(), effects),
+        }
+
+        if let Some(status) = outcome.status {
+            self.focused_mut().state = match status {
+                BrowserStatus::Notice(message) => State::Notice(message),
+                BrowserStatus::Error(message) => State::Error(message),
+            };
+        }
+
+        match outcome.request {
+            None => {}
+            Some(BrowserRequest::Relaunch) => effects.push(Effect::Relaunch),
+            Some(BrowserRequest::SaveForLogin) => {
+                self.mode = Mode::Normal;
+                effects.push(Effect::SaveForLogin(self.snapshot()));
+            }
+            Some(BrowserRequest::Login) => effects.push(Effect::Login),
+        }
     }
 
     /// The tab a job is about, or `None` if it has since been closed.
@@ -290,8 +295,47 @@ impl Session {
         self.tabs.iter().find(|tab| tab.id == id)
     }
 
-    fn shows_pixel(&self, tab: &Tab) -> bool {
-        self.pixel && !tab.reader.active
+    fn focused_page(&self) -> FocusedPage {
+        let tab = self.focused();
+        FocusedPage {
+            id: tab.id,
+            attached: tab.attached(),
+            reader_active: tab.reader.active,
+        }
+    }
+
+    fn emit_presentation_requests(
+        requests: impl IntoIterator<Item = PresentationRequest>,
+        effects: &mut Vec<Effect>,
+    ) {
+        effects.extend(requests.into_iter().map(|request| match request {
+            PresentationRequest::Start(id, size) => Effect::StartScreencast(id, size),
+            PresentationRequest::Stop(id) => Effect::StopScreencast(id),
+            PresentationRequest::Ack(id, ack) => Effect::AckFrame(id, ack),
+        }));
+    }
+
+    fn reconcile_pixels(&mut self, effects: &mut Vec<Effect>) {
+        let focused = self.focused_page();
+        let requests = self.pixel.reconcile(focused, self.vp);
+        Self::emit_presentation_requests(requests, effects);
+    }
+
+    fn apply_pixel_outcome(&mut self, outcome: PixelOutcome, effects: &mut Vec<Effect>) {
+        if !outcome.changed {
+            return;
+        }
+        self.clear_hints();
+        self.reconcile_pixels(effects);
+        if outcome.refresh_live_runs {
+            for tab in &mut self.tabs {
+                PageLifecycle::new(tab).live_changed();
+            }
+            let id = self.focused_id();
+            if !self.focused().reader.active {
+                self.request_read(id, effects);
+            }
+        }
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -304,12 +348,12 @@ impl Session {
     /// it is marked loading and `Core` holds nothing for it, so effects
     /// naming it are dropped; nothing could have expected to land.
     fn open_tab(&mut self, url: String, effects: &mut Vec<Effect>) {
-        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, url.clone());
-        tab.navigating = true;
+        PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
+        self.reconcile_pixels(effects);
         effects.push(Effect::OpenTab {
             id,
             url,
@@ -350,12 +394,12 @@ impl Session {
     /// browser chose where it goes. It arrives focused, which is what
     /// following such a link does anywhere else.
     fn adopt_tab(&mut self, target: Attached, effects: &mut Vec<Effect>) {
-        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, String::new());
-        tab.navigating = true;
+        PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
+        self.reconcile_pixels(effects);
         effects.push(Effect::AdoptTab { id, target });
         // Room for the target the browser is about to hand us, for the
         // reason `open_tab` makes room.
@@ -393,12 +437,9 @@ impl Session {
     /// one.
     fn reattach(&mut self, id: TabId, effects: &mut Vec<Effect>) {
         let Some(tab) = self.tab_mut(id) else { return };
-        if tab.presence != Presence::Detached {
+        if !PageLifecycle::new(&mut *tab).begin_reattach() {
             return;
         }
-        tab.presence = Presence::Opening;
-        tab.navigating = true;
-        tab.state = State::Loading;
         let (url, scroll_y) = (tab.url.clone(), tab.scroll_y);
         effects.push(Effect::OpenTab { id, url, scroll_y });
     }
@@ -408,6 +449,7 @@ impl Session {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        self.pixel.forget(id);
         effects.push(Effect::CloseTab(id));
         self.tabs.remove(index);
 
@@ -431,15 +473,15 @@ impl Session {
         // The page you were looking at went, and its right-hand neighbour
         // has taken its index, which is where the eye already is.
         self.look_at(index.min(self.tabs.len() - 1));
-        if self.browser != BrowserState::Running {
+        if !self.browser.running() {
             return;
         }
         let id = self.focused_id();
         // No stop for the tab that went: it is being closed, and its target
         // goes with it.
-        self.follow_focus(None, effects);
+        self.reconcile_pixels(effects);
         effects.push(Effect::Activate(id));
-        self.start_current_read(id, effects);
+        self.request_read(id, effects);
     }
 
     /// Look at another tab.
@@ -451,12 +493,11 @@ impl Session {
         if index >= self.tabs.len() || index == self.focus {
             return;
         }
-        if self.browser == BrowserState::SavingLogin {
+        if !self.browser.allows_tab_change() {
             return;
         }
-        let leaving = self.focused_id();
         self.look_at(index);
-        if self.browser != BrowserState::Running {
+        if !self.browser.running() {
             self.save(effects);
             return;
         }
@@ -466,14 +507,14 @@ impl Session {
         // first, so this is a round trip behind a repaint rather than
         // instead of one.
         self.reattach(id, effects);
-        self.follow_focus(Some(leaving), effects);
+        self.reconcile_pixels(effects);
         if self.focused().attached() {
             // The browser's foreground and ours have to be the same target,
             // or input lands on the page you just left.
             effects.push(Effect::Activate(id));
             // Spends the dirty flag this tab has been accumulating in the
             // background, and does nothing if it has none.
-            self.start_current_read(id, effects);
+            self.request_read(id, effects);
         }
         self.save(effects);
         self.evict(effects);
@@ -545,7 +586,7 @@ impl Session {
                 effects.push(Effect::OpenTab { id, url, scroll_y });
             }
             // `Session::new`, which tests use and nothing else does.
-            Presence::Attached => self.start_extract(id, &mut effects),
+            Presence::Attached => self.request_read(id, &mut effects),
         }
         effects
     }
@@ -554,7 +595,11 @@ impl Session {
     ///
     /// Asked once at startup, before raw mode, and never again.
     pub fn set_graphics(&mut self, graphics: bool) {
-        self.graphics = graphics;
+        self.pixel.set_output(if graphics {
+            PixelOutput::Graphics
+        } else {
+            PixelOutput::HalfBlocks
+        });
     }
 
     /// Take what the config file said.
@@ -574,39 +619,8 @@ impl Session {
     /// blocks is a property of the terminal and not a mode: there is one
     /// key and one tag.
     fn set_pixel(&mut self, on: bool, effects: &mut Vec<Effect>) {
-        if on == self.pixel {
-            return;
-        }
-        self.clear_hints();
-        self.pixel = on;
-        let id = self.focused_id();
-        let reader_active = self.focused().reader.active;
-        if on {
-            if !reader_active {
-                effects.push(Effect::StartScreencast(id, self.frame_size()));
-            }
-        } else {
-            // The picture goes with the mode, so the next compose carries
-            // none and the renderer deletes it from the terminal.
-            self.picture = None;
-            if !reader_active {
-                effects.push(Effect::StopScreencast(id));
-            }
-            // Nobody's runs were being maintained while the picture was up,
-            // so every tab's are suspect, not just the one in front. A
-            // background tab only takes the flag and spends it when focus
-            // arrives, which is M4's idling rule doing exactly its job: the
-            // one in front costs a read now and the rest cost nothing until
-            // you look at them. Marking only the focused tab left a tab you
-            // had visited in pixel mode painting stale runs on the switch
-            // back, because a switch spends a dirty flag and never sets one.
-            for tab in &mut self.tabs {
-                tab.dirty = true;
-            }
-            if !reader_active {
-                self.start_extract(id, effects);
-            }
-        }
+        let outcome = self.pixel.set_enabled(on);
+        self.apply_pixel_outcome(outcome, effects);
     }
 
     fn set_reader(&mut self, on: bool, effects: &mut Vec<Effect>) {
@@ -623,7 +637,7 @@ impl Session {
             if pending {
                 self.focused_mut().state = State::Ready;
             }
-            self.start_extract(id, effects);
+            self.request_read(id, effects);
             return;
         }
 
@@ -638,73 +652,22 @@ impl Session {
         } else {
             tab.state = State::Notice("reading".to_string());
         }
-        let active = self.focused().reader.active;
-        if self.pixel && !was_active && active {
-            effects.push(Effect::StopScreencast(id));
+        if !was_active && self.focused().reader.active {
+            self.reconcile_pixels(effects);
         }
-        self.start_reader(id, effects);
+        self.request_read(id, effects);
     }
 
     /// Leave the semantic view without discarding its reusable cache.
     fn leave_reader(&mut self, effects: &mut Vec<Effect>) {
         self.clear_hints();
-        let id = self.focused_id();
         let was_active = self.focused().reader.active;
         let tab = self.focused_mut();
         tab.reader.wanted = false;
         tab.reader.active = false;
-        if self.pixel && was_active {
-            effects.push(Effect::StartScreencast(id, self.frame_size()));
+        if was_active {
+            self.reconcile_pixels(effects);
         }
-    }
-
-    /// Move the screencast to whatever tab is focused now.
-    ///
-    /// Called wherever the focus changes or the viewport does, and does
-    /// nothing at all in text mode. The picture is deliberately not
-    /// cleared: a switch in pixel mode is a round trip, and the previous
-    /// picture under the new tab's chrome is what "never blank the frame
-    /// you are looking at" means here.
-    fn follow_focus(&mut self, leaving: Option<TabId>, effects: &mut Vec<Effect>) {
-        if !self.pixel {
-            return;
-        }
-        if let Some(leaving) = leaving
-            && self.tab(leaving).is_some_and(|tab| tab.attached() && self.shows_pixel(tab))
-        {
-            effects.push(Effect::StopScreencast(leaving));
-        }
-        if self.focused().attached() && self.shows_pixel(self.focused()) {
-            effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
-        }
-    }
-
-    /// Stop the picture on the way to a tab that does not exist yet.
-    ///
-    /// `follow_focus` is for a tab already open and does the stop and the
-    /// start together. It cannot be used here: `Core` drops any effect
-    /// naming a page it does not hold, which is every effect between asking
-    /// for a tab and being told it opened, so a start emitted now is a start
-    /// nobody hears. The tab being left does exist, so its stop is emitted
-    /// here and the start waits for `Job::Opened`.
-    ///
-    /// Without the stop, the tab you left goes on producing frames that
-    /// `on_frame` acks and discards for naming a tab that is no longer in
-    /// front, and the picture on screen stays the last one it sent.
-    fn leave_for_a_new_tab(&mut self, effects: &mut Vec<Effect>) {
-        if !self.shows_pixel(self.focused()) {
-            return;
-        }
-        effects.push(Effect::StopScreencast(self.focused_id()));
-    }
-
-    /// How large a picture to ask for. See `FrameSize`.
-    fn frame_size(&self) -> FrameSize {
-        if self.graphics {
-            return FrameSize { width: self.vp.css_width(), height: self.vp.css_height() };
-        }
-        let grid = self.vp.grid();
-        FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
     }
 
     /// Say something in the statusline.
@@ -741,13 +704,8 @@ impl Session {
                     self.vp.grid().rows,
                 );
             }
-        } else if self.pixel {
-            match &self.picture {
-                Some(Picture::Graphics(image)) => frame.set_image(Some(image.clone())),
-                Some(Picture::Blocks(samples)) => frame
-                    .paint_samples(CellRect::of(self.vp.grid(), self.vp.origin_row()), samples),
-                None => {}
-            }
+        } else if self.pixel.enabled() {
+            self.pixel.paint(&mut frame, self.vp);
         } else {
             frame.paint_runs(&self.vp, &tab.runs);
         }
@@ -788,7 +746,7 @@ impl Session {
                 progress,
                 titles: &titles,
                 focus: self.focus,
-                pixel: self.pixel,
+                pixel: self.pixel.enabled(),
                 reader: tab.reader.active,
                 degraded: tab.degraded,
             },
@@ -802,7 +760,7 @@ impl Session {
             // so placing ours on top of it is two carets disagreeing about
             // where the insertion point is. The command line keeps its own:
             // it is painted into a chrome row, which no image ever covers.
-            Mode::Insert if self.pixel => None,
+            Mode::Insert if self.pixel.enabled() => None,
             // A page can focus a field without your asking, and a caret
             // there would promise that your typing lands in it when in
             // normal mode it does not.
@@ -822,11 +780,21 @@ impl Session {
             Event::Resized(grid, cell) => self.on_resize(grid, cell, &mut effects),
             Event::Dirty(id) => {
                 if let Some(tab) = self.tab_mut(id) {
-                    tab.mark_dirty();
+                    PageLifecycle::new(tab).changed();
                 }
-                self.start_current_read(id, &mut effects);
+                self.request_read(id, &mut effects);
             }
-            Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
+            Event::Frame(id, frame) => {
+                let source_exists = self.tab(id).is_some();
+                let focused = self.focused_page();
+                let outcome =
+                    self.pixel
+                        .accept_frame(id, source_exists, focused, *frame, self.vp);
+                Self::emit_presentation_requests(outcome.request, &mut effects);
+                if let Some(notice) = outcome.notice {
+                    self.notice(&notice);
+                }
+            }
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
             Event::BrowserLost => self.on_browser_lost(&mut effects),
             Event::BrowserBack => self.on_browser_back(&mut effects),
@@ -837,93 +805,14 @@ impl Session {
 
     /// The browser died. Keep everything, ask for another.
     fn on_browser_lost(&mut self, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Login | BrowserState::Missing | BrowserState::Relaunching => return,
-            BrowserState::Running | BrowserState::SavingLogin => {
-                self.browser = BrowserState::Missing;
-            }
-        }
-        // `Tab::detach` and not `Session::detach`: there is no target on the
-        // other end to close, so emitting `Effect::Detach` would ask `Core`
-        // to close pages whose websocket is already gone.
-        for tab in &mut self.tabs {
-            tab.detach();
-        }
-        self.focused_mut().state = State::Notice("browser gone, restarting".to_string());
-        self.ask_for_a_browser(effects);
-    }
-
-    /// Ask for a browser, unless we already have.
-    ///
-    /// The fourth in-flight flag in this file, and it exists for the same
-    /// reason as the other three: a held `j` after a failed relaunch would
-    /// otherwise spawn a relaunch per repeat.
-    fn ask_for_a_browser(&mut self, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Missing => {
-                self.browser = BrowserState::Relaunching;
-                effects.push(Effect::Relaunch);
-            }
-            BrowserState::Running
-            | BrowserState::SavingLogin
-            | BrowserState::Login
-            | BrowserState::Relaunching => {}
-        }
+        let outcome = self.browser.transition(BrowserSignal::Lost);
+        self.apply_browser_outcome(outcome, effects);
     }
 
     /// A browser arrived. Nothing has a target yet.
     fn on_browser_back(&mut self, effects: &mut Vec<Effect>) {
-        self.browser = BrowserState::Running;
-        // Only the tab in front, because the restart path is lazy restore
-        // arrived at from the other direction. A background tab pays for
-        // its target when you reach it, which is M4's idling rule.
-        let id = self.focused_id();
-        self.reattach(id, effects);
-    }
-
-    /// A picture arrived.
-    ///
-    /// Acked whatever becomes of it: Chromium sends the next only once this
-    /// one is answered, so a frame we drop still has to be answered or the
-    /// screencast stops with nothing to say it did. A tab that is gone is
-    /// the one exception, because there is nothing left to answer.
-    fn on_frame(&mut self, id: TabId, frame: ScreencastFrame, effects: &mut Vec<Effect>) {
-        if !self.tabs.iter().any(|tab| tab.id == id) {
-            return;
-        }
-        effects.push(Effect::AckFrame(id, frame.ack));
-
-        // A frame for a tab you have switched away from, or one that was in
-        // flight when pixel mode was left, is answered and discarded.
-        if !self.shows_pixel(self.focused()) || self.focused_id() != id {
-            return;
-        }
-        if self.graphics {
-            // M5's path: the bytes never leave base64.
-            self.generations += 1;
-            self.picture = Some(Picture::Graphics(Image {
-                generation: self.generations,
-                payload: std::sync::Arc::new(frame.data),
-                area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
-            }));
-            return;
-        }
-
-        // Half-block has to look inside. Decoded here rather than in
-        // `compose`, which runs for every hint label, mode change and
-        // statusline update, and here rather than in a spawned task,
-        // because a frame arrives on the CDP arm of the loop and never as
-        // a job. A few thousand pixels against a 33ms pacing interval.
-        let grid = self.vp.grid();
-        let decoded = wwt_png::decode_base64(&frame.data).ok().and_then(|png| {
-            Samples::resampled(png.width, png.height, &png.pixels, grid.cols, grid.rows * 2)
-        });
-        match decoded {
-            Some(samples) => self.picture = Some(Picture::Blocks(samples)),
-            // The frame you are looking at stands. It has already been
-            // acked above, which is what keeps the screencast running.
-            None => self.notice("that picture could not be read"),
-        }
+        let outcome = self.browser.transition(BrowserSignal::Back);
+        self.apply_browser_outcome(outcome, effects);
     }
 
     fn on_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
@@ -938,13 +827,11 @@ impl Session {
         // a keystroke is how you ask for one back. Deliberately not a timer:
         // an idle wwt costs ~zero CPU and that rule does not get an
         // exception for the state where there is nothing to be busy about.
-        if self.browser != BrowserState::Running && self.action_touches_the_page(&action) {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if self.action_touches_the_page(&action) && !self.gate_page_work(PageWork::Request, effects)
+        {
             return;
         }
-        if self.browser == BrowserState::SavingLogin
+        if !self.browser.allows_tab_change()
             && matches!(action, Action::TabAt(_) | Action::TabClose)
         {
             return;
@@ -953,9 +840,7 @@ impl Session {
             Action::Quit => {
                 // Stop before quitting, so the browser is not left painting
                 // for a terminal that has gone.
-                if self.shows_pixel(self.focused()) {
-                    effects.push(Effect::StopScreencast(self.focused_id()));
-                }
+                Self::emit_presentation_requests(self.pixel.stop(), effects);
                 effects.push(Effect::Quit);
             }
             Action::TogglePixel
@@ -972,7 +857,7 @@ impl Session {
                 }
                 self.set_pixel(true, effects);
             }
-            Action::TogglePixel => self.set_pixel(!self.pixel, effects),
+            Action::TogglePixel => self.set_pixel(!self.pixel.enabled(), effects),
             Action::ToggleReader => {
                 let on = !(self.focused().reader.wanted || self.focused().reader.active);
                 self.set_reader(on, effects);
@@ -983,27 +868,16 @@ impl Session {
                 self.mode = Mode::Insert;
             }
             Action::Hints if self.focused().reader.active => self.enter_reader_hints(),
-            Action::Hints => match self.focused().hints.clone() {
-                Some(targets) => self.enter_page_hints(targets),
-                // `f` pressed twice before the first answer comes back is
-                // one question, not two.
-                //
-                // And a tab with no page behind it is not asked at all.
-                // `Core` drops an effect naming a page it does not hold,
-                // which is every effect between asking for a tab and being
-                // told it opened, and `Job::Hints` is the only thing that
-                // clears the flag below. Setting it for a query nobody can
-                // answer leaves `f` dead on that tab for the rest of the
-                // run. `Tab::opened` is what names that window.
-                None if !self.focused().hinting && self.focused().attached() => {
-                    let id = self.focused_id();
-                    self.focused_mut().hinting = true;
-                    let source =
-                        if self.focused().degraded { Source::Snapshot } else { Source::Script };
-                    effects.push(Effect::Hints(id, source));
+            Action::Hints => {
+                let id = self.focused_id();
+                match PageLifecycle::new(self.focused_mut()).begin_hints() {
+                    Some(HintRequest::Cached(targets)) => self.enter_page_hints(targets),
+                    Some(HintRequest::Query(source)) => {
+                        effects.push(Effect::Hints(id, source));
+                    }
+                    None => {}
                 }
-                None => {}
-            },
+            }
 
             // Scrolling does not settle the way a navigation does; the
             // page's own scroll listener reports when it has moved.
@@ -1133,7 +1007,9 @@ impl Session {
         match action {
             Action::Scroll(_) | Action::Hints if self.focused().reader.active => false,
             Action::TogglePixel => {
-                self.focused().reader.wanted || self.focused().reader.active || !self.pixel
+                self.focused().reader.wanted
+                    || self.focused().reader.active
+                    || !self.pixel.enabled()
             }
             _ => matches!(
                 action,
@@ -1159,13 +1035,12 @@ impl Session {
     }
 
     fn run_command(&mut self, command: Command, effects: &mut Vec<Effect>) {
-        if self.browser == BrowserState::SavingLogin && command != Command::Login {
+        if !self.browser.allows_command(command == Command::Login) {
             return;
         }
-        if self.browser != BrowserState::Running && Self::command_touches_the_page(&command) {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if Self::command_touches_the_page(&command)
+            && !self.gate_page_work(PageWork::Request, effects)
+        {
             return;
         }
         match command {
@@ -1190,21 +1065,8 @@ impl Session {
             Command::Forward => self.navigate(Navigation::Forward, effects),
             Command::Reload => self.navigate(Navigation::Reload, effects),
             Command::Login => {
-                if !self.login_available {
-                    self.focused_mut().state =
-                        State::Error("login needs WWT's persistent profile".to_string());
-                    return;
-                }
-                if self.browser != BrowserState::Running {
-                    self.focused_mut().state =
-                        State::Notice("a browser handoff is already in progress".to_string());
-                    return;
-                }
-                let snapshot = self.snapshot();
-                self.browser = BrowserState::SavingLogin;
-                self.mode = Mode::Normal;
-                self.focused_mut().state = State::Notice("saving session for login".to_string());
-                effects.push(Effect::SaveForLogin(snapshot));
+                let outcome = self.browser.transition(BrowserSignal::LoginRequested);
+                self.apply_browser_outcome(outcome, effects);
             }
             Command::Set(Setting::Mouse(on)) => {
                 effects.push(Effect::MouseCapture(on));
@@ -1239,16 +1101,9 @@ impl Session {
         }
         self.leave_reader(effects);
         let id = self.focused_id();
-        let tab = self.focused_mut();
-        tab.replace_document();
-        tab.navigating = true;
-        // A new document reinstalls bootstrap.js, so the next page has done
-        // nothing to deserve the slow path. Cleared on asking rather than
-        // on arriving, which makes a reload the way back from a tab that
-        // degraded on something transient.
-        tab.degraded = false;
-        tab.state = State::Loading;
-        effects.push(Effect::Navigate(id, navigation));
+        if PageLifecycle::new(self.focused_mut()).begin_navigation() {
+            effects.push(Effect::Navigate(id, navigation));
+        }
     }
 
     fn on_mouse(&mut self, event: MouseEvent, effects: &mut Vec<Effect>) {
@@ -1301,123 +1156,48 @@ impl Session {
         effects.push(Effect::Send(self.focused_id(), Input::Mouse(mouse)));
     }
 
-    fn start_extract(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        let focused = self.focused_id() == id;
-        // Only what is in front is painted as a picture. A background tab is
-        // read for its runs, which is what makes the first switch to it a
-        // repaint rather than a round trip.
-        let pixel = self.pixel && focused;
-        let Some(tab) = self.tab_mut(id) else { return };
-        // A tab with no target has no page to read. The dirty flag is kept
-        // rather than spent, and the reattach is what spends it.
-        if !tab.attached() {
-            return;
-        }
-        if tab.reading || !tab.dirty {
-            return;
-        }
-        // A background tab keeps its flag and spends it when focus arrives.
-        // Reading a page nobody is looking at is a round trip for a frame
-        // nobody will see, and spec section 3 is explicit that an idle
-        // background tab must cost what an idle foreground tab costs.
-        //
-        // The exception is a tab nobody has read yet: reading it once is what
-        // puts a real title in the bar and makes the first switch to it a
-        // repaint rather than a round trip. Idling means after that.
-        if !focused && tab.read {
-            return;
-        }
-        tab.reading = true;
-        tab.dirty = false;
-        // Pixel mode paints the picture and never the runs, so producing
-        // them is a forced layout for an answer `compose` throws away. Only
-        // the focused tab is a picture, and only a tab whose script works
-        // can be asked our cheap question at all: a degraded one asks the
-        // snapshot, which is the whole document either way.
-        //
-        // A tab nobody has read yet is the exception, whatever mode you are
-        // in. Reading it once is what puts a real title in the bar and gives
-        // it the runs that make the first switch to it a repaint, and a
-        // status carries neither of the two.
-        if pixel && tab.read && !tab.degraded {
-            effects.push(Effect::ReadStatus(id));
-            return;
-        }
-        let source = if tab.degraded { Source::Snapshot } else { Source::Script };
-        effects.push(Effect::Extract(id, source));
-    }
-
-    fn start_reader(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        if self.focused_id() != id {
-            return;
-        }
-        let Some(tab) = self.tab_mut(id) else { return };
-        if !tab.attached()
-            || tab.reading
-            || !tab.reader.dirty
-            || !(tab.reader.wanted || tab.reader.active)
-        {
-            return;
-        }
-        tab.reading = true;
-        tab.reader.dirty = false;
-        effects.push(Effect::ReadReader(id));
-    }
-
-    /// Refresh the representation this tab currently wants in front.
-    fn start_current_read(&mut self, id: TabId, effects: &mut Vec<Effect>) {
-        let reader = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == id)
-            .is_some_and(|tab| tab.reader.wanted || tab.reader.active);
-        if reader {
-            self.start_reader(id, effects);
-        } else {
-            self.start_extract(id, effects);
+    fn read_demand(&self, id: TabId) -> ReadDemand {
+        ReadDemand {
+            focused: self.focused_id() == id,
+            pixel: self.pixel.enabled(),
+            columns: self.grid.cols,
+            rows: self.vp.grid().rows,
         }
     }
 
-    /// Everything the chrome learns from a page, applied the same way
-    /// whichever read produced it.
-    ///
-    /// An extraction and a status read differ in whether runs came with it
-    /// and in nothing else, so this is the only place that knows what a
-    /// title, a URL and a scroll offset mean. Splitting it out is what lets
-    /// pixel mode ask the cheap question without a second copy of the error
-    /// detection and the save rule drifting away from this one.
-    fn apply_status(&mut self, id: TabId, status: Status, effects: &mut Vec<Effect>) {
-        let progress = status.scroll_progress();
-        let Some(tab) = self.tab_mut(id) else { return };
-        // What a restart would come back to, before this read touches it.
-        // Compared against what is stored rather than against what arrived:
-        // an error page's URL is deliberately not kept, so a comparison with
-        // the read would differ every time and turn a page that cannot load
-        // into a write per dirty signal.
-        let was = (tab.url.clone(), tab.title.clone(), tab.scroll_y);
-        tab.progress = progress;
-        tab.scroll_y = status.scroll_y;
-        tab.title = status.title;
-
-        // Chromium answers a DNS or connection failure by navigating to its
-        // own error page rather than failing the command, so a navigation can
-        // "succeed" into one. Its error page is more use than a stale frame,
-        // it says what went wrong, but the statusline must not go on claiming
-        // the page is fine.
-        if status.url.starts_with(CHROME_ERROR_SCHEME) {
-            // The statusline prints the URL itself, so naming it here too
-            // would print it twice.
-            tab.state = State::Error("could not be reached".to_string());
-        } else {
-            tab.url = status.url;
-            if !tab.navigating {
-                tab.state = State::Ready;
-            }
+    /// Refresh whichever representation this tab currently wants.
+    fn request_read(&mut self, id: TabId, effects: &mut Vec<Effect>) {
+        let demand = self.read_demand(id);
+        let request = self
+            .tab_mut(id)
+            .and_then(|tab| PageLifecycle::new(tab).begin_read(demand));
+        if let Some(request) = request {
+            Self::emit_read_request(id, request, effects);
         }
+    }
 
-        let tab = self.tab_mut(id).expect("resolved above");
-        if was != (tab.url.clone(), tab.title.clone(), tab.scroll_y) {
-            self.save(effects);
+    fn apply_page_outcome(
+        &mut self,
+        id: TabId,
+        outcome: PageOutcome,
+        effects: &mut Vec<Effect>,
+    ) {
+        if outcome.save {
+            effects.push(Effect::Save(self.snapshot()));
+        }
+        if outcome.reader_became_active && self.focused_id() == id {
+            self.reconcile_pixels(effects);
+        }
+        if let Some(request) = outcome.next {
+            Self::emit_read_request(id, request, effects);
+        }
+    }
+
+    fn emit_read_request(id: TabId, request: ReadRequest, effects: &mut Vec<Effect>) {
+        match request {
+            ReadRequest::Extract(source) => effects.push(Effect::Extract(id, source)),
+            ReadRequest::Reader => effects.push(Effect::ReadReader(id)),
+            ReadRequest::Status => effects.push(Effect::ReadStatus(id)),
         }
     }
 
@@ -1507,10 +1287,7 @@ impl Session {
             .and_then(|document| document.links.get(id.0))
             .cloned();
         let Some(link) = link else { return };
-        if self.browser != BrowserState::Running {
-            if matches!(self.browser, BrowserState::Missing | BrowserState::Relaunching) {
-                self.ask_for_a_browser(effects);
-            }
+        if !self.gate_page_work(PageWork::Request, effects) {
             return;
         }
         if link.new_tab {
@@ -1568,33 +1345,47 @@ impl Session {
             effects.push(Effect::SetViewport(tab.id, self.vp));
         }
 
-        // Whatever picture is still up covers the page area it has now, or
-        // the placeholders would address a placement of the wrong shape
-        // until the next frame lands. A new generation with it, because the
-        // renderer diffs on that and this image has to be placed again.
-        // Half-block has no placement to correct: its cells are repainted
-        // from whatever samples are in hand, and a grid the old picture is
-        // too small for leaves the new edge blank until the next frame.
-        if let Some(Picture::Graphics(image)) = &mut self.picture {
-            self.generations += 1;
-            image.generation = self.generations;
-            image.area = CellRect::of(self.vp.grid(), self.vp.origin_row());
-        }
         // The same tab, restarted at the new size: a screencast is started
         // with a viewport and does not learn about a later one.
-        let focused = self.focused_id();
-        self.follow_focus(Some(focused), effects);
+        let focused = self.focused_page();
+        let requests = self.pixel.restart(focused, self.vp);
+        Self::emit_presentation_requests(requests, effects);
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
-        match self.browser {
-            BrowserState::Running => {}
-            BrowserState::SavingLogin => {}
-            BrowserState::Login if matches!(&job, Job::Login(_) | Job::Unsaved(_)) => {}
-            BrowserState::Relaunching if matches!(&job, Job::Relaunched(_) | Job::Unsaved(_)) => {}
-            BrowserState::Missing if matches!(&job, Job::Unsaved(_)) => {}
-            BrowserState::Login | BrowserState::Missing | BrowserState::Relaunching => return,
+        let job = match job {
+            // The session file is made of every tab. Its error belongs on
+            // the only visible statusline regardless of browser state.
+            Job::Unsaved(message) => {
+                self.focused_mut().state = State::Error(message);
+                return;
+            }
+            Job::Relaunched(result) => {
+                let outcome = self
+                    .browser
+                    .transition(BrowserSignal::RelaunchFinished(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            Job::Login(result) => {
+                let outcome = self
+                    .browser
+                    .transition(BrowserSignal::LoginFinished(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            Job::LoginSaved(result) => {
+                let outcome = self.browser.transition(BrowserSignal::LoginSaved(result));
+                self.apply_browser_outcome(outcome, effects);
+                return;
+            }
+            job => job,
+        };
+
+        if !self.gate_page_work(PageWork::Result, effects) {
+            return;
         }
+
         let id = match &job {
             Job::Extracted(id, _, _)
             | Job::Reader(id, _)
@@ -1604,61 +1395,10 @@ impl Session {
             | Job::Hints(id, _)
             | Job::Resized(id)
             | Job::Noted(id, _) => *id,
-            // The one job with no tab: the session file is made of all of
-            // them. It goes on the tab in front because that is the only
-            // statusline there is.
-            Job::Unsaved(message) => {
-                self.focused_mut().state = State::Error(message.clone());
-                return;
-            }
-            // The second job with no tab, and for the same reason: a browser
-            // belongs to all of them.
-            Job::Relaunched(result) => {
-                self.browser = BrowserState::Missing;
-                if let Err(message) = result {
-                    // Stale frames and a label, never an exit. The tabs are
-                    // already written down, so quitting is yours to choose.
-                    self.focused_mut().state =
-                        State::Error(format!("no browser: {message}. any key retries"));
-                }
-                return;
-            }
-            Job::Login(result) => {
-                if self.browser != BrowserState::Login {
-                    return;
-                }
-                self.browser = BrowserState::Relaunching;
-                self.focused_mut().state = match result {
-                    Ok(()) => State::Notice("login window closed, restarting".to_string()),
-                    Err(message) => State::Error(format!("login failed: {message}; restarting")),
-                };
-                effects.push(Effect::Relaunch);
-                return;
-            }
-            Job::LoginSaved(result) => {
-                if self.browser != BrowserState::SavingLogin {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        self.browser = BrowserState::Login;
-                        for tab in &mut self.tabs {
-                            tab.detach();
-                        }
-                        self.focused_mut().state = State::Notice(
-                            "finish login in Chromium, then close it".to_string(),
-                        );
-                        effects.push(Effect::Login);
-                    }
-                    Err(message) => {
-                        self.browser = BrowserState::Running;
-                        self.focused_mut().state =
-                            State::Error(format!("login failed: save session: {message}"));
-                    }
-                }
-                return;
-            }
             Job::Opened(id, _) => *id,
+            Job::Unsaved(_) | Job::Relaunched(_) | Job::Login(_) | Job::LoginSaved(_) => {
+                unreachable!("browser lifecycle jobs returned above")
+            }
         };
         if self.tab_mut(id).is_none() {
             // The tab was closed while this was in flight. Its id is never
@@ -1668,201 +1408,58 @@ impl Session {
 
         match job {
             Job::Extracted(_, source, result) => {
-                let extraction = match result {
-                    Ok(extraction) => extraction,
-                    Err(failure) => {
-                        let tab = self.tab_mut(id).expect("resolved above");
-                        tab.reading = false;
-                        match (source, &failure) {
-                            // A deadline is not a broken script. The page is
-                            // not running, and `DOMSnapshot` needs the same
-                            // main thread our script does, so asking it costs
-                            // a second deadline to learn the same thing and
-                            // leaves the tab degraded for good over a wedge
-                            // that may last a second.
-                            //
-                            // Nothing is scheduled to try again either: a
-                            // page wedged in a loop cannot run its own
-                            // MutationObserver, so it sends no dirty signal,
-                            // and one that recovers sends one and is read.
-                            (_, Failure::TimedOut) => {
-                                tab.state = State::Stalled;
-                                return;
-                            }
-                            // The script broke. Read it the other way, once,
-                            // and go on reading it that way until it
-                            // navigates.
-                            (Source::Script, _) => {
-                                tab.degraded = true;
-                                tab.dirty = true;
-                            }
-                            // There is no third source. The frame you are
-                            // looking at stands and only the statusline
-                            // changes, which is section 8 of the parent.
-                            (Source::Snapshot, _) => tab.state = State::Error(failure.message()),
-                        }
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-                let extraction = *extraction;
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                tab.read = true;
-                tab.runs = extraction.runs;
-                tab.caret = extraction.caret;
-                // Everything else an extraction carries is what a status read
-                // carries, and is applied by the one place that knows how.
-                self.apply_status(id, extraction.status, effects);
-                // The page may have changed again while we were extracting.
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Extracted(source, result.map(|value| *value)), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Reader(_, result) => {
-                self.tab_mut(id).expect("resolved above").reading = false;
-                let extraction = match result {
-                    Ok(extraction) => *extraction,
-                    Err(failure) => {
-                        let tab = self.tab_mut(id).expect("resolved above");
-                        tab.state = match failure {
-                            Failure::TimedOut => State::Stalled,
-                            Failure::Failed(message) => State::Error(message),
-                        };
-                        if !tab.reader.active {
-                            tab.reader.wanted = false;
-                            tab.reader.dirty = true;
-                        }
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-
-                let was_active = self
-                    .tab_mut(id)
-                    .expect("resolved above")
-                    .reader
-                    .active;
-                if extraction.document.blocks.is_empty() {
-                    let tab = self.tab_mut(id).expect("resolved above");
-                    tab.state = State::Notice("nothing to read".to_string());
-                    if !was_active {
-                        tab.reader.wanted = false;
-                    }
-                    self.start_current_read(id, effects);
-                    return;
-                }
-                let document = extraction.document;
-                let layout = Layout::new(&document, self.grid.cols);
-                let max_top = layout
-                    .rows()
-                    .saturating_sub(usize::from(self.vp.grid().rows));
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reader.top_row = tab.reader.top_row.min(max_top);
-                tab.reader.document = Some(document);
-                tab.reader.layout = Some(layout);
-                tab.reader.active = tab.reader.wanted;
-                let became_active = !was_active && tab.reader.active;
-                self.apply_status(id, extraction.status, effects);
-                if became_active && self.pixel && self.focused_id() == id {
-                    effects.push(Effect::StopScreencast(id));
-                }
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Reader(result.map(|value| *value)), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Status(_, result) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                let status = match result {
-                    Ok(status) => status,
-                    // `status()` is the same injected script `extract()` is,
-                    // so it breaks the same way and earns the same answer:
-                    // degrade, and read the other way from now on. There is
-                    // no `Source` to branch on because a status is only ever
-                    // asked of a tab whose script works.
-                    // A deadline is the exception, for the reason
-                    // `Extracted` gives: the snapshot needs the main thread
-                    // that did not answer.
-                    Err(Failure::TimedOut) => {
-                        tab.state = State::Stalled;
-                        return;
-                    }
-                    Err(_) => {
-                        tab.degraded = true;
-                        tab.dirty = true;
-                        self.start_current_read(id, effects);
-                        return;
-                    }
-                };
-                // Deliberately not `read`: a status carries no runs, and
-                // `read` is what says the first switch to this tab can be a
-                // repaint. Leaving pixel mode is what fills them in.
-                self.apply_status(id, status, effects);
-                self.start_current_read(id, effects);
+                let demand = self.read_demand(id);
+                let outcome = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete(ReadResult::Status(result), demand);
+                self.apply_page_outcome(id, outcome, effects);
             }
             Job::Hints(_, result) => {
-                // However it went, that tab's query is over and `f` must
-                // work on it again.
-                if let Some(tab) = self.tab_mut(id) {
-                    tab.hinting = false;
-                }
-                match result {
-                    Ok(targets) => {
-                        if let Some(tab) = self.tab_mut(id) {
-                            tab.hints = Some(targets.clone());
-                        }
-                        // A query is a round trip, and the keystroke that
-                        // asked for it was normal mode's, on a tab that was
-                        // in front. Landing the answer in whatever mode you
-                        // have since entered would take the command line out
-                        // from under you mid-word, and landing it on another
-                        // tab would paint one page's labels over another's
-                        // text.
-                        if self.mode == Mode::Normal
-                            && self.focused_id() == id
-                            && !self.focused().reader.active
-                        {
-                            self.enter_page_hints(targets);
-                        }
-                    }
-                    Err(failure) => {
-                        if let Some(tab) = self.tab_mut(id) {
-                            // A hint query that was never answered says the
-                            // page is not running, which is what `[stalled]`
-                            // is for.
-                            tab.state = match failure {
-                                Failure::TimedOut => State::Stalled,
-                                Failure::Failed(message) => State::Error(message),
-                            };
-                        }
-                    }
+                let result = PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .complete_hints(result);
+                if let Ok(targets) = result
+                    && self.mode == Mode::Normal
+                    && self.focused_id() == id
+                    && !self.focused().reader.active
+                {
+                    self.enter_page_hints(targets);
                 }
             }
             Job::Settled(_) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.navigating = false;
-                tab.state = State::Ready;
-                tab.mark_dirty();
-                self.start_current_read(id, effects);
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .navigation_settled();
+                self.request_read(id, effects);
             }
             Job::Resized(_) => {
-                self.tab_mut(id).expect("resolved above").mark_dirty();
-                self.start_current_read(id, effects);
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above")).changed();
+                self.request_read(id, effects);
             }
             Job::Opened(_, Ok(())) => {
                 let tab = self.tab_mut(id).expect("resolved above");
                 tab.presence = Presence::Attached;
-                tab.navigating = false;
-                tab.state = State::Ready;
-                tab.mark_dirty();
+                PageLifecycle::new(tab).navigation_settled();
                 if self.focused_id() == id {
                     effects.push(Effect::Activate(id));
                     // The moment the picture can follow the focus here. It
                     // could not when the tab was made, because there was no
                     // page for `Core` to ask; nothing was left running to
-                    // stop, because `leave_for_a_new_tab` did that then.
-                    self.follow_focus(None, effects);
+                    // stop, because reconciliation did that then.
+                    self.reconcile_pixels(effects);
                 }
                 // The page is already at the offset it was restored to;
                 // `Effect::OpenTab` carried it, so this reads what is there.
-                self.start_current_read(id, effects);
+                self.request_read(id, effects);
             }
             Job::Opened(_, Err(message)) => {
                 // A tab with no page behind it is not a tab. Drop it and say
@@ -1888,19 +1485,8 @@ impl Session {
                 }
             }
             Job::Failed(_, failure) => {
-                let tab = self.tab_mut(id).expect("resolved above");
-                tab.reading = false;
-                tab.navigating = false;
-                // The frame stays exactly as it was; only the statusline
-                // changes. Section 8: never blank the frame you are looking at.
-                //
-                // A scroll or a navigation that was never answered says the
-                // same thing about the page as a read that was not, so it
-                // earns the same label.
-                tab.state = match failure {
-                    Failure::TimedOut => State::Stalled,
-                    Failure::Failed(message) => State::Error(message),
-                };
+                PageLifecycle::new(self.tab_mut(id).expect("resolved above"))
+                    .operation_failed(failure);
             }
             // The frame stays exactly as it was; only the statusline changes.
             // Spec section 8. Deliberately not `Job::Failed`: that one clears
@@ -1919,9 +1505,11 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effect::{FrameSize, Source};
+    use crate::event::Failure;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
-    use wwt_page::{Extraction, ReaderExtraction};
+    use wwt_page::{Extraction, ReaderExtraction, ScreencastFrame, Status};
     use wwt_reader::{Block, BlockKind, Document, Layout, Link, LinkId, Span};
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
@@ -1977,7 +1565,7 @@ mod tests {
     fn request_reader(session: &mut Session) -> Vec<Effect> {
         session.focused_mut().reader.wanted = true;
         let mut effects = Vec::new();
-        session.start_reader(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         effects
     }
 
@@ -2111,9 +1699,9 @@ mod tests {
         assert!(!session.focused().reader.dirty);
 
         let mut effects = Vec::new();
-        session.start_reader(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         session.focused_mut().dirty = true;
-        session.start_extract(tab0(), &mut effects);
+        session.request_read(tab0(), &mut effects);
         assert_eq!(effects, Vec::<Effect>::new(), "a second page read would race the first");
     }
 
@@ -2175,9 +1763,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.wanted);
 
         session.on(Event::Done(Job::Reader(
@@ -2186,7 +1780,7 @@ mod tests {
         )));
 
         assert!(!session.focused().reader.active);
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
     }
 
     #[test]
@@ -2619,7 +2213,8 @@ mod tests {
             vec![reader_link("https://gone.example", false)],
             vec![Span { text: "gone".to_string(), link: Some(LinkId(0)) }],
         );
-        session.browser = BrowserState::Missing;
+        session.on(Event::BrowserLost);
+        session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
 
         assert_eq!(session.on(key('f')), vec![]);
         assert!(matches!(session.mode(), Mode::Hint(_)));
@@ -2633,7 +2228,8 @@ mod tests {
             let mut session = ready();
             cache_reader(&mut session, "reader text");
             session.on(key('r'));
-            session.browser = BrowserState::Missing;
+            session.on(Event::BrowserLost);
+            session.on(Event::Done(Job::Relaunched(Err("no chromium".to_string()))));
 
             assert_eq!(session.on(event), vec![Effect::Relaunch]);
             assert!(session.focused().reader.active);
@@ -2652,7 +2248,7 @@ mod tests {
         assert_eq!(session.on(key('p')), vec![Effect::Relaunch]);
         assert!(session.focused().reader.active);
         assert!(session.focused().reader.wanted);
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(session.compose().row_text(1).contains("reader text"));
     }
 
@@ -2727,9 +2323,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
         assert!(!session.focused().reader.wanted);
         assert_eq!(session.focused().reader.document, document);
@@ -4355,9 +3957,16 @@ mod tests {
         session.set_graphics(false);
 
         let grid = page_viewport(GRID, CELL).grid();
+        let effects = session.on(key('p'));
         assert_eq!(
-            session.frame_size(),
-            FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
+            effects,
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: u32::from(grid.cols) * 2,
+                    height: u32::from(grid.rows) * 4,
+                },
+            )]
         );
     }
 
@@ -4365,7 +3974,7 @@ mod tests {
     fn p_turns_pixel_mode_on_and_asks_for_pictures() {
         let mut session = ready_with_graphics();
         let effects = session.on(key('p'));
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(matches!(effects.as_slice(), [Effect::StartScreencast(..)]));
     }
 
@@ -4374,7 +3983,7 @@ mod tests {
         let mut session = ready_with_graphics();
         session.on(key('p'));
         let effects = session.on(key('p'));
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(
             effects.contains(&Effect::StopScreencast(tab0())),
             "the pictures stop: {effects:?}"
@@ -4432,9 +4041,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
         assert_eq!(
             session.on(key('q')),
@@ -4451,9 +4066,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
     }
 
@@ -4618,7 +4239,7 @@ mod tests {
         session.on(key('p'));
         typed(&mut session, ":set pixel off");
         session.on(code(KeyCode::Enter));
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(
             session.compose().image().is_none(),
             "and drops the picture"
@@ -4632,7 +4253,7 @@ mod tests {
         let mut session = ready();
         typed(&mut session, ":set pixel on");
         session.on(code(KeyCode::Enter));
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
     }
 
     #[test]
@@ -5349,6 +4970,20 @@ mod tests {
     }
 
     #[test]
+    fn browser_loss_while_the_login_snapshot_is_saving_restarts_and_ignores_the_late_save() {
+        let mut session = four_ready_tabs();
+        typed(&mut session, ":login");
+        assert!(matches!(
+            session.on(code(KeyCode::Enter)).as_slice(),
+            [Effect::SaveForLogin(_)]
+        ));
+
+        assert_eq!(session.on(Event::BrowserLost), vec![Effect::Relaunch]);
+        assert!(session.tabs.iter().all(|tab| tab.presence == Presence::Detached));
+        assert_eq!(session.on(Event::Done(Job::LoginSaved(Ok(())))), vec![]);
+    }
+
+    #[test]
     fn a_failed_pre_login_save_keeps_the_running_browser_and_tabs() {
         let mut session = four_ready_tabs();
         let snapshot = session.snapshot();
@@ -5364,7 +4999,7 @@ mod tests {
         );
 
         assert!(session.tabs.iter().all(Tab::attached));
-        assert_eq!(session.browser, BrowserState::Running);
+        assert!(session.browser.running());
         assert_eq!(
             session.state(),
             &State::Error("login failed: save session: disk full".to_string())

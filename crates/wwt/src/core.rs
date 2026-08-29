@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as TermEvent, EventStream, KeyEventKind,
 };
@@ -28,6 +28,7 @@ use wwt_term::Renderer;
 use crate::effect::{Effect, Navigation, Scroll, Source};
 use crate::event::{Event, Failure, Job};
 use crate::input::InputPump;
+use crate::persistence::{Persistence, SaveIntent};
 use crate::session::Session;
 use crate::store::Snapshot;
 use crate::tab::TabId;
@@ -35,11 +36,6 @@ use crate::tab::TabId;
 /// A dragged window edge produces a resize event per frame, and each one
 /// would otherwise cost a Chromium relayout and a full extraction.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
-
-/// A held `j` produces a scroll and an extraction per frame, and every one of
-/// them changes the scroll offset a restart would come back to. Writing each
-/// would be a syscall per frame for a file nobody reads until the next launch.
-const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// The shortest gap between two pictures of a page.
 ///
@@ -99,79 +95,6 @@ impl Finished {
     }
 }
 
-enum SaveCompletion {
-    ReportFailure,
-    Login,
-    Final(tokio::sync::oneshot::Sender<Result<(), String>>),
-}
-
-struct SaveRequest {
-    path: PathBuf,
-    snapshot: Snapshot,
-    completion: SaveCompletion,
-}
-
-impl SaveRequest {
-    fn ordinary(path: PathBuf, snapshot: Snapshot) -> Self {
-        Self { path, snapshot, completion: SaveCompletion::ReportFailure }
-    }
-
-    fn login(path: PathBuf, snapshot: Snapshot) -> Self {
-        Self { path, snapshot, completion: SaveCompletion::Login }
-    }
-
-    fn final_save(
-        path: PathBuf,
-        snapshot: Snapshot,
-        done: tokio::sync::oneshot::Sender<Result<(), String>>,
-    ) -> Self {
-        Self { path, snapshot, completion: SaveCompletion::Final(done) }
-    }
-}
-
-/// One ordered writer, so an older debounced save cannot land after the
-/// acknowledged login snapshot and overwrite it.
-fn spawn_save_worker(
-    jobs: mpsc::UnboundedSender<Finished>,
-) -> mpsc::UnboundedSender<SaveRequest> {
-    spawn_save_worker_with(jobs, crate::store::save)
-}
-
-fn spawn_save_worker_with<F>(
-    jobs: mpsc::UnboundedSender<Finished>,
-    save: F,
-) -> mpsc::UnboundedSender<SaveRequest>
-where
-    F: Fn(&std::path::Path, &Snapshot) -> Result<(), String> + Send + Sync + 'static,
-{
-    let (tx, mut rx) = mpsc::unbounded_channel::<SaveRequest>();
-    let save = Arc::new(save);
-    tokio::spawn(async move {
-        while let Some(request) = rx.recv().await {
-            let SaveRequest { path, snapshot, completion } = request;
-            let save = Arc::clone(&save);
-            let result = tokio::task::spawn_blocking(move || save(&path, &snapshot))
-                .await
-                .map_err(|error| format!("session save task failed: {error}"))
-                .and_then(|result| result);
-            match completion {
-                SaveCompletion::Login => {
-                    let _ = jobs.send(Finished::Job(Job::LoginSaved(result)));
-                }
-                SaveCompletion::ReportFailure => {
-                    if let Err(error) = result {
-                        let _ = jobs.send(Finished::Job(Job::Unsaved(error)));
-                    }
-                }
-                SaveCompletion::Final(done) => {
-                    let _ = done.send(result);
-                }
-            }
-        }
-    });
-    tx
-}
-
 /// What one turn of the loop picked up. An arm produces one of these and
 /// touches nothing, because borrowing `self` in one while the other futures
 /// are alive is what used to force a whole spawned task to merge two
@@ -197,18 +120,11 @@ pub struct Core {
 
     jobs_tx: mpsc::UnboundedSender<Finished>,
     jobs_rx: mpsc::UnboundedReceiver<Finished>,
-    saves: mpsc::UnboundedSender<SaveRequest>,
-    final_save: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    persistence: Persistence,
 
     /// Ordered delivery of keys and clicks, across every page.
     input: InputPump,
 
-    /// Where the session file goes, or `None` when this instance does not own
-    /// it. A private session, on a profile another instance holds, writes
-    /// nothing.
-    session_file: Option<PathBuf>,
-    /// The most recent snapshot not yet written.
-    pending: Option<Snapshot>,
     /// When the next picture may be asked for. See `FRAME_INTERVAL`.
     framed_at: Instant,
 
@@ -263,11 +179,14 @@ impl Core {
     /// rest.
     pub fn new(client: Arc<Client>, startup: Startup) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
-        let saves = spawn_save_worker(jobs_tx.clone());
+        let login_available = startup.profile.is_some() && startup.session_file.is_some();
+        let report = jobs_tx.clone();
+        let persistence = Persistence::new(startup.session_file, move |job| {
+            let _ = report.send(Finished::Job(job));
+        });
         let input = InputPump::spawn(jobs_tx.clone(), |generation, job| {
             Finished::BrowserJob(BrowserGeneration(generation), job)
         });
-        let login_available = startup.profile.is_some() && startup.session_file.is_some();
         let mut session =
             Session::restore(startup.grid, startup.cell, startup.snapshot, startup.open);
         session.set_graphics(startup.graphics);
@@ -282,29 +201,14 @@ impl Core {
             session,
             jobs_tx,
             jobs_rx,
-            saves,
-            final_save: None,
+            persistence,
             input,
-            session_file: startup.session_file,
-            pending: None,
             framed_at: Instant::now(),
             browser: Some(startup.browser),
             profile: startup.profile,
             chromium: startup.config.chromium.clone(),
             browser_generation: BrowserGeneration(0),
         }
-    }
-
-    /// Write the pending snapshot, if there is one and it is ours to write.
-    ///
-    /// `spawn_blocking` rather than the loop's own thread: it is a small file
-    /// and a rename, but the loop's promise is that nothing in it waits on a
-    /// syscall.
-    fn flush_save(&mut self) {
-        let (Some(path), Some(snapshot)) = (self.session_file.clone(), self.pending.take()) else {
-            return;
-        };
-        let _ = self.saves.send(SaveRequest::ordinary(path, snapshot));
     }
 
     /// Say something in the statusline before the loop starts.
@@ -317,7 +221,6 @@ impl Core {
         let mut cdp = self.client.subscribe();
         let mut cdp_generation = self.browser_generation;
         let mut resize_at: Option<Instant> = None;
-        let mut save_at: Option<Instant> = None;
         // Whether the websocket has closed. A closed receiver answers `None`
         // immediately and forever, so the arm below has to be guarded off
         // once it has answered that: unguarded, the loop spins at one
@@ -326,7 +229,7 @@ impl Core {
         let mut lost = false;
 
         let effects = self.session.begin();
-        if self.apply(effects, &mut save_at, out)? {
+        if self.apply(effects, out)? {
             self.finish_saves().await?;
             return Ok(());
         }
@@ -334,6 +237,7 @@ impl Core {
 
         loop {
             let mut due_to_save = false;
+            let save_at = self.persistence.deadline();
 
             // Every arm produces an event and nothing else. Touching
             // `self` inside one would borrow it while the other futures are
@@ -409,14 +313,13 @@ impl Core {
                 () = async { sleep_until(save_at.expect("guarded")).await },
                     if save_at.is_some() =>
                 {
-                    save_at = None;
                     due_to_save = true;
                     None
                 }
             };
 
             if due_to_save {
-                self.flush_save();
+                self.persistence.flush_due();
             }
 
             // A page is `Core`'s. This is where one is filed, because it is
@@ -485,7 +388,7 @@ impl Core {
             // chatters on the console would pay for a repaint per line.
             if let Some(event) = event {
                 let effects = self.session.on(event);
-                if self.apply(effects, &mut save_at, out)? {
+                if self.apply(effects, out)? {
                     self.finish_saves().await?;
                     return Ok(());
                 }
@@ -495,52 +398,26 @@ impl Core {
     }
 
     /// Do what the session asked for. `true` means it is time to quit.
-    fn apply(
-        &mut self,
-        effects: Vec<Effect>,
-        save_at: &mut Option<Instant>,
-        out: &mut impl Write,
-    ) -> Result<bool> {
+    fn apply(&mut self, effects: Vec<Effect>, out: &mut impl Write) -> Result<bool> {
         for effect in effects {
             match effect {
                 Effect::Quit => {
-                    // The last second of browsing is exactly the part you
-                    // would notice missing.
-                    self.pending = None;
-                    if let Some(path) = self.session_file.clone() {
-                        let (done, finished) = tokio::sync::oneshot::channel();
-                        self.final_save = Some(finished);
-                        let request = SaveRequest::final_save(path, self.session.snapshot(), done);
-                        let _ = self.saves.send(request);
-                    }
+                    self.persistence.request(
+                        SaveIntent::ShutdownBarrier,
+                        self.session.snapshot(),
+                        Instant::now(),
+                    );
                     return Ok(true);
                 }
 
                 Effect::Save(snapshot) => {
-                    self.pending = Some(snapshot);
-                    *save_at = Some(Instant::now() + SAVE_DEBOUNCE);
+                    self.persistence
+                        .request(SaveIntent::Debounced, snapshot, Instant::now())
                 }
 
                 Effect::SaveForLogin(snapshot) => {
-                    // This write is a lifecycle barrier, not a debounced
-                    // browsing update. The browser handoff is requested only
-                    // after its completion reaches `Session`.
-                    self.pending = None;
-                    *save_at = None;
-                    match self.session_file.clone() {
-                        Some(path) => {
-                            if self.saves.send(SaveRequest::login(path, snapshot)).is_err() {
-                                let _ = self.jobs_tx.send(Finished::Job(Job::LoginSaved(Err(
-                                    "session save worker stopped".to_string(),
-                                ))));
-                            }
-                        }
-                        None => {
-                            let _ = self.jobs_tx.send(Finished::Job(Job::LoginSaved(Err(
-                                "WWT does not own a session file".to_string(),
-                            ))));
-                        }
-                    }
+                    self.persistence
+                        .request(SaveIntent::LoginBarrier, snapshot, Instant::now())
                 }
 
                 Effect::MouseCapture(on) => {
@@ -869,13 +746,7 @@ impl Core {
 
     /// Wait for the final snapshot and every save queued before it.
     async fn finish_saves(&mut self) -> Result<()> {
-        let Some(finished) = self.final_save.take() else {
-            return Ok(());
-        };
-        finished
-            .await
-            .map_err(|_| anyhow!("session save worker stopped before shutdown"))?
-            .map_err(|error| anyhow!(error))
+        self.persistence.finish().await.map_err(anyhow::Error::msg)
     }
 }
 
@@ -958,7 +829,6 @@ async fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SavedTab;
 
     #[test]
     fn old_browser_work_is_rejected_before_core_can_file_it() {
@@ -972,82 +842,5 @@ mod tests {
                 .is_current(current)
         );
         assert!(Finished::Job(Job::Login(Ok(()))).is_current(current));
-    }
-
-    #[tokio::test]
-    async fn login_save_acknowledges_after_earlier_saves_and_leaves_its_snapshot_last() {
-        let directory = tempfile::tempdir().expect("session directory");
-        let path = directory.path().join("session.json");
-        let snapshot = |url: &str| Snapshot {
-            version: crate::store::VERSION,
-            focus: 0,
-            tabs: vec![SavedTab {
-                url: url.to_string(),
-                title: String::new(),
-                scroll_y: 0.0,
-            }],
-        };
-        let older = snapshot("https://older.test");
-        let login = snapshot("https://login.test");
-        let (jobs_tx, mut jobs_rx) = mpsc::unbounded_channel();
-        let saves = spawn_save_worker_with(jobs_tx, |path, snapshot| {
-            if snapshot.tabs[0].url == "https://older.test" {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            crate::store::save(path, snapshot)
-        });
-
-        saves
-            .send(SaveRequest::ordinary(path.clone(), older))
-            .expect("queue older save");
-        saves
-            .send(SaveRequest::login(path.clone(), login.clone()))
-            .expect("queue login save");
-
-        loop {
-            if let Finished::Job(Job::LoginSaved(result)) =
-                jobs_rx.recv().await.expect("save result")
-            {
-                result.expect("login save succeeds");
-                break;
-            }
-        }
-
-        assert_eq!(crate::store::load(&path), Ok(Some(login)));
-    }
-
-    #[tokio::test]
-    async fn final_save_barrier_drains_older_work_before_acknowledging_quit() {
-        let directory = tempfile::tempdir().expect("session directory");
-        let path = directory.path().join("session.json");
-        let snapshot = |url: &str| Snapshot {
-            version: crate::store::VERSION,
-            focus: 0,
-            tabs: vec![SavedTab {
-                url: url.to_string(),
-                title: String::new(),
-                scroll_y: 0.0,
-            }],
-        };
-        let older = snapshot("https://older.test");
-        let final_snapshot = snapshot("https://final.test");
-        let (jobs_tx, _) = mpsc::unbounded_channel();
-        let saves = spawn_save_worker_with(jobs_tx, |path, snapshot| {
-            if snapshot.tabs[0].url == "https://older.test" {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            crate::store::save(path, snapshot)
-        });
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-
-        saves
-            .send(SaveRequest::ordinary(path.clone(), older))
-            .expect("queue older save");
-        saves
-            .send(SaveRequest::final_save(path.clone(), final_snapshot.clone(), done_tx))
-            .expect("queue final save");
-
-        done_rx.await.expect("final acknowledgment").expect("final save succeeds");
-        assert_eq!(crate::store::load(&path), Ok(Some(final_snapshot)));
     }
 }
