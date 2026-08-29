@@ -106,6 +106,11 @@ and only the focused tab screencasts. The viewport, the scroll offset and
 the focus are the same in both modes, which is what makes the toggle
 instant.
 
+**Pixel presentation:** the private owner of the global pixel preference,
+requested screencast, output form, retained picture, frame acceptance, and
+graphics generations. `Session` supplies only a focused-page projection and
+translates presentation requests into existing effects. `wwt::pixel::PixelPresentation`.
+
 **Reader view:** one tab showing its reader layout rather than the live page.
 Its scroll position is local, its document is cached in memory, and the page
 underneath never moves. It follows the tab through switches and browser

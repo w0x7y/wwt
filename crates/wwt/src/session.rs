@@ -17,10 +17,9 @@
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use wwt_cdp::Attached;
 use wwt_frame::{
-    CellPos, CellRect, CellSize, Frame, GridSize, HintTarget, Image, Samples, TargetKind,
-    Viewport,
+    CellPos, CellSize, Frame, GridSize, HintTarget, TargetKind, Viewport,
 };
-use wwt_page::{Input, MouseInput, ScreencastFrame};
+use wwt_page::{Input, MouseInput};
 use wwt_reader::{Layout, LinkId};
 use wwt_ui::Mode;
 use wwt_ui::chrome::{self, Chrome, State};
@@ -31,12 +30,15 @@ use crate::browser::{
     BrowserLifecycle, BrowserOutcome, BrowserRequest, BrowserSignal, BrowserStatus, PageWork,
     TabDirective, WorkDecision,
 };
-use crate::effect::{Effect, FrameSize, Navigation, Scroll};
+use crate::effect::{Effect, Navigation, Scroll};
 use crate::event::{Event, Job};
 use crate::keymap::{Action, ScrollAmount, action_for};
 use crate::keys;
 use crate::page_view::{
     HintRequest, PageLifecycle, PageOutcome, ReadDemand, ReadRequest, ReadResult,
+};
+use crate::pixel::{
+    FocusedPage, PixelOutcome, PixelOutput, PixelPresentation, PresentationRequest,
 };
 use crate::store::{SavedTab, Snapshot};
 use crate::tab::{Presence, Tab, TabId};
@@ -44,18 +46,6 @@ use crate::tab::{Presence, Tab, TabId};
 /// How far one notch of the wheel scrolls, in rows. Three is what a desktop
 /// browser does, and matching it is what makes the page feel normal.
 const WHEEL_ROWS: i32 = 3;
-
-/// The picture last received for the focused tab, in whichever form the
-/// terminal can show.
-///
-/// Two shapes rather than one because they leave by different doors: an
-/// `Image` is a payload the renderer hands to a graphics protocol, and
-/// `Samples` are cells the renderer already knows how to write.
-#[derive(Debug, Clone, PartialEq)]
-enum Picture {
-    Graphics(Image),
-    Blocks(Samples),
-}
 
 /// What the indices in the open UI hint session name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,28 +68,13 @@ pub struct Session {
     /// drop rather than plausible to paint.
     next_id: u32,
 
-    /// Whether the terminal can show a picture at all, asked once at
-    /// startup. A session told no refuses pixel mode rather than emitting
-    /// escapes into a terminal that would print them as text.
-    graphics: bool,
     /// Where anything that is not a URL goes. From the config file, and
     /// held here because `Session` is what interprets a `:` line.
     search: String,
     /// How many live targets to hold. See `evict`.
     max_tabs: usize,
-    /// Global rather than per-tab: only the focused tab screencasts either
-    /// way, so per-tab would buy a preference rather than a cost, and it
-    /// would have to be remembered in the session file, which is a snapshot
-    /// version bump and a rejected file for everyone who upgrades.
-    pixel: bool,
-    /// The picture last received for the focused tab.
-    ///
-    /// Not on `Tab`: a background tab does not screencast, so there is never
-    /// a second one to hold.
-    picture: Option<Picture>,
-    /// Counts pictures. The renderer diffs on this rather than on the
-    /// payload, so two frames that encode identically are still two frames.
-    generations: u64,
+    /// Global pixel preference, screencast request, and retained picture.
+    pixel: PixelPresentation,
     /// Counts focus changes, and stamps `Tab::focused_at` with each one.
     /// See `evict`.
     focus_counter: u64,
@@ -156,12 +131,9 @@ impl Session {
             tabs: Vec::new(),
             focus: 0,
             next_id: 0,
-            graphics: false,
             search: crate::config::Config::default().search,
             max_tabs: crate::config::Config::default().max_tabs,
-            pixel: false,
-            picture: None,
-            generations: 0,
+            pixel: PixelPresentation::new(),
             focus_counter: 0,
             browser: BrowserLifecycle::new(true),
         }
@@ -283,6 +255,7 @@ impl Session {
             TabDirective::DetachAll => {
                 // Chromium is already gone or deliberately handed off, so
                 // there is no target for `Effect::Detach` to close.
+                self.pixel.forget(self.focused_id());
                 for tab in &mut self.tabs {
                     tab.detach();
                 }
@@ -322,8 +295,47 @@ impl Session {
         self.tabs.iter().find(|tab| tab.id == id)
     }
 
-    fn shows_pixel(&self, tab: &Tab) -> bool {
-        self.pixel && !tab.reader.active
+    fn focused_page(&self) -> FocusedPage {
+        let tab = self.focused();
+        FocusedPage {
+            id: tab.id,
+            attached: tab.attached(),
+            reader_active: tab.reader.active,
+        }
+    }
+
+    fn emit_presentation_requests(
+        requests: impl IntoIterator<Item = PresentationRequest>,
+        effects: &mut Vec<Effect>,
+    ) {
+        effects.extend(requests.into_iter().map(|request| match request {
+            PresentationRequest::Start(id, size) => Effect::StartScreencast(id, size),
+            PresentationRequest::Stop(id) => Effect::StopScreencast(id),
+            PresentationRequest::Ack(id, ack) => Effect::AckFrame(id, ack),
+        }));
+    }
+
+    fn reconcile_pixels(&mut self, effects: &mut Vec<Effect>) {
+        let focused = self.focused_page();
+        let requests = self.pixel.reconcile(focused, self.vp);
+        Self::emit_presentation_requests(requests, effects);
+    }
+
+    fn apply_pixel_outcome(&mut self, outcome: PixelOutcome, effects: &mut Vec<Effect>) {
+        if !outcome.changed {
+            return;
+        }
+        self.clear_hints();
+        self.reconcile_pixels(effects);
+        if outcome.refresh_live_runs {
+            for tab in &mut self.tabs {
+                PageLifecycle::new(tab).live_changed();
+            }
+            let id = self.focused_id();
+            if !self.focused().reader.active {
+                self.request_read(id, effects);
+            }
+        }
     }
 
     pub fn tabs(&self) -> &[Tab] {
@@ -336,12 +348,12 @@ impl Session {
     /// it is marked loading and `Core` holds nothing for it, so effects
     /// naming it are dropped; nothing could have expected to land.
     fn open_tab(&mut self, url: String, effects: &mut Vec<Effect>) {
-        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, url.clone());
         PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
+        self.reconcile_pixels(effects);
         effects.push(Effect::OpenTab {
             id,
             url,
@@ -382,12 +394,12 @@ impl Session {
     /// browser chose where it goes. It arrives focused, which is what
     /// following such a link does anywhere else.
     fn adopt_tab(&mut self, target: Attached, effects: &mut Vec<Effect>) {
-        self.leave_for_a_new_tab(effects);
         let id = self.mint();
         let mut tab = Tab::new(id, String::new());
         PageLifecycle::new(&mut tab).begin_navigation();
         self.tabs.push(tab);
         self.look_at(self.tabs.len() - 1);
+        self.reconcile_pixels(effects);
         effects.push(Effect::AdoptTab { id, target });
         // Room for the target the browser is about to hand us, for the
         // reason `open_tab` makes room.
@@ -437,6 +449,7 @@ impl Session {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        self.pixel.forget(id);
         effects.push(Effect::CloseTab(id));
         self.tabs.remove(index);
 
@@ -466,7 +479,7 @@ impl Session {
         let id = self.focused_id();
         // No stop for the tab that went: it is being closed, and its target
         // goes with it.
-        self.follow_focus(None, effects);
+        self.reconcile_pixels(effects);
         effects.push(Effect::Activate(id));
         self.request_read(id, effects);
     }
@@ -483,7 +496,6 @@ impl Session {
         if !self.browser.allows_tab_change() {
             return;
         }
-        let leaving = self.focused_id();
         self.look_at(index);
         if !self.browser.running() {
             self.save(effects);
@@ -495,7 +507,7 @@ impl Session {
         // first, so this is a round trip behind a repaint rather than
         // instead of one.
         self.reattach(id, effects);
-        self.follow_focus(Some(leaving), effects);
+        self.reconcile_pixels(effects);
         if self.focused().attached() {
             // The browser's foreground and ours have to be the same target,
             // or input lands on the page you just left.
@@ -583,7 +595,11 @@ impl Session {
     ///
     /// Asked once at startup, before raw mode, and never again.
     pub fn set_graphics(&mut self, graphics: bool) {
-        self.graphics = graphics;
+        self.pixel.set_output(if graphics {
+            PixelOutput::Graphics
+        } else {
+            PixelOutput::HalfBlocks
+        });
     }
 
     /// Take what the config file said.
@@ -603,39 +619,8 @@ impl Session {
     /// blocks is a property of the terminal and not a mode: there is one
     /// key and one tag.
     fn set_pixel(&mut self, on: bool, effects: &mut Vec<Effect>) {
-        if on == self.pixel {
-            return;
-        }
-        self.clear_hints();
-        self.pixel = on;
-        let id = self.focused_id();
-        let reader_active = self.focused().reader.active;
-        if on {
-            if !reader_active {
-                effects.push(Effect::StartScreencast(id, self.frame_size()));
-            }
-        } else {
-            // The picture goes with the mode, so the next compose carries
-            // none and the renderer deletes it from the terminal.
-            self.picture = None;
-            if !reader_active {
-                effects.push(Effect::StopScreencast(id));
-            }
-            // Nobody's runs were being maintained while the picture was up,
-            // so every tab's are suspect, not just the one in front. A
-            // background tab only takes the flag and spends it when focus
-            // arrives, which is M4's idling rule doing exactly its job: the
-            // one in front costs a read now and the rest cost nothing until
-            // you look at them. Marking only the focused tab left a tab you
-            // had visited in pixel mode painting stale runs on the switch
-            // back, because a switch spends a dirty flag and never sets one.
-            for tab in &mut self.tabs {
-                PageLifecycle::new(tab).live_changed();
-            }
-            if !reader_active {
-                self.request_read(id, effects);
-            }
-        }
+        let outcome = self.pixel.set_enabled(on);
+        self.apply_pixel_outcome(outcome, effects);
     }
 
     fn set_reader(&mut self, on: bool, effects: &mut Vec<Effect>) {
@@ -667,9 +652,8 @@ impl Session {
         } else {
             tab.state = State::Notice("reading".to_string());
         }
-        let active = self.focused().reader.active;
-        if self.pixel && !was_active && active {
-            effects.push(Effect::StopScreencast(id));
+        if !was_active && self.focused().reader.active {
+            self.reconcile_pixels(effects);
         }
         self.request_read(id, effects);
     }
@@ -677,63 +661,13 @@ impl Session {
     /// Leave the semantic view without discarding its reusable cache.
     fn leave_reader(&mut self, effects: &mut Vec<Effect>) {
         self.clear_hints();
-        let id = self.focused_id();
         let was_active = self.focused().reader.active;
         let tab = self.focused_mut();
         tab.reader.wanted = false;
         tab.reader.active = false;
-        if self.pixel && was_active {
-            effects.push(Effect::StartScreencast(id, self.frame_size()));
+        if was_active {
+            self.reconcile_pixels(effects);
         }
-    }
-
-    /// Move the screencast to whatever tab is focused now.
-    ///
-    /// Called wherever the focus changes or the viewport does, and does
-    /// nothing at all in text mode. The picture is deliberately not
-    /// cleared: a switch in pixel mode is a round trip, and the previous
-    /// picture under the new tab's chrome is what "never blank the frame
-    /// you are looking at" means here.
-    fn follow_focus(&mut self, leaving: Option<TabId>, effects: &mut Vec<Effect>) {
-        if !self.pixel {
-            return;
-        }
-        if let Some(leaving) = leaving
-            && self.tab(leaving).is_some_and(|tab| tab.attached() && self.shows_pixel(tab))
-        {
-            effects.push(Effect::StopScreencast(leaving));
-        }
-        if self.focused().attached() && self.shows_pixel(self.focused()) {
-            effects.push(Effect::StartScreencast(self.focused_id(), self.frame_size()));
-        }
-    }
-
-    /// Stop the picture on the way to a tab that does not exist yet.
-    ///
-    /// `follow_focus` is for a tab already open and does the stop and the
-    /// start together. It cannot be used here: `Core` drops any effect
-    /// naming a page it does not hold, which is every effect between asking
-    /// for a tab and being told it opened, so a start emitted now is a start
-    /// nobody hears. The tab being left does exist, so its stop is emitted
-    /// here and the start waits for `Job::Opened`.
-    ///
-    /// Without the stop, the tab you left goes on producing frames that
-    /// `on_frame` acks and discards for naming a tab that is no longer in
-    /// front, and the picture on screen stays the last one it sent.
-    fn leave_for_a_new_tab(&mut self, effects: &mut Vec<Effect>) {
-        if !self.shows_pixel(self.focused()) {
-            return;
-        }
-        effects.push(Effect::StopScreencast(self.focused_id()));
-    }
-
-    /// How large a picture to ask for. See `FrameSize`.
-    fn frame_size(&self) -> FrameSize {
-        if self.graphics {
-            return FrameSize { width: self.vp.css_width(), height: self.vp.css_height() };
-        }
-        let grid = self.vp.grid();
-        FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
     }
 
     /// Say something in the statusline.
@@ -770,13 +704,8 @@ impl Session {
                     self.vp.grid().rows,
                 );
             }
-        } else if self.pixel {
-            match &self.picture {
-                Some(Picture::Graphics(image)) => frame.set_image(Some(image.clone())),
-                Some(Picture::Blocks(samples)) => frame
-                    .paint_samples(CellRect::of(self.vp.grid(), self.vp.origin_row()), samples),
-                None => {}
-            }
+        } else if self.pixel.enabled() {
+            self.pixel.paint(&mut frame, self.vp);
         } else {
             frame.paint_runs(&self.vp, &tab.runs);
         }
@@ -817,7 +746,7 @@ impl Session {
                 progress,
                 titles: &titles,
                 focus: self.focus,
-                pixel: self.pixel,
+                pixel: self.pixel.enabled(),
                 reader: tab.reader.active,
                 degraded: tab.degraded,
             },
@@ -831,7 +760,7 @@ impl Session {
             // so placing ours on top of it is two carets disagreeing about
             // where the insertion point is. The command line keeps its own:
             // it is painted into a chrome row, which no image ever covers.
-            Mode::Insert if self.pixel => None,
+            Mode::Insert if self.pixel.enabled() => None,
             // A page can focus a field without your asking, and a caret
             // there would promise that your typing lands in it when in
             // normal mode it does not.
@@ -855,7 +784,17 @@ impl Session {
                 }
                 self.request_read(id, &mut effects);
             }
-            Event::Frame(id, frame) => self.on_frame(id, *frame, &mut effects),
+            Event::Frame(id, frame) => {
+                let source_exists = self.tab(id).is_some();
+                let focused = self.focused_page();
+                let outcome =
+                    self.pixel
+                        .accept_frame(id, source_exists, focused, *frame, self.vp);
+                Self::emit_presentation_requests(outcome.request, &mut effects);
+                if let Some(notice) = outcome.notice {
+                    self.notice(&notice);
+                }
+            }
             Event::TargetOpened(target) => self.adopt_tab(target, &mut effects),
             Event::BrowserLost => self.on_browser_lost(&mut effects),
             Event::BrowserBack => self.on_browser_back(&mut effects),
@@ -874,51 +813,6 @@ impl Session {
     fn on_browser_back(&mut self, effects: &mut Vec<Effect>) {
         let outcome = self.browser.transition(BrowserSignal::Back);
         self.apply_browser_outcome(outcome, effects);
-    }
-
-    /// A picture arrived.
-    ///
-    /// Acked whatever becomes of it: Chromium sends the next only once this
-    /// one is answered, so a frame we drop still has to be answered or the
-    /// screencast stops with nothing to say it did. A tab that is gone is
-    /// the one exception, because there is nothing left to answer.
-    fn on_frame(&mut self, id: TabId, frame: ScreencastFrame, effects: &mut Vec<Effect>) {
-        if !self.tabs.iter().any(|tab| tab.id == id) {
-            return;
-        }
-        effects.push(Effect::AckFrame(id, frame.ack));
-
-        // A frame for a tab you have switched away from, or one that was in
-        // flight when pixel mode was left, is answered and discarded.
-        if !self.shows_pixel(self.focused()) || self.focused_id() != id {
-            return;
-        }
-        if self.graphics {
-            // M5's path: the bytes never leave base64.
-            self.generations += 1;
-            self.picture = Some(Picture::Graphics(Image {
-                generation: self.generations,
-                payload: std::sync::Arc::new(frame.data),
-                area: CellRect::of(self.vp.grid(), self.vp.origin_row()),
-            }));
-            return;
-        }
-
-        // Half-block has to look inside. Decoded here rather than in
-        // `compose`, which runs for every hint label, mode change and
-        // statusline update, and here rather than in a spawned task,
-        // because a frame arrives on the CDP arm of the loop and never as
-        // a job. A few thousand pixels against a 33ms pacing interval.
-        let grid = self.vp.grid();
-        let decoded = wwt_png::decode_base64(&frame.data).ok().and_then(|png| {
-            Samples::resampled(png.width, png.height, &png.pixels, grid.cols, grid.rows * 2)
-        });
-        match decoded {
-            Some(samples) => self.picture = Some(Picture::Blocks(samples)),
-            // The frame you are looking at stands. It has already been
-            // acked above, which is what keeps the screencast running.
-            None => self.notice("that picture could not be read"),
-        }
     }
 
     fn on_key(&mut self, key: KeyEvent, effects: &mut Vec<Effect>) {
@@ -946,9 +840,7 @@ impl Session {
             Action::Quit => {
                 // Stop before quitting, so the browser is not left painting
                 // for a terminal that has gone.
-                if self.shows_pixel(self.focused()) {
-                    effects.push(Effect::StopScreencast(self.focused_id()));
-                }
+                Self::emit_presentation_requests(self.pixel.stop(), effects);
                 effects.push(Effect::Quit);
             }
             Action::TogglePixel
@@ -965,7 +857,7 @@ impl Session {
                 }
                 self.set_pixel(true, effects);
             }
-            Action::TogglePixel => self.set_pixel(!self.pixel, effects),
+            Action::TogglePixel => self.set_pixel(!self.pixel.enabled(), effects),
             Action::ToggleReader => {
                 let on = !(self.focused().reader.wanted || self.focused().reader.active);
                 self.set_reader(on, effects);
@@ -1115,7 +1007,9 @@ impl Session {
         match action {
             Action::Scroll(_) | Action::Hints if self.focused().reader.active => false,
             Action::TogglePixel => {
-                self.focused().reader.wanted || self.focused().reader.active || !self.pixel
+                self.focused().reader.wanted
+                    || self.focused().reader.active
+                    || !self.pixel.enabled()
             }
             _ => matches!(
                 action,
@@ -1265,7 +1159,7 @@ impl Session {
     fn read_demand(&self, id: TabId) -> ReadDemand {
         ReadDemand {
             focused: self.focused_id() == id,
-            pixel: self.pixel,
+            pixel: self.pixel.enabled(),
             columns: self.grid.cols,
             rows: self.vp.grid().rows,
         }
@@ -1291,8 +1185,8 @@ impl Session {
         if outcome.save {
             effects.push(Effect::Save(self.snapshot()));
         }
-        if outcome.reader_became_active && self.pixel && self.focused_id() == id {
-            effects.push(Effect::StopScreencast(id));
+        if outcome.reader_became_active && self.focused_id() == id {
+            self.reconcile_pixels(effects);
         }
         if let Some(request) = outcome.next {
             Self::emit_read_request(id, request, effects);
@@ -1451,22 +1345,11 @@ impl Session {
             effects.push(Effect::SetViewport(tab.id, self.vp));
         }
 
-        // Whatever picture is still up covers the page area it has now, or
-        // the placeholders would address a placement of the wrong shape
-        // until the next frame lands. A new generation with it, because the
-        // renderer diffs on that and this image has to be placed again.
-        // Half-block has no placement to correct: its cells are repainted
-        // from whatever samples are in hand, and a grid the old picture is
-        // too small for leaves the new edge blank until the next frame.
-        if let Some(Picture::Graphics(image)) = &mut self.picture {
-            self.generations += 1;
-            image.generation = self.generations;
-            image.area = CellRect::of(self.vp.grid(), self.vp.origin_row());
-        }
         // The same tab, restarted at the new size: a screencast is started
         // with a viewport and does not learn about a later one.
-        let focused = self.focused_id();
-        self.follow_focus(Some(focused), effects);
+        let focused = self.focused_page();
+        let requests = self.pixel.restart(focused, self.vp);
+        Self::emit_presentation_requests(requests, effects);
     }
 
     fn on_job(&mut self, job: Job, effects: &mut Vec<Effect>) {
@@ -1571,8 +1454,8 @@ impl Session {
                     // The moment the picture can follow the focus here. It
                     // could not when the tab was made, because there was no
                     // page for `Core` to ask; nothing was left running to
-                    // stop, because `leave_for_a_new_tab` did that then.
-                    self.follow_focus(None, effects);
+                    // stop, because reconciliation did that then.
+                    self.reconcile_pixels(effects);
                 }
                 // The page is already at the offset it was restored to;
                 // `Effect::OpenTab` carried it, so this reads what is there.
@@ -1622,11 +1505,11 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::Source;
+    use crate::effect::{FrameSize, Source};
     use crate::event::Failure;
     use crossterm::event::{KeyCode, KeyModifiers};
     use wwt_frame::{Caret, CssRect, Rgb, Style, TextRun};
-    use wwt_page::{Extraction, ReaderExtraction, Status};
+    use wwt_page::{Extraction, ReaderExtraction, ScreencastFrame, Status};
     use wwt_reader::{Block, BlockKind, Document, Layout, Link, LinkId, Span};
 
     const GRID: GridSize = GridSize { cols: 80, rows: 24 };
@@ -1880,9 +1763,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.wanted);
 
         session.on(Event::Done(Job::Reader(
@@ -1891,7 +1780,7 @@ mod tests {
         )));
 
         assert!(!session.focused().reader.active);
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
     }
 
     #[test]
@@ -2359,7 +2248,7 @@ mod tests {
         assert_eq!(session.on(key('p')), vec![Effect::Relaunch]);
         assert!(session.focused().reader.active);
         assert!(session.focused().reader.wanted);
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(session.compose().row_text(1).contains("reader text"));
     }
 
@@ -2434,9 +2323,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
         assert!(!session.focused().reader.wanted);
         assert_eq!(session.focused().reader.document, document);
@@ -4062,9 +3957,16 @@ mod tests {
         session.set_graphics(false);
 
         let grid = page_viewport(GRID, CELL).grid();
+        let effects = session.on(key('p'));
         assert_eq!(
-            session.frame_size(),
-            FrameSize { width: u32::from(grid.cols) * 2, height: u32::from(grid.rows) * 4 }
+            effects,
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: u32::from(grid.cols) * 2,
+                    height: u32::from(grid.rows) * 4,
+                },
+            )]
         );
     }
 
@@ -4072,7 +3974,7 @@ mod tests {
     fn p_turns_pixel_mode_on_and_asks_for_pictures() {
         let mut session = ready_with_graphics();
         let effects = session.on(key('p'));
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(matches!(effects.as_slice(), [Effect::StartScreencast(..)]));
     }
 
@@ -4081,7 +3983,7 @@ mod tests {
         let mut session = ready_with_graphics();
         session.on(key('p'));
         let effects = session.on(key('p'));
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(
             effects.contains(&Effect::StopScreencast(tab0())),
             "the pictures stop: {effects:?}"
@@ -4139,9 +4041,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
         assert_eq!(
             session.on(key('q')),
@@ -4158,9 +4066,15 @@ mod tests {
 
         assert_eq!(
             session.on(key('p')),
-            vec![Effect::StartScreencast(tab0(), session.frame_size())]
+            vec![Effect::StartScreencast(
+                tab0(),
+                FrameSize {
+                    width: session.vp.css_width(),
+                    height: session.vp.css_height(),
+                },
+            )]
         );
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
         assert!(!session.focused().reader.active);
     }
 
@@ -4325,7 +4239,7 @@ mod tests {
         session.on(key('p'));
         typed(&mut session, ":set pixel off");
         session.on(code(KeyCode::Enter));
-        assert!(!session.pixel);
+        assert!(!session.pixel.enabled());
         assert!(
             session.compose().image().is_none(),
             "and drops the picture"
@@ -4339,7 +4253,7 @@ mod tests {
         let mut session = ready();
         typed(&mut session, ":set pixel on");
         session.on(code(KeyCode::Enter));
-        assert!(session.pixel);
+        assert!(session.pixel.enabled());
     }
 
     #[test]

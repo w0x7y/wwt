@@ -16,6 +16,7 @@ pub mod keys;
 pub mod keymap;
 mod page_view;
 mod persistence;
+mod pixel;
 pub mod session;
 pub mod store;
 pub mod tab;
