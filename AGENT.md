@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENT.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -12,15 +12,33 @@ The goal is to be a first alternative to qutebrowser rather than a text-mode
 curiosity, so **latency is a feature, not a finishing touch**. Read the performance
 section below before touching the extraction path, which is what a scroll costs.
 
-Currently at **M7** (hardening). Milestones M1–M8 are defined in
+Currently at **M8** (reader mode). Milestones M1–M8 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
+
+## Project status
+
+M1 through M8 are implemented. The remaining work is release validation and
+future product scope, not an unfinished milestone.
+
+- `cargo test --workspace` passes: 681 tests are listed, with one live
+  YouTube/Twitch diagnostic ignored by default.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- The current release gate still includes `cargo fmt --all -- --check`, a
+  manual pass in real terminals, and reconciliation of stale plan checkboxes.
+- `TODO.md` is the optional product backlog. The next useful features are
+  find-in-page, bookmarks/history, and downloads; themes and extensibility can
+  follow.
+- M8 has no blocking design questions. Its follow-up questions are reader
+  quality on real sites, same-tab fragment behavior, and session-file version
+  compatibility.
 
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 509 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 681 listed tests; integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
+    cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
 
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
@@ -32,6 +50,8 @@ Currently at **M7** (hardening). Milestones M1–M8 are defined in
     cargo test -p wwt --lib measure_halfblock_frame -- --nocapture               # a degraded picture
     cargo test -p wwt-page --test snapshot measure_snapshot -- --nocapture       # a degraded read
     cargo test -p wwt-page --test extraction measure_status -- --nocapture       # what the chrome alone costs
+    cargo test -p wwt-page --test reader measure_reader_extract --release -- --nocapture  # semantic extraction
+    cargo test -p wwt-reader measure_reader_layout --release -- --nocapture      # pure narrow and wide reflow
     cargo test -p wwt --test supervisor -- --nocapture                           # a browser killed and replaced
 
 `WWT_CHROMIUM` overrides browser discovery (otherwise: `chromium`,
@@ -126,6 +146,7 @@ Consequences to preserve when adding features:
 | Crate | Responsibility | Hard rule |
 |---|---|---|
 | `wwt-frame` | Coordinate math, cells, `Frame`, painting | **No I/O, no dependencies.** Non-negotiable. |
+| `wwt-reader` | Semantic reader data, width-specific reflow, source anchors, link ranges, painting | **No I/O; depends on `wwt-frame` only.** |
 | `wwt-png` | Base64, inflate, the PNG container, unfilter | **Decodes what Chromium sends and refuses the rest.** No dependencies, and it exists so that none is added. |
 | `wwt-cdp` | Chromium launch, websocket, call/response correlation, event broadcast | Hand-rolled on purpose; see spec §4. |
 | `wwt-page` | One page: bootstrap script, navigate/scroll/history, `extract()` | `eval` is behind `test-support`. |
@@ -133,8 +154,8 @@ Consequences to preserve when adding features:
 | `wwt-ui` | Modes, chrome, `:` commands, hint labels | Depends on `wwt-frame` only. No pages, no CDP, no terminal. |
 | `wwt` | Binary: the `Session` state machine, the core loop, keymap, key table, input pump, `config.rs` | |
 
-`Frame` is the single output type every rendering mode produces, so text mode, and
-later pixel and reader modes, cannot diverge in how they reach the screen.
+`Frame` is the single output type every view produces, so text, pixel and reader
+cannot diverge in how they reach the screen.
 
 ## The injected script
 
@@ -277,9 +298,11 @@ stale after a crash.
 
 **Deciding to save is a rule, writing is machinery.** `Session` emits
 `Effect::Save` when the tab set, the focus, or a page's URL, title or scroll
-offset changes; `Core` coalesces on a timer and writes temp-then-rename. An
-extraction of a page that did not move is not a write, and whether it moved is
-decided against what the tab stores rather than against what the extraction
+offset changes; `Core` coalesces on a timer and sends snapshots to one FIFO
+writer, which writes temp-then-rename. Login and quit bypass the debounce and
+wait for their exact snapshot, behind every earlier write, before continuing.
+An extraction of a page that did not move is not a write, and whether it moved
+is decided against what the tab stores rather than against what the extraction
 carried: an error page's URL is deliberately not kept, so comparing with the
 extraction would write on every dirty signal.
 
@@ -343,6 +366,39 @@ down, losing the position being restored.
 Eviction of background targets past a limit, and the lazy restore that shares its
 machinery, were deferred to M7 and have landed. They introduce the one state this
 design did not have, a tab that exists without a target; see **Hardening**.
+
+## Reader mode
+
+`r` puts the focused tab's semantic reader document in front. Reader is a per-tab
+view, not a fifth `wwt_ui::Mode`: normal, insert, hint and command still answer what
+keys mean, while reader answers which document normal mode is looking at.
+
+**The page stands still.** Reader scroll changes `top_row` in the cached layout and
+never emits page scroll or save effects. The live page keeps its exact `scroll_y`, so
+leaving reader is a repaint rather than a scroll-back round trip. `i`, `p` and every
+navigation leave reader before touching the page.
+
+**Meaning crosses the browser boundary; cells do not.** `Page::reader()` returns a
+`Document` of blocks, spans and URL destinations with no CSS geometry. The pure
+`wwt-reader` crate turns that document into width-specific rows, source anchors and
+link ranges. A resize records the source at the old top row and lays the same source
+at or immediately before the new top, without another reader query.
+
+**Reader interactions stay in reader geometry.** Hint labels start at direct cell
+positions from visible link ranges, and a left click is hit-tested against those same
+ranges. Activation follows the stored destination instead of fabricating a CSS click.
+No reader mouse or hint action goes through `Viewport`.
+
+**Reader state is memory, not session data.** The document, layout, local row and
+selected view follow their tab through switches, eviction and Chromium replacement.
+They are absent from `Snapshot`, so a cold start opens the real page at its saved
+offset. A failed first read keeps the real page; a failed refresh keeps the old reader
+layout.
+
+**Reader owns presentation over pixel.** The global pixel preference remains true
+behind reader, but an active reader suppresses its screencast and composes no image.
+Leaving reader resumes pixels when that preference was on. `[reader]` and `[pixel]`
+therefore never describe the same visible frame.
 
 ## Pixel mode
 
@@ -545,6 +601,18 @@ taken, because its url still names where it is leaving.
 kill_on_drop and the profile directory is the lock, so relaunching while our own
 dying browser still holds it is the one failure this path would inflict on
 itself, and it would present as an inexplicable fall back to a private session.
+
+**Login is a browser handoff, not page automation.** `:login` waits for its
+session snapshot to reach disk, detaches every tab, shuts down headless Chromium
+and waits for the profile lock to be released. It then starts ordinary visible
+Chromium on the same profile without headless, CDP or remote-debugging flags.
+Closing that window enters the existing relaunch path, which restores the
+focused tab and leaves the others detached for lazy restore.
+
+**Browser generations fence off stale work.** Every browser replacement
+advances `BrowserGeneration`. Page jobs, target opens and CDP events carry the
+generation that produced them, and `Core` drops answers from an old browser
+before they can change the current page maps or session.
 
 **The CDP arm is guarded off once it has answered `None`.** A closed receiver
 answers `None` immediately and forever, so an unguarded arm spins the loop at one

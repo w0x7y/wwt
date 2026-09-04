@@ -15,12 +15,30 @@ section below before touching the extraction path, which is what a scroll costs.
 Currently at **M8** (reader mode). Milestones M1–M8 are defined in
 `docs/superpowers/specs/2026-08-19-wwt-design.md` §11.
 
+## Project status
+
+M1 through M8 are implemented. The remaining work is release validation and
+future product scope, not an unfinished milestone.
+
+- `cargo test --workspace` passes: 681 tests are listed, with one live
+  YouTube/Twitch diagnostic ignored by default.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- The current release gate still includes `cargo fmt --all -- --check`, a
+  manual pass in real terminals, and reconciliation of stale plan checkboxes.
+- `TODO.md` is the optional product backlog. The next useful features are
+  find-in-page, bookmarks/history, and downloads; themes and extensibility can
+  follow.
+- M8 has no blocking design questions. Its follow-up questions are reader
+  quality on real sites, same-tab fragment behavior, and session-file version
+  compatibility.
+
 ## Commands
 
     cargo run -p wwt -- example.com              # run it (needs a real terminal)
-    cargo test --workspace                       # 639 tests; the integration ones launch Chromium
+    cargo test --workspace                       # 681 listed tests; integration ones launch Chromium
     cargo test -p wwt-frame                      # pure logic, no browser needed
     cargo test -p wwt-page --test extraction extracts_the_visible_text   # one test by name
+    cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings   # must be clean, per task, not per plan
 
     UPDATE_SNAPSHOTS=1 cargo test -p wwt-page --test extraction   # regenerate the ASCII snapshot
